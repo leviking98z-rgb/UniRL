@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from unirl.config.require import require
+import dataclasses
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.base import BaseRolloutEngine
 from unirl.rollout.engine.sglang.adapters import get_adapter
@@ -38,6 +39,15 @@ from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class _PartialResult:
+    """Accumulated raw candidate across partial-rollout rounds (build_response reads these attrs)."""
+    text: str
+    token_ids: list
+    logprobs: list
+    finish_reason: str
 
 
 class SGLangRolloutEngine(BaseRolloutEngine):
@@ -145,6 +155,54 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # Generation
     # ------------------------------------------------------------------ #
 
+    def _generate_partial(self, prepared, budget: int, max_total: int):
+        """Budget-resume generation. Each round generates <=budget new tokens for
+        the still-active sequences; those that finish (stop/eos) or hit max_total
+        drop out (their KV frees). Returns one accumulated _PartialResult per wire
+        entry. Per-token logprobs are recorded each round and concatenated, so the
+        behaviour-policy logprob stays correct across resumes (no replay needed)."""
+        wire = prepared.wire
+        n = len(wire)
+        base = [list(w.get("input_ids") or []) for w in wire]
+        tok = [[] for _ in range(n)]
+        lp = [[] for _ in range(n)]
+        fin = [None] * n
+        active = list(range(n))
+        rounds = 0
+        while active:
+            rounds += 1
+            sub = []
+            for i in active:
+                p = dict(wire[i])
+                p["input_ids"] = base[i] + tok[i]
+                sp = dict(p.get("sampling_params") or {})
+                sp["max_new_tokens"] = max(1, min(budget, max_total - len(tok[i])))
+                p["sampling_params"] = sp
+                sub.append(p)
+            sub_raw = self._backend.generate(sub)
+            nxt = []
+            for j, i in enumerate(active):
+                r = sub_raw[j]
+                ids = list(getattr(r, "token_ids", None) or [])
+                tok[i] += ids
+                lp[i] += list(getattr(r, "logprobs", None) or [])
+                fr = getattr(r, "finish_reason", None)
+                if fr in ("stop", "eos", "matched_stop") or len(tok[i]) >= max_total or not ids:
+                    fin[i] = fr or "length"
+                else:
+                    nxt.append(i)
+            active = nxt
+        logger.info(
+            "partial-rollout: %d seqs in %d rounds (budget=%d, max_total=%d); first lens=%s",
+            n, rounds, budget, max_total, [len(t) for t in tok][:8],
+        )
+        detok = getattr(self.adapter, "_tokenizer", None)
+        out = []
+        for i in range(n):
+            text = detok.decode(tok[i]) if detok is not None and tok[i] else ""
+            out.append(_PartialResult(text=text, token_ids=tok[i], logprobs=lp[i], finish_reason=fin[i] or "length"))
+        return out
+
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, req: RolloutReq) -> RolloutResp:
         """Run text generation against the engine and return a typed response."""
@@ -161,7 +219,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if active_adapter:
             for payload in prepared.wire:
                 payload["lora_path"] = active_adapter
-        raw = self._backend.generate(prepared.wire)
+        budget = int(getattr(self.cfg, "partial_budget", 0) or 0)
+        if budget > 0:
+            max_total = int(sampling.block.get("max_new_tokens", 0)) or 1 << 30
+            raw = self._generate_partial(prepared, budget, max_total)
+        else:
+            raw = self._backend.generate(prepared.wire)
         return self.adapter.build_response(req, prepared, raw)
 
     # ------------------------------------------------------------------ #

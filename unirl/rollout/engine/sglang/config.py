@@ -73,6 +73,10 @@ class SGLangEngineConfig(BaseEngineConfig):
     # rollout router (HTTP backend only; native = single in-process instance):
     # none = static per-rank DP_SCATTER; cache_aware = radix+load; load = power_of_two
     router_policy: str = "none"
+    # partial rollout: generate <=partial_budget tokens per engine round;
+    # unfinished sequences resume next round (input_ids=prompt+gen-so-far).
+    # 0 = off (one-shot generation). Bounds the straggler, frees finished KV.
+    partial_budget: int = 0
 
     # --- Concurrency / async ---
     concurrency: int = 8
