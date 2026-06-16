@@ -88,3 +88,37 @@ bound, realised only under memory pressure.
 to `unirl.rollout.engine.sglang.engine.SGLangRolloutEngine` /
 `SGLangEngineConfig`; the v2 HTTP backend serves the NCCL distributed
 weight-update endpoints the disaggregated `NCCLWeightSync` drives.
+
+## Follow-up: where the resume cost actually comes from (measured)
+
+A controlled probe (standalone SGLang server, no weight sync, sequential
+re-submit of `prompt + generated-so-far`) shows the resume is **nearly free** when
+the radix/prefix cache survives:
+
+```
+resume round 1: prefix_in=351  cached-token=350  new-token=1
+resume round 2: prefix_in=607  cached-token=606  new-token=1
+resume round 3: prefix_in=863  cached-token=862  new-token=1
+```
+
+i.e. the engine re-prefills ~1 token, not the whole prefix — radix matches the
+already-computed prefix. So **re-submission is not inherently expensive**; the
+earlier +15% was an artifact, not the mechanism.
+
+The artifact has a concrete cause: the rollout engine **flushes the KV/radix cache
+by design** — `SGLangRolloutEngine.sleep()` flushes before releasing memory, and
+every weight sync flushes (`flush_cache=True`). With `weight_sync_interval=1` the
+cache is wiped each step, so any resume that spans a sleep/sync boundary re-prefills
+from scratch (observed `cached-token=0` across all engine-path resumes). KV headroom
+also matters: at `mem_fraction_static=0.3` (colocate default) the pool evicts under
+concurrency.
+
+Measured net overhead of `partial_budget=256` vs one-shot, same hardware:
+- async (`mem_fraction=0.8`, `weight_sync_interval=1`): rollout time +15%
+- colocate (`mem_fraction=0.6`): rollout time +5.8% (66.2s -> 70.0s), reward parity
+
+So the cost is **modest and headroom/flush-dependent**, not catastrophic. The path
+to slime/veRL-level near-zero overhead is to keep a sequence's resume rounds inside
+a single non-flushed, KV-retained window — i.e. interrupt only the straggler tail at
+the sync boundary (slime `--partial-rollout`) rather than chopping every sequence
+into budget rounds, and avoid flushing the radix cache between a sequence's resumes.
