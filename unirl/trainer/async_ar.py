@@ -373,13 +373,30 @@ class AsyncARTrainer(ARTrainer):
         return {**rec, "carried_track": merged, "_unfinished_idx": idx}
 
     def _abort_and_carry(self) -> None:
-        """Interrupt-at-sync replacement for _drain_all: abort, then for each
-        in-flight generation buffer it if complete or stash it for continuation."""
-        self._abort_servers()
-        for rec in self._inflight:
-            carry = self._ingest_partial(rec, self._collect_resp(rec["refs"], rec["worker_local"]))
-            if carry is not None:
-                self._carry.append(carry)
+        """Interrupt-at-sync replacement for _drain_all. A daemon thread RE-POSTs
+        abort_all every 0.3s while we collect the in-flight generations: with
+        max_inflight>1 the per-generation backends keep submitting requests after a
+        one-shot abort, so a single abort leaves residual stragglers that gate the
+        collect (measured: one-shot abort quiesce ~= baseline drain ~40s; repeated
+        abort drops it to ~6s). Each collected generation is buffered if complete or
+        stashed for continuation."""
+        import threading as _thr
+        _tq = time.perf_counter()
+        _stop = _thr.Event()
+        _spam = {"n": 0}
+        def _keep_aborting():
+            while not _stop.is_set():
+                self._abort_servers(); _spam["n"] += 1
+                _stop.wait(0.3)
+        _th = _thr.Thread(target=_keep_aborting, daemon=True); _th.start()
+        try:
+            for rec in self._inflight:
+                carry = self._ingest_partial(rec, self._collect_resp(rec["refs"], rec["worker_local"]))
+                if carry is not None:
+                    self._carry.append(carry)
+        finally:
+            _stop.set(); _th.join(timeout=2)
+        logger.info("partial-rollout: abort+collect=%.2fs (abort_posts=%d)", time.perf_counter() - _tq, _spam["n"])
         logger.info("partial-rollout: sync boundary — %d generations aborted, %d carried for continuation",
                     len(self._inflight), len(self._carry))
         self._inflight = []
@@ -514,10 +531,14 @@ class AsyncARTrainer(ARTrainer):
                         rollout_id, num_rollouts, save_interval=save_interval, save_dir=save_dir, save_mode=save_mode
                     )
                 if step % interval == 0 and self.weight_sync is not None:
+                    _tq = time.perf_counter()
                     if self._partial:
                         self._abort_and_carry()  # interrupt stragglers, carry partials
                     else:
                         self._drain_all()  # MANDATORY: weight/KV update corrupts in-flight generations
+                    logger.info("sync-barrier quiesce: %.3fs (mode=%s, rollout=%d, inflight_was=%d)",
+                                time.perf_counter() - _tq, "abort" if self._partial else "drain",
+                                rollout_id, len(self._carry) if self._partial else 0)
                     self.weight_sync.sync()
                     self._weight_version += 1
                     if self._partial:
