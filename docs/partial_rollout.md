@@ -122,3 +122,39 @@ to slime/veRL-level near-zero overhead is to keep a sequence's resume rounds ins
 a single non-flushed, KV-retained window — i.e. interrupt only the straggler tail at
 the sync boundary (slime `--partial-rollout`) rather than chopping every sequence
 into budget rounds, and avoid flushing the radix cache between a sequence's resumes.
+
+## Implemented: slime-style interrupt-at-sync + carry (AsyncARTrainer)
+
+Enabled with `+partial_rollout=true` on the async recipe. Instead of the
+pre-sync `_drain_all()` blocking on the straggler, the trainer:
+
+1. **Aborts** all in-flight generations — the driver POSTs `/abort_request`
+   directly to each SRT server (the ray engine actor is busy inside generate),
+   so each pending `generate()` returns its partial tokens+logprobs with
+   `finish_reason=abort`.
+2. **Carries** any generation that has interrupted samples: its accumulated
+   per-sample tokens/logprobs/text are hydrated to concrete tensors (so they
+   survive the sync) and stashed whole (whole generations → GRPO groups never
+   split). Complete generations score+buffer as usual.
+3. Weight sync runs (no straggler wait).
+4. **Continues** each carried generation under the new weights: a continuation
+   req (`input_ids = prompt + tokens-so-far`, remaining-budget clamped, padded
+   to the rollout DP size for DP_SCATTER) regenerates only the unfinished
+   samples; `merge_continuation` folds the new tokens back. A sequence may span
+   several weight versions; off-policy is absorbed by `old_logp_source=rollout`
+   (recorded behaviour logprobs), exactly as the staleness buffer already does.
+
+Pieces: `finish_reason` plumbed into `RolloutTrack` (adapter `build_response`);
+`RolloutReq.continuation_token_ids` + `build_inputs` append/clamp; pure
+carry/merge helpers in `unirl/trainer/_partial_rollout.py` (unit-tested);
+orchestration (`_abort_servers`/`_ingest_partial`/`_abort_and_carry`/
+`_relaunch_carry`) in `AsyncARTrainer`, guarded by `partial_rollout` (default
+off → byte-identical to the existing async path).
+
+### e2e validation (Qwen3-4B, DAPO, 8xH20, train_fraction=0.5, max_inflight=3, weight_sync_interval=1, FORCE_IGNORE_EOS)
+EXIT=0 over 6 rollouts; **6 sync boundaries** exercised carry+relaunch across
+weight versions (e.g. "1 carried, relaunched under weight v1/v2"); `reward_mean`
+≈0.125 (DRPO early baseline), `ratio_mean`≈0.9996 (off-policy carry does NOT
+break the importance ratio). Helper logic covered by GPU-free unit tests
+(concat/split/balance_shards preserve finish_reasons; carry/merge/complete +
+logprob alignment).
