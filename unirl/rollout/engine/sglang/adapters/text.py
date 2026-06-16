@@ -76,10 +76,18 @@ class TextLMAdapter(ModelAdapter):
 
         wire: List[Dict[str, Any]] = []
         prompt_token_ids: List[List[int]] = []
-        for prompt in prompts:
+        cont = list(getattr(req, "continuation_token_ids", None) or [])
+        for _idx, prompt in enumerate(prompts):
             payload = self.base_payload(sampling)
             if use_template:
                 ids = self.apply_chat_template(prompt, sampling.system_instruction)
+                if _idx < len(cont) and cont[_idx]:
+                    ids = list(ids) + list(cont[_idx])
+                    # remaining-budget clamp: total (prompt-gen + new) stays within
+                    # the configured max_new_tokens across continuation rounds.
+                    _sp = payload.get("sampling_params")
+                    if isinstance(_sp, dict) and _sp.get("max_new_tokens") is not None:
+                        _sp["max_new_tokens"] = max(1, int(_sp["max_new_tokens"]) - len(cont[_idx]))
                 payload["input_ids"] = ids
             else:
                 # Raw-text completion mode — encode the raw prompt so the

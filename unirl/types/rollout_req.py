@@ -76,6 +76,10 @@ class RolloutReq(Batch):
     # but the driver fixes those per-batch at request construction). Hence ``shared_field``.
     sigmas: Optional[torch.Tensor] = shared_field(default=None)
     metadata: List[Optional[Dict[str, Any]]] = concat_field(default_factory=list)
+    # partial-rollout continuation: per-sample already-generated token ids to
+    # APPEND after the prompt (input_ids = prompt + continuation). Empty/None =
+    # fresh generation. Requires samples_pre_expanded (one payload per sample).
+    continuation_token_ids: List[Optional[List[int]]] = concat_field(default_factory=list)
     # Driver-authored x_T RECIPE: per-sample INITIAL-noise group ids (rollout-keyed
     # on the STABLE sample id, e.g. "r5:prompt:42:sample:3") + the latent shape.
     # Each engine regenerates the same x_T via generate_shared_noise(CPU-fp32) keyed
