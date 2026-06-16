@@ -158,3 +158,36 @@ weight versions (e.g. "1 carried, relaunched under weight v1/v2"); `reward_mean`
 break the importance ratio). Helper logic covered by GPU-free unit tests
 (concat/split/balance_shards preserve finish_reasons; carry/merge/complete +
 logprob alignment).
+
+## Sync-barrier saving + the repeated-abort optimization (measured)
+
+With partial rollout the weight-sync barrier no longer drains the straggler — it
+aborts and carries. But a naive ONE-SHOT abort does **not** save time: with
+`max_inflight>1`, each in-flight generation's HTTP backend (asyncio.gather,
+`concurrency`) keeps submitting its queued requests *after* the abort fires, so
+those late arrivals run to completion and gate the collect (`ray.get` waits for
+every per-worker generate). Measured: one-shot-abort quiesce ≈ baseline drain
+(~40s); `abort_post=0.1s` but `collect=34–92s`; the SRT `#running-req` drops
+16→1–3 on abort (it does interrupt running decode) but the residual late-submitted
+requests dominate.
+
+**Optimization** (commit `c560217`): re-POST `abort_all` every 0.3s from a daemon
+thread for the whole duration of the collect, catching requests as the backends
+submit them. This drops the barrier quiesce to ~7s.
+
+### Measured impact (Qwen3-4B, DAPO, 8×H20, train_fraction=0.5, max_inflight=3, weight_sync_interval=1, natural heavy-tail generation, 50 rollouts each)
+
+| | baseline (drain) | partial (repeated-abort) |
+|---|---|---|
+| reward mean (50 rollouts) | 0.211 | 0.208 |
+| reward windows of 10 | 0.153 → 0.222 | 0.136 → 0.292 |
+| sync-barrier quiesce | 37.3s | **7.2s** (−81%) |
+| per-rollout wall-clock | 47.0s | **17.7s** (**2.65× throughput**) |
+| ratio_mean | ~1.0 | 0.998–1.0005 |
+
+**Reward converges identically** (0.211 vs 0.208; both curves rise and track) — the
+off-policy carry costs nothing here — while throughput is **2.65×**. Caveat: the
+speedup is maximal at `weight_sync_interval=1` (a barrier every rollout); it scales
+down as syncs become less frequent (fewer barriers to save). sglang's
+`abort_request` does interrupt running decode (`to_finish=FINISH_ABORT`), so the
+saving is real, not a generation-length artifact.
