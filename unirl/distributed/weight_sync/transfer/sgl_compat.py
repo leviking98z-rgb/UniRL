@@ -307,3 +307,9 @@ class SafeUnpickler(pickle.Unpickler):
 
         # Block everything else. (Potential attack surface)
         raise RuntimeError(f"Blocked unsafe class loading ({module}.{name}), to prevent exploitation of CVE-2025-10164")
+
+
+# auto-apply on import: spawned sglang scheduler/tp_worker imports this module
+# while unpickling weight tensors and needs _rebuild_cuda_tensor_original set
+# (monkey_patch is idempotent — guarded by hasattr).
+monkey_patch_torch_reductions()
