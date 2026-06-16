@@ -70,6 +70,9 @@ class SGLangEngineConfig(BaseEngineConfig):
     # in-process sglang.Engine (no HTTP hop; the schedulers are still
     # subprocesses).
     backend: str = "http"
+    # rollout router (HTTP backend only; native = single in-process instance):
+    # none = static per-rank DP_SCATTER; cache_aware = radix+load; load = power_of_two
+    router_policy: str = "none"
 
     # --- Concurrency / async ---
     concurrency: int = 8

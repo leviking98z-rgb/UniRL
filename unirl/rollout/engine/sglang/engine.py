@@ -170,6 +170,20 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # ------------------------------------------------------------------ #
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def get_server_url(self) -> str:
+        """This engine's own SRT server URL for sgl-router registration (HTTP
+        backend only; empty string for native / no http server)."""
+        be = self._backend
+        return be.server_url() if hasattr(be, "server_url") else ""
+
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
+    def install_router(self, router_url: str) -> None:
+        """Point generate at the shared sgl-router instead of this server."""
+        be = self._backend
+        if hasattr(be, "set_router"):
+            be.set_router(router_url)
+
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(self, tags: Optional[List[str]] = None) -> None:
         """Release GPU memory (offload).
 

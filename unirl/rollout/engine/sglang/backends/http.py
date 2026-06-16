@@ -216,6 +216,7 @@ class HTTPBackend:
     ) -> None:
         self._server_process: Optional[multiprocessing.Process] = server_process
         self._base_url = base_url
+        self._target_url = base_url  # POST target; set_router() points it at the sgl-router
         self._concurrency = int(concurrency)
         self._rt = runtime
         self._client: Any = None
@@ -225,6 +226,14 @@ class HTTPBackend:
                 trust_env=False,
             )
         self._logged_first_response = False
+
+    def server_url(self) -> str:
+        """This backend's own SRT server URL (for router worker registration)."""
+        return self._base_url
+
+    def set_router(self, url: str) -> None:
+        """Route generate through url (the sgl-router) instead of this server."""
+        self._target_url = url
 
     # ------------------------------------------------------------------ #
     # Boot — the only place the sglang import / spawn / env quarantine live
@@ -366,7 +375,7 @@ class HTTPBackend:
         max_retries: int = 60,
     ) -> Any:
         """Async POST with retry. Mirrors slime/utils/http_utils.py:165-198."""
-        url = f"{self._base_url}{path}"
+        url = f"{self._target_url}{path}"
         for attempt in range(max_retries):
             response = None
             try:
