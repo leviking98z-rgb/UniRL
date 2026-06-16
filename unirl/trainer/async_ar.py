@@ -46,7 +46,7 @@ from unirl.distributed.tensor import WorkerLocalTransport, hydrate
 from unirl.distributed.tensor.pytree import infer_batch_size
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
-from unirl.trainer._partial_rollout import build_continuation_req, merge_continuation, unfinished_indices
+from unirl.trainer._partial_rollout import build_continuation_req, concretize, merge_continuation, unfinished_indices
 from unirl.trainer.base import BaseTrainer
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
@@ -327,7 +327,7 @@ class AsyncARTrainer(ARTrainer):
                     carry = self._ingest_partial(rec, resp)
                     if carry is not None:
                         # incomplete outside a sync (an aborted sample) — continue now
-                        cont_req = build_continuation_req(carry["orig_req"], carry["carried_track"], carry["_unfinished_idx"])
+                        cont_req = build_continuation_req(carry["orig_req"], carry["carried_track"], carry["_unfinished_idx"], dp_size=self._rollout_devices)
                         refs, wl = self._generate_async(cont_req)
                         still.append({**carry, "req": cont_req, "cont_idx": carry["_unfinished_idx"],
                                       "refs": refs, "worker_local": wl})
@@ -368,6 +368,8 @@ class AsyncARTrainer(ARTrainer):
             self._score_into_buffer({**rec, "req": rec["orig_req"]},
                                     RolloutResp(tracks={track_name: merged}))
             return None
+        if carried is None:
+            merged = concretize(merged)  # fresh raw track -> concrete so it survives the sync
         return {**rec, "carried_track": merged, "_unfinished_idx": idx}
 
     def _abort_and_carry(self) -> None:
@@ -386,7 +388,7 @@ class AsyncARTrainer(ARTrainer):
         """After a weight sync, continue each carried generation from its tokens-
         so-far (input_ids = prompt + generated; off-policy across this version)."""
         for rec in self._carry:
-            cont_req = build_continuation_req(rec["orig_req"], rec["carried_track"], rec["_unfinished_idx"])
+            cont_req = build_continuation_req(rec["orig_req"], rec["carried_track"], rec["_unfinished_idx"], dp_size=self._rollout_devices)
             refs, worker_local = self._generate_async(cont_req)
             self._inflight.append({**rec, "req": cont_req, "cont_idx": rec["_unfinished_idx"],
                                    "refs": refs, "worker_local": worker_local,
