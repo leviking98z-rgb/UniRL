@@ -106,6 +106,10 @@ class RolloutTrack(Batch):
     component_rewards: Optional[Dict[str, torch.Tensor]] = concat_field(default=None)
     advantages: Optional[torch.Tensor] = concat_field(default=None)
     status: Optional[torch.Tensor] = concat_field(default=None)
+    # per-sample rollout finish reason ("stop"/"length"/"abort"/...); set by the
+    # sglang adapter from RawResult.finish_reason. Enables partial-rollout carryover
+    # (the trainer tells finished groups from interrupted ones).
+    finish_reasons: Optional[List[str]] = concat_field(default=None)
 
     @property
     def batch_size(self) -> int:

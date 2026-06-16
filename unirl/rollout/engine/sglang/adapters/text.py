@@ -181,6 +181,7 @@ class TextLMAdapter(ModelAdapter):
                     sample_ids=sample_ids,
                     parent_ids=list(group_ids) if group_ids else None,
                     conditions=self.build_conditions(req, prepared, raw),
+                    finish_reasons=[str(r.finish_reason) for r in raw],
                     segment=self.build_segment(req, prepared, raw),
                     decoded=self.build_decoded(req, prepared, raw),
                 ),
