@@ -195,6 +195,15 @@ class AsyncARTrainer(ARTrainer):
                     "as a local sibling and cannot live cross-slab."
                 )
             self.rollout = remote(**rollout_parsed)
+            # sgl-router rollout LB (HTTP backend, multi-worker): point every engine at
+            # one router that load-balances by policy (none = static per-rank DP_SCATTER).
+            _rcfg = rollout_parsed.get("config")
+            if (_rcfg or {}).get("backend", "native") == "http" and (_rcfg or {}).get("router_policy", "none") != "none":
+                from unirl.rollout.engine.sglang.backends.router import launch_router, resolve_policy
+                _urls = [u for u in self.rollout.get_server_url() if u]
+                self._router_process, _rurl = launch_router(_urls, resolve_policy(_rcfg["router_policy"]))
+                self.rollout.install_router(_rurl)
+                logger.info("sgl-router installed at %s (policy=%s, %d workers)", _rurl, _rcfg["router_policy"], len(_urls))
 
         if self.weight_sync is not None:
             self._connect_separate(sync_cfg)
