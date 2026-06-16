@@ -203,6 +203,28 @@ def parse_generate_response(response: Any) -> List[_HTTPRawResult]:
 # ---------------------------------------------------------------------------
 
 
+def _launch_server_with_compat(server_args):
+    """Server-process entry: apply unirl CUDA-IPC weight-sync compat before
+    serving so colocate update_weights_from_tensor deserializes — (a) torch
+    reductions patch (sets _rebuild_cuda_tensor_original used by the modified
+    rebuild), (b) allow ``unirl.`` classes through sglang CVE-2025-10164
+    SafeUnpickler allowlist."""
+    try:
+        from unirl.distributed.weight_sync.transfer.sgl_compat import monkey_patch_torch_reductions
+        monkey_patch_torch_reductions()
+    except Exception:
+        pass
+    try:
+        from sglang.srt.utils import common as _sglc
+        _sglc.SafeUnpickler.ALLOWED_MODULE_PREFIXES = (
+            set(_sglc.SafeUnpickler.ALLOWED_MODULE_PREFIXES) | {"unirl."}
+        )
+    except Exception:
+        pass
+    from sglang.srt.entrypoints.http_server import launch_server
+    launch_server(server_args)
+
+
 class HTTPBackend:
     """The HTTP ``Backend`` impl over a spawned SGLang SRT server."""
 
@@ -303,7 +325,7 @@ class HTTPBackend:
         # happens cleanly.
         multiprocessing.set_start_method("spawn", force=True)
         server_args = rt["ServerArgs"](**server_kwargs)
-        process = multiprocessing.Process(target=rt["launch_server"], args=(server_args,))
+        process = multiprocessing.Process(target=_launch_server_with_compat, args=(server_args,))
         process.start()
 
         base_url = f"http://{advertise_host}:{server_kwargs['port']}"
