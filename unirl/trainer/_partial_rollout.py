@@ -21,7 +21,9 @@ from unirl.types.segments.text import TextSegment
 # A sequence is DONE only when the model chose to stop. 'length' (hit the
 # per-round new-token cap) and 'abort' (interrupted for a weight sync) both mean
 # 'continue next version'.
-FINISHED = frozenset({"stop", "eos", "matched_stop"})
+# Only an INTERRUPTED sequence is carried. "length" (hit max_new_tokens) is
+# truncated-done; "stop"/"eos" finished naturally. Only "abort" continues.
+CARRY_REASONS = frozenset({"abort"})
 
 
 def _per_sample(track: RolloutTrack):
@@ -35,7 +37,7 @@ def _per_sample(track: RolloutTrack):
 
 def unfinished_indices(track: RolloutTrack) -> List[int]:
     fr = track.finish_reasons or []
-    return [i for i, f in enumerate(fr) if str(f) not in FINISHED]
+    return [i for i, f in enumerate(fr) if str(f) in CARRY_REASONS]
 
 
 def is_complete(track: RolloutTrack) -> bool:

@@ -55,6 +55,7 @@ def main(cfg: DictConfig) -> None:
         train_fraction=float(cfg.get("train_fraction", 0.5)),
         max_inflight=int(cfg.get("max_inflight", 1)),
         buffer_max_staleness=cfg.get("buffer_max_staleness"),
+        partial_rollout=bool(cfg.get("partial_rollout", False)),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

@@ -46,6 +46,7 @@ from unirl.distributed.tensor import WorkerLocalTransport, hydrate
 from unirl.distributed.tensor.pytree import infer_batch_size
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
+from unirl.trainer._partial_rollout import build_continuation_req, merge_continuation, unfinished_indices
 from unirl.trainer.base import BaseTrainer
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
@@ -126,6 +127,7 @@ class AsyncARTrainer(ARTrainer):
         train_fraction: float = 0.5,
         max_inflight: int = 1,
         buffer_max_staleness: Optional[int] = None,
+        partial_rollout: bool = False,
     ) -> None:
         # Call BaseTrainer.__init__ directly: ARTrainer.__init__ opens the
         # colocate ``placement(fraction=1.0)`` block, which is exactly what we
@@ -150,6 +152,9 @@ class AsyncARTrainer(ARTrainer):
         self._max_inflight = max(1, int(max_inflight))
         self._buffer_max_staleness = buffer_max_staleness
         self._weight_version = 0  # driver-tracked policy version (# of weight syncs issued)
+        self._partial = bool(partial_rollout)  # slime-style interrupt-at-sync + carry
+        self._carry = []  # incomplete generations awaiting continuation after a sync
+        self._server_urls = []  # cached sglang /abort_request targets (filled post-rollout)
         # DP size of the TRAIN slab — the divisor for balance_shards (the parent
         # uses self.num_devices because colocate training spans the whole pool;
         # here training only spans the train slab).
@@ -195,6 +200,10 @@ class AsyncARTrainer(ARTrainer):
                     "as a local sibling and cannot live cross-slab."
                 )
             self.rollout = remote(**rollout_parsed)
+            try:
+                self._server_urls = [u for u in self.rollout.get_server_url() if u]
+            except Exception as _e:
+                logger.warning("partial-rollout: could not fetch server urls for abort: %s", _e)
             # sgl-router rollout LB (HTTP backend, multi-worker): point every engine at
             # one router that load-balances by policy (none = static per-rank DP_SCATTER).
             _rcfg = rollout_parsed.get("config")
@@ -285,6 +294,9 @@ class AsyncARTrainer(ARTrainer):
                 "refs": refs,
                 "worker_local": worker_local,
                 "req": req,
+                "orig_req": req,
+                "carried_track": None,
+                "cont_idx": None,
                 "gen_id": gen_id,
                 "weight_version": self._weight_version,
             }
@@ -310,10 +322,78 @@ class AsyncARTrainer(ARTrainer):
         still: List[Dict[str, Any]] = []
         for rec in self._inflight:
             if self._is_ready(rec["refs"]):
-                self._score_into_buffer(rec, self._collect_resp(rec["refs"], rec["worker_local"]))
+                resp = self._collect_resp(rec["refs"], rec["worker_local"])
+                if self._partial:
+                    carry = self._ingest_partial(rec, resp)
+                    if carry is not None:
+                        # incomplete outside a sync (an aborted sample) — continue now
+                        cont_req = build_continuation_req(carry["orig_req"], carry["carried_track"], carry["_unfinished_idx"])
+                        refs, wl = self._generate_async(cont_req)
+                        still.append({**carry, "req": cont_req, "cont_idx": carry["_unfinished_idx"],
+                                      "refs": refs, "worker_local": wl})
+                else:
+                    self._score_into_buffer(rec, resp)
             else:
                 still.append(rec)
         self._inflight = still
+
+    # ------------------------------------------------------------------
+    # Partial rollout (slime-style): interrupt in-flight generations at the
+    # weight-sync boundary, carry the unfinished ones, continue after the sync.
+    # ------------------------------------------------------------------
+    def _abort_servers(self) -> None:
+        """Tell every rollout SRT server to abort all in-flight requests. POSTed
+        directly from the driver (the ray engine actor is busy inside generate),
+        which makes each pending generate() return its partial output."""
+        import json as _json
+        import urllib.request as _u
+        for url in self._server_urls:
+            try:
+                _r = _u.Request(f"{url}/abort_request", data=_json.dumps({"abort_all": True}).encode(),
+                                headers={"Content-Type": "application/json"})
+                _u.urlopen(_r, timeout=30)
+            except Exception as _e:  # pragma: no cover
+                logger.warning("partial-rollout: abort POST to %s failed: %s", url, _e)
+
+    def _ingest_partial(self, rec, resp):
+        """Merge a (possibly partial) generation into its carried state. Returns
+        None when the whole generation is complete (scored + buffered), else a
+        carry rec with the accumulated track + the still-unfinished indices."""
+        track_name = list(resp.tracks)[0]
+        (track,) = resp.tracks.values()
+        carried = rec.get("carried_track")
+        merged = track if carried is None else merge_continuation(carried, track, rec["cont_idx"])
+        idx = unfinished_indices(merged)
+        if not idx:
+            self._score_into_buffer({**rec, "req": rec["orig_req"]},
+                                    RolloutResp(tracks={track_name: merged}))
+            return None
+        return {**rec, "carried_track": merged, "_unfinished_idx": idx}
+
+    def _abort_and_carry(self) -> None:
+        """Interrupt-at-sync replacement for _drain_all: abort, then for each
+        in-flight generation buffer it if complete or stash it for continuation."""
+        self._abort_servers()
+        for rec in self._inflight:
+            carry = self._ingest_partial(rec, self._collect_resp(rec["refs"], rec["worker_local"]))
+            if carry is not None:
+                self._carry.append(carry)
+        logger.info("partial-rollout: sync boundary — %d generations aborted, %d carried for continuation",
+                    len(self._inflight), len(self._carry))
+        self._inflight = []
+
+    def _relaunch_carry(self) -> None:
+        """After a weight sync, continue each carried generation from its tokens-
+        so-far (input_ids = prompt + generated; off-policy across this version)."""
+        for rec in self._carry:
+            cont_req = build_continuation_req(rec["orig_req"], rec["carried_track"], rec["_unfinished_idx"])
+            refs, worker_local = self._generate_async(cont_req)
+            self._inflight.append({**rec, "req": cont_req, "cont_idx": rec["_unfinished_idx"],
+                                   "refs": refs, "worker_local": worker_local,
+                                   "weight_version": self._weight_version})
+        if self._carry:
+            logger.info("partial-rollout: relaunched %d carried generations under weight v%d", len(self._carry), self._weight_version)
+        self._carry = []
 
     def _drain_all(self) -> None:
         """Finish + buffer EVERY in-flight generation (the single-threaded quiesce).
@@ -432,9 +512,14 @@ class AsyncARTrainer(ARTrainer):
                         rollout_id, num_rollouts, save_interval=save_interval, save_dir=save_dir, save_mode=save_mode
                     )
                 if step % interval == 0 and self.weight_sync is not None:
-                    self._drain_all()  # MANDATORY: weight/KV update corrupts in-flight generations
+                    if self._partial:
+                        self._abort_and_carry()  # interrupt stragglers, carry partials
+                    else:
+                        self._drain_all()  # MANDATORY: weight/KV update corrupts in-flight generations
                     self.weight_sync.sync()
                     self._weight_version += 1
+                    if self._partial:
+                        self._relaunch_carry()  # continue carried generations under new weights
         finally:
             self._drain_all()
             self._finish_wandb()
