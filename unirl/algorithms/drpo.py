@@ -41,7 +41,10 @@ from .base import (
     AlgorithmStepResult,
     BaseAlgorithmConfig,
     StageAlgorithm,
+    _validate_tis_level,
+    _validate_tis_mode,
     rollout_replay_logp_absdiff,
+    tis_correction,
     typed_conditions,
 )
 from .grpo import GRPO
@@ -87,6 +90,13 @@ class DRPOConfig(BaseAlgorithmConfig):
     # "replay" freezes a train-side π_old in prepare_segment at pre-update
     # weights instead (mb1 ratio≈1, isolates policy drift from the engine gap).
     old_logp_source: str = "rollout"
+    # Truncated Importance Sampling (TIS, verl rollout_is). DEFAULT OFF (None).
+    # ~2.0 turns it on; see docs/tis.md. Requires old_logp_source='rollout' so the
+    # rollout logp μ is available and slice-aligned (segment.log_probs). Mirrors
+    # verl rollout_is_threshold/level/mode.
+    tis_clip: Optional[float] = None
+    tis_level: str = "token"
+    tis_mode: str = "truncate"
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +210,9 @@ class DRPO(StageAlgorithm):
         horizon: int = 8192,
         sampling_temperature: Optional[float] = None,
         old_logp_source: str = "rollout",
+        tis_clip: Optional[float] = None,
+        tis_level: str = "token",
+        tis_mode: str = "truncate",
         conditions_cls: Optional[Type[Any]] = None,
     ) -> None:
         super().__init__()
@@ -238,6 +251,19 @@ class DRPO(StageAlgorithm):
         self.old_logp_source = str(old_logp_source).strip().lower()
         if self.old_logp_source not in ("rollout", "replay"):
             raise ValueError(f"DRPO: old_logp_source must be 'rollout' or 'replay'; got {old_logp_source!r}")
+        # Truncated Importance Sampling (verl rollout_is). DEFAULT OFF. Requires
+        # old_logp_source='rollout': only then is segment.log_probs the rollout
+        # logp μ (in 'replay' mode prepare_segment overwrites it with a train-side
+        # anchor, and the original μ is no longer available slice-aligned). See
+        # docs/tis.md.
+        self.tis_clip = None if tis_clip is None else float(tis_clip)
+        self.tis_level = _validate_tis_level(tis_level)
+        self.tis_mode = _validate_tis_mode(tis_mode)
+        if self.tis_clip is not None and self.old_logp_source != "rollout":
+            raise ValueError(
+                "DRPO: tis_clip requires old_logp_source='rollout' so the rollout logp μ "
+                "is available (in 'replay' mode prepare_segment overwrites segment.log_probs)."
+            )
         self.supports_multi_update = True
 
     def prepare_segment(
@@ -315,6 +341,24 @@ class DRPO(StageAlgorithm):
             mu_weighted=self.penalty_mu_weighted,
         )
 
+        # Truncated Importance Sampling (TIS, verl rollout_is). OFF unless
+        # tis_clip is set; the constructor pins old_logp_source='rollout', so
+        # old_logp IS the rollout logp μ. Truncates the train-vs-rollout weight
+        # π_train/μ one-sidedly and multiplies it (detached) onto the per-token
+        # loss — composed ON TOP OF the DRPO quadratic regularizer. See docs/tis.md.
+        tis_metrics: Dict[str, Any] = {}
+        if self.tis_clip is not None:
+            tis_w, tis_m = tis_correction(
+                new_logp=new_logp,
+                rollout_logp=old_logp,
+                lengths=segment.lengths.to(device=new_logp.device),
+                tis_clip=self.tis_clip,
+                tis_level=self.tis_level,
+                tis_mode=self.tis_mode,
+            )
+            loss_per_elem = loss_per_elem * tis_w
+            tis_metrics = {k: float(v.item()) for k, v in tis_m.items()}
+
         # Apply loss_mask if present (token-level masking for padding/eos)
         if segment.loss_mask is not None:
             mask = segment.loss_mask.to(dtype=loss_per_elem.dtype, device=loss_per_elem.device)
@@ -335,6 +379,7 @@ class DRPO(StageAlgorithm):
             "drpo_epsilon": self.drpo_epsilon,
             **rollout_replay_logp_absdiff(new_logp, old_logp),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
+            **tis_metrics,
         }
         return AlgorithmStepResult(
             loss=float(loss.detach().item()),

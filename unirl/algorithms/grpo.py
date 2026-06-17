@@ -24,7 +24,10 @@ from .base import (
     StageAlgorithm,
     _grpo_clip_loss,
     _resolve_clip_range_from_schedule,
+    _validate_tis_level,
+    _validate_tis_mode,
     rollout_replay_logp_absdiff,
+    tis_correction,
     typed_conditions,
 )
 
@@ -35,6 +38,12 @@ class GRPOConfig(BaseAlgorithmConfig):
     conditions_cls: str = ""
     clip_range: float = 1e-4
     clip_schedule: str = "constant"
+    # Truncated Importance Sampling (TIS, verl rollout_is). DEFAULT OFF (None).
+    # ~2.0 turns it on; see docs/tis.md. tis_level: token|sequence;
+    # tis_mode: truncate|mask. Mirrors verl rollout_is_threshold/level/mode.
+    tis_clip: Optional[float] = None
+    tis_level: str = "token"
+    tis_mode: str = "truncate"
 
 
 class GRPO(StageAlgorithm):
@@ -80,6 +89,9 @@ class GRPO(StageAlgorithm):
         horizon: int = 8192,
         conditions_cls: Optional[Type[Any]] = None,
         sampling_temperature: Optional[float] = None,
+        tis_clip: Optional[float] = None,
+        tis_level: str = "token",
+        tis_mode: str = "truncate",
     ) -> None:
         super().__init__()
         if stage is None and pipeline is None:
@@ -93,6 +105,12 @@ class GRPO(StageAlgorithm):
         self.loss_agg_mode = str(loss_agg_mode)
         self.horizon = int(horizon)
         self.conditions_cls = conditions_cls
+        # Truncated Importance Sampling (verl rollout_is). DEFAULT OFF.
+        # GRPO is always rollout-anchored (segment.log_probs IS the rollout logp),
+        # so the rollout logp is always available and slice-aligned for TIS.
+        self.tis_clip = None if tis_clip is None else float(tis_clip)
+        self.tis_level = _validate_tis_level(tis_level)
+        self.tis_mode = _validate_tis_mode(tis_mode)
         if sampling_temperature is None:
             from unirl.types.sampling import ARSamplingParams
 
@@ -139,6 +157,25 @@ class GRPO(StageAlgorithm):
             clip_range_high=clip_high,
         )
 
+        # Truncated Importance Sampling (TIS, verl rollout_is). OFF unless
+        # tis_clip is set. GRPO is rollout-anchored, so old_logp IS the rollout
+        # logp (μ); TIS truncates the rollout-vs-train weight π_train/μ one-sidedly
+        # and multiplies it (detached) onto the per-token loss — a guard ON TOP OF
+        # the (two-sided) PPO clip. See docs/tis.md for why this adds only a
+        # one-sided truncation beyond UniRL's already-rollout-anchored ratio.
+        tis_metrics: Dict[str, Any] = {}
+        if self.tis_clip is not None:
+            tis_w, tis_m = tis_correction(
+                new_logp=new_logp,
+                rollout_logp=old_logp,
+                lengths=segment.lengths.to(device=new_logp.device),
+                tis_clip=self.tis_clip,
+                tis_level=self.tis_level,
+                tis_mode=self.tis_mode,
+            )
+            loss_per_elem = loss_per_elem * tis_w
+            tis_metrics = {k: float(v.item()) for k, v in tis_m.items()}
+
         # Loss aggregation (match DRPO / verl loss_agg_mode):
         #  - "seq-mean-token-sum-norm" (Dr.GRPO/DAPO): per-seq token-SUM / horizon,
         #    then mean over sequences (length-UNbiased).
@@ -160,6 +197,7 @@ class GRPO(StageAlgorithm):
             "clip_range": float(clip_range),
             **rollout_replay_logp_absdiff(new_logp, old_logp),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
+            **tis_metrics,
         }
         return AlgorithmStepResult(
             loss=float(loss.detach().item()),
