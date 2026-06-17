@@ -162,7 +162,7 @@ class NCCLWeightSync(FullWeightSync):
                 continue  # ranks >= 1 only drive the train-mesh all-gather
             if self._fp8_block_size is not None:
                 from unirl.distributed.weight_sync.transfer.fp8_requant import requantize_named_weights
-                bucket = list(requantize_named_weights(bucket, weight_block_size=self._fp8_block_size, verify=False))
+                bucket = list(requantize_named_weights(bucket, weight_block_size=self._fp8_block_size, verify=(self.weight_version == 0)))
             names = [n for n, _ in bucket]
             dtypes = [str(t.dtype) for _, t in bucket]
             shapes = [list(t.shape) for _, t in bucket]
