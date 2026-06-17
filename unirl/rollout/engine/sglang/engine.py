@@ -84,6 +84,15 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._is_offloaded = False
         self._weights_onloaded_for_sync = False
+        # Radix/prefix-cache reuse across resume (roadmap #94 item #8). When
+        # ``radix_reuse`` is on, sleep() stops unconditionally flushing the
+        # RadixAttention cache so a resume within the SAME weight version re-uses
+        # the prefix. ``_radix_dirty`` is the correctness guard: cached KV is
+        # computed under a specific weight version, so a weight update makes it
+        # STALE and it MUST be flushed before the next generate. Weight updates
+        # set the flag; the flush (weight-sync last bucket, or sleep) clears it.
+        self._radix_reuse = bool(getattr(config, "radix_reuse", False))
+        self._radix_dirty = False
 
         engine_kwargs: Dict[str, Any] = dict(config.engine_kwargs or {})
 
@@ -210,6 +219,14 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             int(req.batch_size) > 0,
             "SGLangRolloutEngine.generate requires non-empty req (batch_size > 0)",
         )
+        # Radix-reuse correctness guard: if weights changed since the last flush
+        # (e.g. a weight sync ran with flush_cache disabled, or no offload flushed
+        # in between), the cached KV is STALE — flush it before generating so we
+        # never serve KV from a prior weight version. No-op when radix_reuse is
+        # off or the cache is already clean (the common path).
+        if self._radix_reuse and self._radix_dirty:
+            self._backend.flush_cache()
+            self._radix_dirty = False
         sampling = resolve_sampling(self.cfg, req)
         prepared = self.adapter.build_inputs(req, sampling=sampling)
         # Activate the synced LoRA adapter for these requests — the visible
@@ -263,8 +280,17 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             if not self._weights_onloaded_for_sync:
                 return
             release_tags = ["weights"]
-        if release_tags is None or "kv_cache" in release_tags:
-            self._backend.flush_cache()
+        releases_kv = release_tags is None or "kv_cache" in release_tags
+        if releases_kv:
+            # Flush before releasing the KV pool so release actually frees it
+            # (sglang only frees when the scheduler holds no references). With
+            # radix_reuse on, skip the flush UNLESS weights changed since the
+            # last flush (``_radix_dirty``): retaining the radix cache across an
+            # offload lets a same-weight-version resume re-use the prefix, while
+            # a stale (post-weight-update) cache is still flushed for correctness.
+            if not self._radix_reuse or self._radix_dirty:
+                self._backend.flush_cache()
+                self._radix_dirty = False
         self._backend.release_memory(tags=release_tags)
         self._is_offloaded = True
         self._weights_onloaded_for_sync = False
@@ -350,6 +376,10 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             load_format=load_format,
             flush_cache=flush_cache,
         )
+        # Weights changed → any cached KV is now stale. The flush (when
+        # flush_cache=True, i.e. the last bucket) wipes it; otherwise mark the
+        # radix cache dirty so a later sleep() flushes before any reuse.
+        self._radix_dirty = not flush_cache
 
     def init_weights_update_group(
         self,
@@ -396,6 +426,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             group_name=group_name,
             flush_cache=flush_cache,
         )
+        # Weights changed → cached KV is now stale (see update_weights_from_tensor).
+        self._radix_dirty = not flush_cache
 
     def destroy_weights_update_group(
         self,

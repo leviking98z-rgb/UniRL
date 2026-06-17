@@ -77,6 +77,15 @@ class SGLangEngineConfig(BaseEngineConfig):
     # unfinished sequences resume next round (input_ids=prompt+gen-so-far).
     # 0 = off (one-shot generation). Bounds the straggler, frees finished KV.
     partial_budget: int = 0
+    # radix/prefix cache reuse across resume (roadmap #94 item #8): stop the
+    # per-offload sleep() from unconditionally flushing the RadixAttention cache,
+    # so a partial-rollout resume that does NOT cross a weight update re-uses the
+    # already-computed prefix (cheap append) instead of a full re-prefill. The
+    # cache is still flushed whenever weights actually change (weight sync marks
+    # it stale) — reuse is valid ONLY within a single weight version, so stale KV
+    # is never served. False (default) = today's always-flush behaviour.
+    # See docs/radix_reuse.md.
+    radix_reuse: bool = False
 
     # --- Concurrency / async ---
     concurrency: int = 8
