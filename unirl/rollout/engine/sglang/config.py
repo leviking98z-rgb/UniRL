@@ -13,12 +13,15 @@ the backend filters it against the real ServerArgs fields and spawns.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from unirl.config.require import require
 from unirl.rollout.engine.base import BaseEngineConfig
 from unirl.rollout.engine.ports import ReservedPorts
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -113,8 +116,46 @@ class SGLangEngineConfig(BaseEngineConfig):
     # <think> block that overruns max_new_tokens before reaching the answer).
     chat_template_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict)
 
+    # --- Speculative decoding (rollout draft-then-verify; default OFF) ---
+    # A draft proposes ``speculative_num_draft_tokens`` tokens that the policy
+    # verifies in one forward pass. These map 1:1 onto the SGLang ServerArgs
+    # ``speculative_*`` fields and are forwarded verbatim by ``server_intent``.
+    #
+    # ``speculative_algorithm`` is the gate: None (default) = OFF, emits NOTHING
+    # into the ServerArgs intent (recipes that don't set it are byte-for-byte
+    # unchanged). Recommended value for RL is ``"NGRAM"`` — a training-free
+    # suffix/n-gram draft that self-syncs to the current output distribution, so
+    # it survives the per-step policy update; a fixed learned draft (EAGLE/EAGLE3)
+    # goes STALE as the policy moves each step, acceptance decays, and verl
+    # reports speculative decoding ~50% SLOWER on H20 in exactly this regime. So
+    # this is gated, default-off, experimental, and can be NET-NEGATIVE — see
+    # ``docs/spec_decoding.md``.
+    #
+    # EAGLE/EAGLE3 require ``speculative_draft_model_ckpt_path`` (the draft head)
+    # plus ``speculative_num_steps`` / ``speculative_eagle_topk`` /
+    # ``speculative_num_draft_tokens``. NGRAM needs none of them (the suffix
+    # automaton is built online from the prompt+output stream). Any further
+    # ServerArgs ``speculative_*`` knob (e.g. the ngram BFS-breadth / trie-depth
+    # tuning) goes through the ``engine_kwargs`` escape hatch unchanged.
+    speculative_algorithm: Optional[str] = None
+    # Local naming follows the engine's own ``pretrained_model_ckpt_path``
+    # convention; mapped to ServerArgs ``speculative_draft_model_path`` in
+    # ``server_intent``.
+    speculative_draft_model_ckpt_path: Optional[str] = None
+    speculative_num_steps: Optional[int] = None
+    speculative_eagle_topk: Optional[int] = None
+    speculative_num_draft_tokens: Optional[int] = None
+
     # --- Escape hatch for advanced ServerArgs / engine knobs ---
     engine_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict)
+
+    #: ``speculative_algorithm`` values understood by the pinned SGLang
+    #: (0.5.12.post1). NGRAM is the staleness-robust, training-free option
+    #: recommended for RL; the EAGLE family + STANDALONE are fixed learned
+    #: drafts that decay as the policy updates (see ``docs/spec_decoding.md``).
+    _SPECULATIVE_ALGORITHMS = frozenset(
+        {"EAGLE", "EAGLE3", "NEXTN", "NGRAM", "STANDALONE"}
+    )
 
     def __post_init__(self) -> None:
         if self.engine_kwargs is None:
@@ -149,6 +190,34 @@ class SGLangEngineConfig(BaseEngineConfig):
             self.backend in ("http", "native"),
             f"SGLangEngineConfig.backend must be 'http' or 'native'; got {self.backend!r}",
         )
+
+        # Speculative decoding gate: None = OFF (the common case — nothing to
+        # validate, nothing emitted). When set, normalize to the upstream
+        # spelling (upper-case) and validate against the pinned-runtime set so a
+        # typo fails at config build, not as an opaque SRT launch error. The
+        # EAGLE family is a fixed learned draft that needs a draft head and goes
+        # stale in RL — require the path and warn loudly (NGRAM needs neither).
+        if self.speculative_algorithm is not None:
+            self.speculative_algorithm = str(self.speculative_algorithm).strip().upper()
+            require(
+                self.speculative_algorithm in self._SPECULATIVE_ALGORITHMS,
+                "SGLangEngineConfig.speculative_algorithm must be one of "
+                f"{set(self._SPECULATIVE_ALGORITHMS)} or None; got {self.speculative_algorithm!r}",
+            )
+            needs_draft = self.speculative_algorithm in ("EAGLE", "EAGLE3", "NEXTN", "STANDALONE")
+            require(
+                not needs_draft or bool(self.speculative_draft_model_ckpt_path),
+                f"SGLangEngineConfig.speculative_algorithm={self.speculative_algorithm!r} is a learned "
+                "draft and requires speculative_draft_model_ckpt_path",
+            )
+            if needs_draft:
+                logger.warning(
+                    "Speculative decoding with a FIXED learned draft (%s) is enabled. In RL the "
+                    "policy updates every step, so the frozen draft goes STALE — acceptance decays "
+                    "and rollout can be NET-NEGATIVE (verl reports ~50%% slower on H20). Prefer the "
+                    "training-free 'NGRAM' draft for RL. See docs/spec_decoding.md.",
+                    self.speculative_algorithm,
+                )
 
         # Adapter selection: derive from the predecessor's VLM switch when not
         # explicit, then validate against the live registry (importing it
@@ -195,6 +264,23 @@ class SGLangEngineConfig(BaseEngineConfig):
             intent["tp_size"] = int(self.tp_size)
         if self.host is not None:
             intent["host"] = str(self.host)
+
+        # Speculative decoding (default OFF → emits NOTHING). The typed knobs map
+        # 1:1 onto the SGLang ServerArgs ``speculative_*`` fields; only the
+        # non-None ones are forwarded so partial recipes (e.g. NGRAM, which needs
+        # no draft model) don't pin fields they leave unset. Further
+        # ``speculative_*`` ServerArgs knobs ride the engine_kwargs escape hatch
+        # (Layer 1) untouched.
+        if self.speculative_algorithm is not None:
+            intent["speculative_algorithm"] = self.speculative_algorithm
+            if self.speculative_draft_model_ckpt_path is not None:
+                intent["speculative_draft_model_path"] = str(self.speculative_draft_model_ckpt_path)
+            if self.speculative_num_steps is not None:
+                intent["speculative_num_steps"] = int(self.speculative_num_steps)
+            if self.speculative_eagle_topk is not None:
+                intent["speculative_eagle_topk"] = int(self.speculative_eagle_topk)
+            if self.speculative_num_draft_tokens is not None:
+                intent["speculative_num_draft_tokens"] = int(self.speculative_num_draft_tokens)
 
         # Layer 3: adapter model-specific extras (override hook).
         if extra:
