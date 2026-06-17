@@ -57,7 +57,11 @@ def requantize_named_weights(weights, *, weight_block_size=DEFAULT_WEIGHT_BLOCK_
         if not should_quantize_param(name) or tensor.dim() != 2:
             yield name, tensor
             continue
+        # block-cast kernel (triton) needs a CUDA tensor; initial disk load
+        # hands us CPU tensors, so move to the active device first.
         hp = tensor.to(compute_dtype)
+        if not hp.is_cuda:
+            hp = hp.cuda()
         fp8_weight, descale = scaled_fp8_blockwise(hp, [bm, bn])
         descale = descale.squeeze(-1) if descale.dim() > 2 else descale
         if verify:
