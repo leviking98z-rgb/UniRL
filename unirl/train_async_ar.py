@@ -19,6 +19,10 @@ Extra config knobs vs the colocate recipe:
   * ``max_inflight`` — concurrent generations (overlap depth). ``1`` ≈ one-step pipeline.
   * ``buffer_max_staleness`` — weight-syncs a buffered group may cross. ``0``/unset =
     on-policy (``ratio≈1``); ``>0`` = off-policy continuous buffer.
+  * ``rollout.config.quantization`` — run SGLang GENERATION in FP8 (training stays
+    BF16) for a faster rollout slab. ``rollout_drift_warn`` / ``rollout_drift_abort``
+    guard the rollout↔replay |Δlogp| gap the FP8/BF16 split widens (both unset = off,
+    the bf16 default). See ``docs/fp8_rollout.md``.
 """
 
 from __future__ import annotations
@@ -56,6 +60,8 @@ def main(cfg: DictConfig) -> None:
         max_inflight=int(cfg.get("max_inflight", 1)),
         buffer_max_staleness=cfg.get("buffer_max_staleness"),
         partial_rollout=bool(cfg.get("partial_rollout", False)),
+        rollout_drift_warn=cfg.get("rollout_drift_warn"),
+        rollout_drift_abort=cfg.get("rollout_drift_abort"),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

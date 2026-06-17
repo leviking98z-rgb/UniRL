@@ -128,6 +128,9 @@ class AsyncARTrainer(ARTrainer):
         max_inflight: int = 1,
         buffer_max_staleness: Optional[int] = None,
         partial_rollout: bool = False,
+        # ---- FP8-rollout drift guard ----
+        rollout_drift_warn: Optional[float] = None,
+        rollout_drift_abort: Optional[float] = None,
     ) -> None:
         # Call BaseTrainer.__init__ directly: ARTrainer.__init__ opens the
         # colocate ``placement(fraction=1.0)`` block, which is exactly what we
@@ -153,6 +156,15 @@ class AsyncARTrainer(ARTrainer):
         self._buffer_max_staleness = buffer_max_staleness
         self._weight_version = 0  # driver-tracked policy version (# of weight syncs issued)
         self._partial = bool(partial_rollout)  # slime-style interrupt-at-sync + carry
+        # FP8-rollout drift guard (both None = off; the bf16 default). When the
+        # rollout engine generates in a lower precision than the BF16 train
+        # forward (rollout.config.quantization='fp8'), the rollout-vs-replay
+        # |Δlogp| gap widens; old_logp_source='rollout' makes that an
+        # importance-sampling correction, but a gap past these thresholds means
+        # the IS ratio tail is heavy enough to bias/destabilize the update — warn,
+        # or abort rather than train silently through it. See docs/fp8_rollout.md.
+        self._drift_warn = None if rollout_drift_warn is None else float(rollout_drift_warn)
+        self._drift_abort = None if rollout_drift_abort is None else float(rollout_drift_abort)
         self._carry = []  # incomplete generations awaiting continuation after a sync
         self._server_urls = []  # cached sglang /abort_request targets (filled post-rollout)
         # DP size of the TRAIN slab — the divisor for balance_shards (the parent
@@ -451,6 +463,7 @@ class AsyncARTrainer(ARTrainer):
         if self.balance_shards:
             track = track.balance_shards(self._train_devices)  # over the TRAIN slab DP size
         result = self.stack.train_track(track, training_progress=float(training_progress))
+        self._guard_rollout_drift(result, rollout_id=rollout_id)
         self.wandb_logger.log_rollout_step(
             rollout_id,
             result,
@@ -462,6 +475,52 @@ class AsyncARTrainer(ARTrainer):
         # fires; reclaim transport buffers here (no-op for colocate_store/gpu).
         self._reset_transport_buffers()
         return result, mean_reward
+
+    def _guard_rollout_drift(self, result: TrainStepResult, *, rollout_id: int) -> None:
+        """FP8-rollout safety valve over the rollout↔replay |Δlogp| gap.
+
+        The AR algorithms (GRPO/DRPO/CPPO) already emit
+        ``rollout_replay_logp_absdiff_mean`` — the mean per-token |Δlogp| between
+        the rollout engine's emitted logprobs (the behaviour policy ``mu``) and
+        the BF16 teacher-forced replay (``pi``). With ``old_logp_source='rollout'``
+        this gap IS the importance-sampling correction's exponent; a small gap is
+        the FP8↔BF16 engine difference being absorbed cleanly. Past
+        ``_drift_warn`` it signals a heavy IS ratio tail; past ``_drift_abort``
+        it is large enough to bias/destabilize the update, so we refuse to train
+        silently through it (the spec's "do NOT silently let a large mismatch
+        through"). Both thresholds default off (bf16 rollout), so this is a no-op
+        unless a recipe opts in.
+
+        TODO(fp8): when the tail is heavy but bounded, prefer Truncated
+        Importance Sampling (clamp ``r_t = exp(new_logp - old_logp)`` at a cap
+        ``c``, e.g. r_t <- min(r_t, c)) over aborting — a per-token TIS clamp in
+        the AR loss (cppo.py/drpo.py ``_*_loss``) keeps the update unbiased in
+        expectation while taming the variance. Until that lands, the abort gate
+        is the conservative stand-in. See docs/fp8_rollout.md.
+        """
+        if self._drift_warn is None and self._drift_abort is None:
+            return
+        drift = (result.metrics or {}).get("rollout_replay_logp_absdiff_mean")
+        if drift is None:
+            return
+        drift = float(drift)
+        if self._drift_abort is not None and drift > self._drift_abort:
+            raise RuntimeError(
+                f"rollout↔replay drift mean|Δlogp|={drift:.4f} exceeds "
+                f"rollout_drift_abort={self._drift_abort:.4f} at rollout {rollout_id}. "
+                "The FP8-rollout importance-sampling ratio tail is too heavy to train "
+                "through safely (see docs/fp8_rollout.md). Lower the quantization "
+                "aggressiveness, raise the threshold deliberately, or add Truncated "
+                "Importance Sampling before re-enabling."
+            )
+        if self._drift_warn is not None and drift > self._drift_warn:
+            logger.warning(
+                "rollout↔replay drift mean|Δlogp|=%.4f exceeds rollout_drift_warn=%.4f "
+                "at rollout %d — FP8 IS ratio tail is widening (still under the abort "
+                "gate). Watch ratio_max / approx_kl; consider Truncated Importance "
+                "Sampling (see docs/fp8_rollout.md).",
+                drift, self._drift_warn, rollout_id,
+            )
 
     # ------------------------------------------------------------------
     # Train loop

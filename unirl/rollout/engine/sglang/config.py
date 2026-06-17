@@ -57,6 +57,24 @@ class SGLangEngineConfig(BaseEngineConfig):
     # --- Parallelism & GPU ---
     tp_size: Optional[int] = None
 
+    # --- Rollout-only quantization (generation speed; training stays BF16) ---
+    # ``quantization`` runs SGLang GENERATION in a low-precision format (e.g.
+    # "fp8" = FP8 weights/activations) while the FSDP train shard keeps its own
+    # (bf16) precision — the two are decoupled because the policy is the BF16
+    # train weights and the rollout engine is only the sampler. None (default) =
+    # the engine loads in its native dtype (current bf16 behaviour, unchanged).
+    # Forwarded verbatim to ServerArgs.quantization. ``kv_cache_dtype`` (e.g.
+    # "fp8_e5m2") quantizes the KV cache independently; None = ServerArgs default.
+    #
+    # HAZARD: FP8 generation diverges from the BF16 teacher-forced train forward
+    # MORE than bf16-vs-bf16. The rollout-anchored ratio
+    # (algorithm.old_logp_source='rollout') makes this an importance-sampling
+    # correction rather than a silent bias — see docs/fp8_rollout.md. The
+    # AsyncARTrainer drift guard (rollout_drift_*) refuses to let a large
+    # mismatch through unnoticed.
+    quantization: Optional[str] = None
+    kv_cache_dtype: Optional[str] = None
+
     # --- SGLang network ---
     # ``host`` is the SRT bind address (default 0.0.0.0 so the server accepts
     # cross-node connections). ``port`` is kept for config-shape parity with
@@ -150,6 +168,33 @@ class SGLangEngineConfig(BaseEngineConfig):
             f"SGLangEngineConfig.backend must be 'http' or 'native'; got {self.backend!r}",
         )
 
+        # Rollout quantization (None = native dtype, unchanged). Validate the
+        # common FP8 family up front — a typo here is otherwise an opaque
+        # ServerArgs error inside the SRT subprocess at boot. The list mirrors
+        # SGLang's ServerArgs.quantization choices; the backend re-validates
+        # against the live ServerArgs at spawn.
+        if self.quantization is not None:
+            self.quantization = str(self.quantization).strip().lower()
+            valid_quant = (
+                "fp8",
+                "blockwise_int8",
+                "modelopt",
+                "modelopt_fp4",
+                "w8a8_int8",
+                "w8a8_fp8",
+                "awq",
+                "awq_marlin",
+                "gptq",
+                "gptq_marlin",
+            )
+            require(
+                self.quantization in valid_quant,
+                f"SGLangEngineConfig.quantization must be one of {valid_quant} or None; "
+                f"got {self.quantization!r}",
+            )
+        if self.kv_cache_dtype is not None:
+            self.kv_cache_dtype = str(self.kv_cache_dtype).strip().lower()
+
         # Adapter selection: derive from the predecessor's VLM switch when not
         # explicit, then validate against the live registry (importing it
         # registers the families).
@@ -195,6 +240,14 @@ class SGLangEngineConfig(BaseEngineConfig):
             intent["tp_size"] = int(self.tp_size)
         if self.host is not None:
             intent["host"] = str(self.host)
+        # Rollout-only quantization: emitted ONLY when set, so the default
+        # (None) intent is byte-identical to the pre-FP8 config. The backend
+        # filters intent against the live ServerArgs fields at boot, so these
+        # land on ServerArgs.quantization / .kv_cache_dtype by name.
+        if self.quantization is not None:
+            intent["quantization"] = str(self.quantization)
+        if self.kv_cache_dtype is not None:
+            intent["kv_cache_dtype"] = str(self.kv_cache_dtype)
 
         # Layer 3: adapter model-specific extras (override hook).
         if extra:
