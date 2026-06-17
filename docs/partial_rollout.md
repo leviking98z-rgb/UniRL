@@ -191,3 +191,35 @@ speedup is maximal at `weight_sync_interval=1` (a barrier every rollout); it sca
 down as syncs become less frequent (fewer barriers to save). sglang's
 `abort_request` does interrupt running decode (`to_finish=FINISH_ABORT`), so the
 saving is real, not a generation-length artifact.
+
+## IMPORTANT: throughput benefit is regime-dependent (the 2.65× is NOT universal)
+
+The 2.65× above was measured at **batch_size=8, max_new_tokens=2048** — a regime
+where the per-rollout cycle is short and the sync-barrier *drain* (waiting for the
+in-flight straggler) dominates per-rollout time (drain 37s of 47s). There, removing
+the barrier is a 2.65× win.
+
+A second bench at **batch_size=64, max_new_tokens=8192** (matching the optstack
+vanilla-GRPO reference run , 512 samples/rollout) shows **no throughput
+gain**:
+
+| | baseline (drain) | partial (repeated-abort) |
+|---|---|---|
+| per-rollout wall | 128.1s | 126.0s (~1.0×) |
+| sync-barrier | drain mean 8.2s | abort 0.3s |
+| reward (convergence) | tracks b31s0usr | tracks b31s0usr (0.13→0.33, ratio≈1) |
+
+Why: at batch_size=64 the run is **generation-throughput-bound** (~126s of actual
+gen+train per rollout). With , by the time a sync fires the
+in-flight generations have been running ~2 rollout-cycles and are nearly complete,
+so the drain is only ~8s — a small fraction of 126s. Aborting it saves ~8s →
+negligible.
+
+**Rule of thumb**: partial rollout's throughput benefit ≈ (sync-barrier drain) /
+(per-rollout wall). It is large when the drain dominates (small batch, short cycle
+relative to generation time) and ~zero when the run is generation-bound (large
+batch). In **both** regimes partial **converges identically and never hurts**
+(126 ≤ 128s; reward aligned) — it is a safe default whose speedup is opportunistic.
+The carried-straggler compute is deferred, not eliminated, so total generation work
+is unchanged; the win (when present) is purely from not stalling the train pipeline
+at the barrier.
