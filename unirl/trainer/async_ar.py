@@ -21,9 +21,13 @@ slime's thread+asyncio). The async behavior is set by **two numeric knobs**:
 
 Generation is launched as **non-blocking Ray futures** (`_generate_async`) and
 reaped on the single driver thread (`_is_ready` / `_collect_resp`) — no producer
-thread, no locks. Draining all in-flight generations before each weight sync is
-**mandatory** (the engine corrupts an in-flight generation when weights + KV
-cache update mid-flight); this is the single-threaded ``_drain_all`` quiesce.
+thread, no locks. By default, draining all in-flight generations before each
+weight sync is **mandatory** (a flushing weight+KV update corrupts an in-flight
+generation); this is the single-threaded ``_drain_all`` quiesce. Two opt-in
+modes remove that barrier: ``partial_rollout`` (slime-style abort+carry+relaunch,
+#2) and ``in_flight_weight_update`` (PipelineRL-style: push weights into the LIVE
+engine with ``flush_cache=False`` so running sequences keep decoding under the new
+weights from their next token, #94). See docs/in_flight_weight_update.md.
 
 Subclasses ``ARTrainer`` to reuse ``_build_req``/``evaluate`` and ``BaseTrainer``
 plumbing, but ``__init__`` calls ``BaseTrainer.__init__`` **directly** (the parent
@@ -64,6 +68,12 @@ class _RolloutBuffer:
     ``weight_version`` it was generated under and a monotonic ``gen_id`` for
     freshness ordering. Groups are always complete (the whole ``generate``
     finished before they are ``put``), so there is no partial-group bookkeeping.
+
+    ``weight_version`` is the LAUNCH version (the oldest weights any token in the
+    group could have used). Under in-flight weight update (#94) a group may span
+    several versions token-by-token, so this is the conservative (most-stale)
+    bound used for eviction; the per-token behaviour logprobs (recorded at
+    generation time) keep the ratio valid regardless of span.
     """
 
     def __init__(self) -> None:
@@ -128,6 +138,7 @@ class AsyncARTrainer(ARTrainer):
         max_inflight: int = 1,
         buffer_max_staleness: Optional[int] = None,
         partial_rollout: bool = False,
+        in_flight_weight_update: bool = False,
     ) -> None:
         # Call BaseTrainer.__init__ directly: ARTrainer.__init__ opens the
         # colocate ``placement(fraction=1.0)`` block, which is exactly what we
@@ -153,6 +164,18 @@ class AsyncARTrainer(ARTrainer):
         self._buffer_max_staleness = buffer_max_staleness
         self._weight_version = 0  # driver-tracked policy version (# of weight syncs issued)
         self._partial = bool(partial_rollout)  # slime-style interrupt-at-sync + carry
+        # PipelineRL-style continuous in-flight weight update: push new weights
+        # into the LIVE engine mid-generation (no abort + no quiesce barrier);
+        # running sequences keep decoding under the new weights from their next
+        # token. Mutually exclusive with partial_rollout (that one removes the
+        # barrier by abort+carry+relaunch; this one removes it by NOT stopping at
+        # all). See docs/in_flight_weight_update.md.
+        self._in_flight = bool(in_flight_weight_update)
+        if self._in_flight and self._partial:
+            raise ValueError(
+                "in_flight_weight_update and partial_rollout are mutually exclusive "
+                "barrier-removal strategies; enable at most one."
+            )
         self._carry = []  # incomplete generations awaiting continuation after a sync
         self._server_urls = []  # cached sglang /abort_request targets (filled post-rollout)
         # DP size of the TRAIN slab — the divisor for balance_shards (the parent
@@ -532,17 +555,28 @@ class AsyncARTrainer(ARTrainer):
                     )
                 if step % interval == 0 and self.weight_sync is not None:
                     _tq = time.perf_counter()
-                    if self._partial:
-                        self._abort_and_carry()  # interrupt stragglers, carry partials
+                    if self._in_flight:
+                        # PipelineRL-style: push weights into the LIVE engine with
+                        # NO quiesce barrier — running sequences keep decoding under
+                        # the new weights from their next token. flush_cache=False is
+                        # MANDATORY: flushing the SRT KV/radix cache mid-decode would
+                        # drop in-flight sequences' KV and corrupt them.
+                        self.weight_sync.sync(flush_cache=False)
+                        self._weight_version += 1
+                        logger.info("in-flight weight update: v%d pushed (no quiesce; %.3fs, rollout=%d, inflight=%d)",
+                                    self._weight_version, time.perf_counter() - _tq, rollout_id, len(self._inflight))
                     else:
-                        self._drain_all()  # MANDATORY: weight/KV update corrupts in-flight generations
-                    logger.info("sync-barrier quiesce: %.3fs (mode=%s, rollout=%d, inflight_was=%d)",
-                                time.perf_counter() - _tq, "abort" if self._partial else "drain",
-                                rollout_id, len(self._carry) if self._partial else 0)
-                    self.weight_sync.sync()
-                    self._weight_version += 1
-                    if self._partial:
-                        self._relaunch_carry()  # continue carried generations under new weights
+                        if self._partial:
+                            self._abort_and_carry()  # interrupt stragglers, carry partials
+                        else:
+                            self._drain_all()  # MANDATORY: weight/KV update corrupts in-flight generations
+                        logger.info("sync-barrier quiesce: %.3fs (mode=%s, rollout=%d, inflight_was=%d)",
+                                    time.perf_counter() - _tq, "abort" if self._partial else "drain",
+                                    rollout_id, len(self._carry) if self._partial else 0)
+                        self.weight_sync.sync()
+                        self._weight_version += 1
+                        if self._partial:
+                            self._relaunch_carry()  # continue carried generations under new weights
         finally:
             self._drain_all()
             self._finish_wandb()

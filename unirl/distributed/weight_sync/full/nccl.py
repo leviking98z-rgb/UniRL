@@ -142,7 +142,7 @@ class NCCLWeightSync(FullWeightSync):
     # ------------------------------------------------------------------
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
-    def sync(self) -> None:
+    def sync(self, *, flush_cache: Optional[bool] = None) -> None:
         """Broadcast the current full weights into the rollout engines.
 
         Every train rank runs the identical bucket loop (lockstep all-gather in
@@ -150,10 +150,19 @@ class NCCLWeightSync(FullWeightSync):
         post matching recvs (non-blocking), broadcasts each tensor, then awaits
         the recvs. Ranks >= 1 just consume the generator (their half of the
         all-gather) and discard.
+
+        ``flush_cache`` overrides the handler default (``self._flush_cache``):
+        pass ``False`` for an IN-FLIGHT weight update (the trainer pushes new
+        weights while generation is still running) — flushing the SRT KV/radix
+        cache mid-decode would drop the running sequences' KV and corrupt them.
+        The default (``None`` ⇒ use ``self._flush_cache``) keeps the quiesced
+        sync-barrier behaviour where flushing on the last bucket is safe (and
+        wanted, to reset the radix cache against stale prefixes).
         """
         import ray
         import torch.distributed as dist
 
+        do_flush = self._flush_cache if flush_cache is None else bool(flush_cache)
         is_rank0 = self._my_rank == 0
         for bucket, is_last in self._iter_buckets():
             if not is_rank0:
@@ -171,7 +180,7 @@ class NCCLWeightSync(FullWeightSync):
                         "dtypes": dtypes,
                         "shapes": shapes,
                         "group_name": self._group_name,
-                        "flush_cache": (self._flush_cache and is_last),
+                        "flush_cache": (do_flush and is_last),
                         "track_prefix": self._track_prefix,
                     },
                 )

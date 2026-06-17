@@ -19,6 +19,11 @@ Extra config knobs vs the colocate recipe:
   * ``max_inflight`` — concurrent generations (overlap depth). ``1`` ≈ one-step pipeline.
   * ``buffer_max_staleness`` — weight-syncs a buffered group may cross. ``0``/unset =
     on-policy (``ratio≈1``); ``>0`` = off-policy continuous buffer.
+  * ``in_flight_weight_update`` — PipelineRL-style: push weights into the LIVE engine
+    mid-generation (no quiesce barrier, ``flush_cache=False``); running sequences keep
+    decoding under the new weights from their next token. Default off (keeps the
+    abort/drain barrier). Mutually exclusive with ``partial_rollout``; needs
+    ``old_logp_source: rollout``. See docs/in_flight_weight_update.md.
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ def main(cfg: DictConfig) -> None:
         max_inflight=int(cfg.get("max_inflight", 1)),
         buffer_max_staleness=cfg.get("buffer_max_staleness"),
         partial_rollout=bool(cfg.get("partial_rollout", False)),
+        in_flight_weight_update=bool(cfg.get("in_flight_weight_update", False)),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),
