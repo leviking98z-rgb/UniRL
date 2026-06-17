@@ -75,6 +75,19 @@ class _RolloutBuffer:
     def size(self) -> int:
         return len(self._items)
 
+    def count_fresh(
+        self,
+        *,
+        current_version: Optional[int] = None,
+        max_staleness: Optional[int] = None,
+    ) -> int:
+        """Evict stale groups (same rule as :meth:`drain_freshest`) and return
+        how many usable groups remain. Non-popping — lets the over-sampling loop
+        test "do I have enough VALID groups yet?" before deciding to drain."""
+        if max_staleness is not None and current_version is not None:
+            self._items = [it for it in self._items if current_version - it[1] <= max_staleness]
+        return len(self._items)
+
     def drain_freshest(
         self,
         n: int,
@@ -128,6 +141,9 @@ class AsyncARTrainer(ARTrainer):
         max_inflight: int = 1,
         buffer_max_staleness: Optional[int] = None,
         partial_rollout: bool = False,
+        # ---- over-sampling / dynamic-sampling (DAPO) knobs ----
+        over_sampling_batch_size: int = 0,
+        dynamic_sampling: bool = False,
     ) -> None:
         # Call BaseTrainer.__init__ directly: ARTrainer.__init__ opens the
         # colocate ``placement(fraction=1.0)`` block, which is exactly what we
@@ -153,6 +169,23 @@ class AsyncARTrainer(ARTrainer):
         self._buffer_max_staleness = buffer_max_staleness
         self._weight_version = 0  # driver-tracked policy version (# of weight syncs issued)
         self._partial = bool(partial_rollout)  # slime-style interrupt-at-sync + carry
+        # Over-sampling: collect this many VALID groups in the buffer before a
+        # rollout consumes batch_size of them. 0/unset = OFF (exact-fit, the prior
+        # behavior). When >0 it must be >= batch_size (it is the OVER count). The
+        # surplus is RECYCLED — drain_freshest keeps the freshest batch_size and
+        # carries the rest forward in the buffer for the next step (bounded by the
+        # staleness window), so no completed generation is discarded.
+        self._over_sampling_batch_size = max(0, int(over_sampling_batch_size))
+        if 0 < self._over_sampling_batch_size < self.batch_size:
+            raise ValueError(
+                f"over_sampling_batch_size={self._over_sampling_batch_size} must be >= "
+                f"batch_size={self.batch_size} (it is the OVER count); 0 disables it."
+            )
+        # Dynamic sampling (DAPO): drop GRPO groups with zero reward variance — all
+        # samples got the identical reward (all-correct / all-wrong), so the group
+        # advantage is exactly 0 and contributes no gradient. Filtered groups never
+        # enter the buffer; sampling continues until enough VALID groups are held.
+        self._dynamic_sampling = bool(dynamic_sampling)
         self._carry = []  # incomplete generations awaiting continuation after a sync
         self._server_urls = []  # cached sglang /abort_request targets (filled post-rollout)
         # DP size of the TRAIN slab — the divisor for balance_shards (the parent
@@ -315,7 +348,25 @@ class AsyncARTrainer(ARTrainer):
         self._drop_decoded(req, resp, rollout_id=rec["gen_id"])
         (track,) = resp.tracks.values()
         for group in track.split():
+            if self._dynamic_sampling and self._group_has_no_signal(group):
+                continue  # DAPO: zero advantage variance → no gradient → drop
             self._buffer.put(group, weight_version=rec["weight_version"], gen_id=rec["gen_id"])
+
+    @staticmethod
+    def _group_has_no_signal(group: RolloutTrack) -> bool:
+        """True iff every sample in this GRPO group got the SAME reward.
+
+        That is the DAPO drop condition: identical rewards ⇒ group std 0 ⇒
+        ``compute_advantages`` returns 0 for every sample ⇒ no gradient. (Includes
+        the degenerate single-sample group, which is always zero-advantage.) A
+        group with any reward spread is kept. ``rewards`` may arrive as a worker
+        TensorRef, so hydrate before reducing."""
+        if group.rewards is None:
+            return False  # unscored — let it through; advantage path will handle it
+        r = hydrate(group.rewards).to(torch.float32)
+        if r.numel() <= 1:
+            return True
+        return bool(torch.isclose(r.max(), r.min()))
 
     def _reap_ready(self) -> None:
         """Move every completed in-flight generation into the buffer (scored)."""
@@ -556,7 +607,21 @@ class AsyncARTrainer(ARTrainer):
         launched now is consumed later, so bound how far ahead we launch to
         ``stale`` weight-syncs. ``stale=0`` ⇒ never launch into a future
         sync-window ⇒ no generation crosses a sync ⇒ ``ratio≈1`` (on-policy).
+
+        Over-sampling / dynamic-sampling: when ``over_sampling_batch_size > 0`` or
+        ``dynamic_sampling`` is on, gather ``target`` VALID groups before draining
+        the freshest ``batch_size`` (the surplus recycles forward in the buffer).
+        Generations launched to reach ``target`` are all for THIS consume, under the
+        current ``weight_version``, and are drained at the upcoming sync — so they
+        stay on-policy exactly like the single-generation case.
         """
+        oversampled = self._over_sampling_batch_size > 0 or self._dynamic_sampling
+        if not oversampled:
+            return self._next_batch_exact(rollout_id, interval, M, stale, num_rollouts)
+        return self._next_batch_oversampled(rollout_id, interval, M, stale, num_rollouts)
+
+    def _next_batch_exact(self, rollout_id: int, interval: int, M: int, stale: int, num_rollouts: int):
+        """Default (over-sampling OFF) path — unchanged exact-fit behavior."""
         while True:
             staleness_window = ((rollout_id // interval) + 1 + stale) * interval
             ceiling = min(num_rollouts, staleness_window)
@@ -574,3 +639,57 @@ class AsyncARTrainer(ARTrainer):
                 ray.get(self._inflight[0]["refs"])  # block on oldest; next _reap_ready harvests it
             else:
                 raise RuntimeError("async-ar: buffer underflow with no in-flight generations")
+
+    def _next_batch_oversampled(self, rollout_id: int, interval: int, M: int, stale: int, num_rollouts: int):
+        """Over-sampling / dynamic-sampling path: gather ``target`` VALID groups,
+        drain the freshest ``batch_size``, recycle the surplus.
+
+        ``target = max(batch_size, over_sampling_batch_size)`` valid groups must be
+        held before consuming. ``dynamic_sampling`` filters no-signal groups at
+        ``_score_into_buffer``, so reaching ``target`` may take several generations;
+        the launch budget scales by ``gens_for_target`` (still anchored to the same
+        per-rollout staleness window, so off-policy stays bounded). Generations for
+        this consume complete under the current weight version and are drained at the
+        upcoming sync — on-policy by construction, exactly as the exact-fit case.
+        """
+        target = max(self.batch_size, self._over_sampling_batch_size)
+        gens_for_target = -(-target // self.batch_size)  # ceil; reporting only
+        attempts = 0  # generations launched this consume — heavy-filter reporting
+        while True:
+            self._reap_ready()
+            have_valid = self._buffer.count_fresh(
+                current_version=self._weight_version, max_staleness=stale
+            )
+            if have_valid >= target:
+                # drain_freshest pops batch_size and carries the rest forward, so the
+                # over-sampled surplus is RECYCLED into the next consume (never dropped).
+                picked = self._buffer.drain_freshest(
+                    self.batch_size, current_version=self._weight_version, max_staleness=stale
+                )
+                if picked is not None:
+                    return picked
+
+            # Demand-driven launch gate: keep ``target`` groups in flight or in hand.
+            # Each generation is for THIS consume under the current weight_version and
+            # is drained at the upcoming sync, so on-policy holds (stale=0). The gate
+            # cannot busy-spin: when short of target it always has launch budget (up
+            # to M) — DAPO keeps sampling until enough VALID groups exist, no deadlock.
+            in_flight_groups = len(self._inflight) * self.batch_size
+            while len(self._inflight) < M and have_valid + in_flight_groups < target:
+                self._launch(self._launch_id)
+                self._launch_id += 1
+                attempts += 1
+                in_flight_groups = len(self._inflight) * self.batch_size
+
+            if self._inflight:
+                ray.get(self._inflight[0]["refs"])  # block on oldest; next _reap_ready harvests it
+                if attempts and attempts % (10 * gens_for_target) == 0:
+                    logger.warning(
+                        "over-sampling: %d/%d valid groups after %d generations "
+                        "(batch=%d) — heavy no-signal filtering; still sampling.",
+                        have_valid, target, attempts, self.batch_size,
+                    )
+            else:
+                # have_valid < target, in_flight empty, yet the gate launched nothing:
+                # only possible if target <= in-hand already handled above — unreachable.
+                raise RuntimeError("async-ar over-sampling: no progress (target unreachable)")

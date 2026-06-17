@@ -32,6 +32,19 @@ train_fraction: 0.5
 max_inflight: 1
 buffer_max_staleness: 0
 
+# Over-sampling / dynamic sampling (DAPO) — kill the across-group straggler and
+# filter no-signal groups. Both default OFF (this recipe is unchanged).
+#   over_sampling_batch_size: gather this many VALID groups before a rollout
+#     consumes batch_size (must be >= batch_size; 0 = off / exact-fit). The first
+#     batch_size freshest are trained; the surplus is RECYCLED forward in the
+#     buffer (not discarded). Needs max_inflight > 1 to overlap the extra gens.
+#   dynamic_sampling: drop GRPO groups whose samples all got the SAME reward
+#     (all-correct / all-wrong → zero advantage → no gradient); keep sampling
+#     until enough valid groups are collected.
+# Example (needs max_inflight > 1): over_sampling_batch_size: 96  dynamic_sampling: true
+over_sampling_batch_size: 0
+dynamic_sampling: false
+
 # Push the full dense weights into SGLang every N rollouts. =1 is the on-policy
 # reward-parity baseline vs the colocate ARTrainer (a sync sits between every
 # gen/train pair, so there is NO overlap). Set >1 to actually overlap

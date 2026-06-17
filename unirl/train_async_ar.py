@@ -19,6 +19,11 @@ Extra config knobs vs the colocate recipe:
   * ``max_inflight`` — concurrent generations (overlap depth). ``1`` ≈ one-step pipeline.
   * ``buffer_max_staleness`` — weight-syncs a buffered group may cross. ``0``/unset =
     on-policy (``ratio≈1``); ``>0`` = off-policy continuous buffer.
+  * ``over_sampling_batch_size`` — gather this many VALID groups before consuming
+    ``batch_size`` (surplus recycled). ``0``/unset = off (exact-fit). Needs
+    ``max_inflight > 1`` to overlap the extra generations. See docs/over_sampling.md.
+  * ``dynamic_sampling`` — DAPO: drop zero-advantage (all-same-reward) groups and
+    keep sampling until enough valid groups are held. Default ``false``.
 """
 
 from __future__ import annotations
@@ -56,6 +61,8 @@ def main(cfg: DictConfig) -> None:
         max_inflight=int(cfg.get("max_inflight", 1)),
         buffer_max_staleness=cfg.get("buffer_max_staleness"),
         partial_rollout=bool(cfg.get("partial_rollout", False)),
+        over_sampling_batch_size=int(cfg.get("over_sampling_batch_size", 0)),
+        dynamic_sampling=bool(cfg.get("dynamic_sampling", False)),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),
