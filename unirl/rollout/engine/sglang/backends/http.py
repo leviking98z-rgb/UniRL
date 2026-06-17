@@ -221,6 +221,15 @@ def _launch_server_with_compat(server_args):
         )
     except Exception:
         pass
+    # issue #94: FP8 rollout needs block-FP8 + re-quant-on-load so online weight
+    # resync does not crash (per-tensor fp8 drops weight_loader). No-op otherwise.
+    try:
+        if getattr(server_args, "quantization", None) == "fp8":
+            from unirl.distributed.weight_sync.transfer.fp8_server_patch import patch_fp8_block_resync
+            patch_fp8_block_resync()
+    except Exception as _e:
+        import sys
+        print(f"[fp8-resync-patch] FAILED to apply: {_e}", file=sys.stderr)
     from sglang.srt.entrypoints.http_server import launch_server
     launch_server(server_args)
 
