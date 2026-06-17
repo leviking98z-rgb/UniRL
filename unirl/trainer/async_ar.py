@@ -201,6 +201,17 @@ class AsyncARTrainer(ARTrainer):
             if sync_cfg is not None:
                 # NCCL handler: rollout is cross-slab and wired via the handshake
                 # below — it takes only ``backend`` (no rollout sibling).
+                # issue #94: FP8 rollout needs sender-side block-FP8 re-quant on the
+                # wire; auto-enable it from the rollout quantization so a single
+                # `rollout.config.quantization=fp8` is enough (no separate sync flag).
+                try:
+                    from omegaconf import OmegaConf, open_dict
+                    _q = OmegaConf.select(rollout_cfg, "config.quantization", default=None)
+                    if _q == "fp8" and OmegaConf.select(sync_cfg, "fp8_block_size", default=None) is None:
+                        with open_dict(sync_cfg):
+                            sync_cfg.fp8_block_size = [128, 128]
+                except Exception:
+                    pass
                 self.weight_sync = remote_hydra(sync_cfg, backend=self.backend)
         # Rollout slab = the rest (fraction is relative to the WHOLE pool).
         with placement(self.pool, fraction=1.0 - self._train_fraction, shared_workers=True):
