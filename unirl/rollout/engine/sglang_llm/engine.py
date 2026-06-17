@@ -43,6 +43,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+import zlib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -54,7 +55,7 @@ except ImportError:  # pragma: no cover - exercised only when httpx is missing
     httpx = None  # type: ignore[assignment]
 
 from unirl.config.require import require
-from unirl.distributed.group.dispatch import Dispatch, distributed
+from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.rollout.engine.base import BaseRolloutEngine
 from unirl.rollout.engine.sglang_llm._server import (
     find_free_port,
@@ -554,9 +555,16 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         )
 
         if httpx is not None:
+            # No connection cap: httpx defaults to max_connections=100 /
+            # max_keepalive=20, which throttles the rank-0 ROUTER (it drives
+            # cap*n_servers ≈ 256 concurrent requests across every engine's
+            # server — the default 100 ceiling starved the GPUs to ~59% util and
+            # erased the load-balance win). Keepalive must match so connections
+            # are reused, not churned.
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(None),
                 trust_env=False,
+                limits=httpx.Limits(max_connections=None, max_keepalive_connections=2048),
             )
 
         from transformers import AutoTokenizer
@@ -699,7 +707,39 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
 
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, req: RolloutReq) -> RolloutResp:
-        """Run text generation against the engine and return a typed response."""
+        """Run text generation against this engine's SRT server (static DP shard)."""
+        return self._generate_impl(req)
+
+    @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.ALL)
+    def get_server_url(self) -> str:
+        """Return this engine's reachable SRT base URL.
+
+        BROADCAST+ALL → the handle collects one URL per worker into a list, which
+        rank 0 then uses as the server pool for :meth:`generate_routed`.
+        """
+        return self._base_url
+
+    @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
+    def generate_routed(self, req: RolloutReq, server_urls: List[str]) -> RolloutResp:
+        """Rank-0 dynamic least-in-flight rollout router (cross-engine balance).
+
+        ``generate`` (DP_SCATTER) statically splits the batch into equal-COUNT
+        shards, one per engine, fixed before any token is produced. Because
+        response LENGTHS are unknown until runtime and cluster unevenly, the
+        slowest engine finishes 30-50% behind the mean (measured), and that max
+        is the generate phase. Here rank 0 instead holds the WHOLE batch and
+        sends each request over HTTP to whichever engine's SRT server currently
+        has the FEWEST in-flight requests. All engines carry synced weights →
+        any server is interchangeable; a server busy on a long generation stops
+        getting new work, so long requests spread out instead of piling on one
+        engine. This is the runtime adaptation static sharding cannot do.
+        """
+        return self._generate_impl(req, target_urls=list(server_urls))
+
+    def _generate_impl(self, req: RolloutReq, target_urls: Optional[List[str]] = None) -> RolloutResp:
+        """Shared generation body. ``target_urls=None`` → this engine's own
+        server (static path); a URL list → least-in-flight routing across them.
+        """
         require(
             int(req.batch_size) > 0,
             "SGLangLLMRolloutEngine.generate requires non-empty req (batch_size > 0)",
@@ -781,7 +821,17 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 # No processor: carry the raw image so the plain chat-template
                 # path still attends it via image_data (no replay alignment).
                 mm_encs = [MMEncoding(image=img) for img in pil_images]
-        raw_results = self._run_async_gather(prompts, sampling, mm_encs=mm_encs)
+        # Optional deterministic per-sample seed (benchmark only): keys each
+        # sample's RNG to its stable sample_id so static and router produce the
+        # SAME response for the SAME sample -> length-controlled A/B (kills the
+        # response-length confound that otherwise swamps the routing signal).
+        seeds = None
+        if os.environ.get("UNIRL_GEN_SEED") and req.sample_ids:
+            base = int(os.environ["UNIRL_GEN_SEED"])
+            seeds = [base ^ (zlib.crc32(str(sid).encode()) & 0x7FFFFFFF) for sid in req.sample_ids]
+        raw_results = self._run_async_gather(
+            prompts, sampling, mm_encs=mm_encs, target_urls=target_urls, seeds=seeds
+        )
         pad_id = getattr(self._tokenizer, "pad_token_id", None) or getattr(self._tokenizer, "eos_token_id", None) or 0
         return build_rollout_resp(
             req,
@@ -797,8 +847,14 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         prompts: List[str],
         sampling_params: Dict[str, Any],
         mm_encs: Optional[List["MMEncoding"]] = None,
+        target_urls: Optional[List[str]] = None,
+        seeds: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
-        """Drive ``_generate_text_async`` from a fresh event loop."""
+        """Drive ``_generate_text_async`` from a fresh event loop.
+
+        ``target_urls`` (router mode) routes each request least-in-flight across
+        the given SRT servers instead of this engine's own server.
+        """
         if self._http_client is None:
             raise RuntimeError(
                 "httpx is required for SGLangLLMRolloutEngine.generate. Install httpx: pip install httpx"
@@ -806,10 +862,21 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         t0 = time.perf_counter()
         loop = asyncio.new_event_loop()
         try:
-            results = loop.run_until_complete(self._generate_text_async(prompts, sampling_params, mm_encs=mm_encs))
+            results = loop.run_until_complete(
+                self._generate_text_async(
+                    prompts, sampling_params, mm_encs=mm_encs, target_urls=target_urls, seeds=seeds
+                )
+            )
         finally:
             loop.close()
         elapsed = time.perf_counter() - t0
+        # Per-engine generate wall-clock (print -> driver stdout, tagged by
+        # Worker pid). The spread of this across the DP engines within one
+        # rollout = the exact headroom any rollout balancer (static stripe or
+        # dynamic least-in-flight router) could ever recover.
+        if os.environ.get("UNIRL_ROUTER_DEBUG"):
+            tag = "ROUTER" if target_urls else "RANKGEN"
+            print(f"[{tag}] rank={getattr(self, 'rank', '?')} n={len(prompts)} t={elapsed:.2f}", flush=True)
         logger.info(
             "SGLangLLMRolloutEngine.generate: %d prompts -> %d results in %.2fs",
             len(prompts),
@@ -823,8 +890,15 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         prompts: List[str],
         sampling_params: Dict[str, Any],
         mm_encs: Optional[List["MMEncoding"]] = None,
+        target_urls: Optional[List[str]] = None,
+        seeds: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
-        """All prompts sent in parallel via asyncio.gather + Semaphore."""
+        """All prompts sent in parallel via asyncio.gather + Semaphore.
+
+        ``target_urls`` (router mode): each request is POSTed to whichever URL
+        currently has the fewest in-flight requests (least-in-flight balance);
+        otherwise all go to this engine's own ``self._base_url``.
+        """
         params = dict(sampling_params)
         n = int(params.pop("n", 1))
         temperature = float(params.get("temperature", 0.7))
@@ -838,14 +912,51 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         return_logprob = bool(params.get("return_logprob", True))
         system_instruction = params.pop("system_instruction", None)
 
-        sem = asyncio.Semaphore(self._concurrency)
+        # Router mode: per-server in-flight cap sets the work-stealing grain.
+        # Too high -> all requests dispatched up front (≈ static DP shard, no
+        # adaptation); ≈ the SRT running-batch cap -> requests are held on the
+        # asyncio semaphore and handed to the FREEST server as others drain
+        # (maximal work-stealing). Tunable via env for sweeps.
+        n_servers = len(target_urls) if target_urls else 1
+        if target_urls:
+            # cap*n_servers requests in flight at once; the rest wait on the
+            # semaphore and are work-stolen to the freest server as others drain.
+            # cap=16 is the MEASURED optimum (length-controlled real run): it
+            # matches the per-GPU SRT running-batch saturation point, so the GPUs
+            # stay throughput-saturated while the held backlog decorrelates the
+            # sibling-clustered load (+6% generate vs static). cap=32 over-fills
+            # the KV pool → throughput dips → -5%. cap<16 starves throughput.
+            router_cap = int(os.environ.get("UNIRL_ROUTER_CAP", "16"))
+            sem = asyncio.Semaphore(router_cap * n_servers)
+        else:
+            sem = asyncio.Semaphore(self._concurrency)
+        # Least-in-flight routing: pick the server with the fewest outstanding
+        # requests (count-based; sim-equivalent to elapsed-weighted but simpler).
+        # A long generation keeps its slot held, so its server's count stays up
+        # until the very tail — straggler mis-piling is negligible in practice.
+        inflight: Optional[Dict[str, int]] = {u: 0 for u in target_urls} if target_urls else None
+        # Diagnostics: per-server [request_count, summed_latency_s].
+        srv_stats: Optional[Dict[str, List[float]]] = (
+            {u: [0.0, 0.0] for u in target_urls} if target_urls else None
+        )
 
         extra_sampling: Dict[str, Any] = {}
         for key in ("stop", "stop_token_ids", "skip_special_tokens"):
             if key in params:
                 extra_sampling[key] = params[key]
 
-        async def _generate_one(prompt: str, mm_enc: Optional["MMEncoding"] = None) -> List[Dict[str, Any]]:
+        # Pre-tokenize text-only prompts ONCE, synchronously, before the async
+        # dispatch — keeps per-request chat-template tokenization (sync, CPU) off
+        # the event loop so it can't block HTTP read/dispatch mid-flight.
+        # Critical for the router: one rank's loop drives ALL N requests across
+        # every server, so a blocked loop starves every GPU.
+        pre_ids: Optional[List[Any]] = None
+        if mm_encs is None:
+            pre_ids = [self._apply_chat_template(p, system_instruction, has_image=False) for p in prompts]
+
+        async def _generate_one(
+            prompt: str, mm_enc: Optional["MMEncoding"] = None, idx: int = -1
+        ) -> List[Dict[str, Any]]:
             has_image = mm_enc is not None and mm_enc.image is not None
             sampling_block = {
                 "temperature": temperature,
@@ -855,6 +966,8 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 "n": n,
                 **extra_sampling,
             }
+            if seeds is not None and 0 <= idx < len(seeds):
+                sampling_block["sampling_seed"] = int(seeds[idx])
             if mm_enc is not None and mm_enc.text is not None:
                 # VLM (processor ran): send the chat-templated TEXT (single
                 # <|image_pad|>) + image_data so SRT's processor expands the
@@ -871,11 +984,16 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                     "logprob_start_len": 0,
                 }
             else:
-                prompt_token_ids = self._apply_chat_template(
-                    prompt,
-                    system_instruction,
-                    has_image=has_image,
-                )
+                # Use the pre-tokenized id (computed once up front, off the event
+                # loop) when available; else tokenize inline.
+                if pre_ids is not None and 0 <= idx < len(pre_ids):
+                    prompt_token_ids = pre_ids[idx]
+                else:
+                    prompt_token_ids = self._apply_chat_template(
+                        prompt,
+                        system_instruction,
+                        has_image=has_image,
+                    )
                 if prompt_token_ids is not None:
                     payload = {
                         "input_ids": prompt_token_ids,
@@ -898,7 +1016,19 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             if has_image:
                 payload["image_data"] = _pil_to_base64(mm_enc.image)
             async with sem:
-                response = await self._apost("/generate", payload)
+                if inflight is not None:
+                    base_url = min(inflight, key=inflight.__getitem__)
+                    inflight[base_url] += 1
+                    _rt0 = time.perf_counter()
+                    try:
+                        response = await self._apost("/generate", payload, base_url=base_url)
+                    finally:
+                        inflight[base_url] -= 1
+                        if srv_stats is not None:
+                            srv_stats[base_url][0] += 1
+                            srv_stats[base_url][1] += time.perf_counter() - _rt0
+                else:
+                    response = await self._apost("/generate", payload)
 
             parsed = _parse_one_response(response, prompt, prompt_token_ids, tokenizer=self._tokenizer)
             if not self._parse_response_logged_first and parsed:
@@ -918,8 +1048,15 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         tasks = []
         for i, p in enumerate(prompts):
             enc = mm_encs[i] if mm_encs is not None else None
-            tasks.append(_generate_one(p, enc))
+            tasks.append(_generate_one(p, enc, i))
         nested = await asyncio.gather(*tasks)
+        if srv_stats is not None and os.environ.get("UNIRL_ROUTER_DEBUG"):
+            # Per-server request count + summed latency (diagnostics): balanced
+            # busy => router adapted to length; skewed => it did not.
+            summary = " | ".join(
+                f"{u.rsplit(':', 1)[-1]}:n={int(c)},busy={t:.0f}s" for u, (c, t) in srv_stats.items()
+            )
+            print(f"[ROUTER-SRV] {summary}", flush=True)
         return [item for sublist in nested for item in sublist]
 
     async def _apost(
@@ -927,9 +1064,14 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         path: str,
         payload: Dict[str, Any],
         max_retries: int = 60,
+        base_url: Optional[str] = None,
     ) -> Any:
-        """Async POST with retry. Mirrors slime/utils/http_utils.py:165-198."""
-        url = f"{self._base_url}{path}"
+        """Async POST with retry. Mirrors slime/utils/http_utils.py:165-198.
+
+        ``base_url`` overrides ``self._base_url`` (router mode posts to peer
+        engines' servers).
+        """
+        url = f"{base_url or self._base_url}{path}"
         for attempt in range(max_retries):
             response = None
             try:

@@ -53,6 +53,7 @@ class ARTrainer(BaseTrainer):
         adv_normalization_scope: str = "group",
         normalize_adv_by_std: bool = True,
         balance_shards: bool = False,
+        balance_rollout: "bool | str" = False,
         eval_interval: int = 0,
         eval_num_prompts: int = 60,
         eval_samples_per_prompt: int = 16,
@@ -72,6 +73,20 @@ class ARTrainer(BaseTrainer):
         # rank's pace — without balancing, the rank that drew the longest
         # sequences straggles (~+/-11%% rank-total variance at heavy lengths).
         self.balance_shards = bool(balance_shards)  # overrides the BaseTrainer default (False)
+        # ROLLOUT-side load balance for the sglang generate phase. DP_SCATTER
+        # statically splits the batch into equal-COUNT shards (one per engine)
+        # before any token is produced; since response LENGTHS cluster unevenly
+        # at runtime, the slowest engine finishes ~30-50% behind the mean
+        # (measured) and that max IS the generate phase. Modes:
+        #   False/"off"  - static DP_SCATTER (baseline).
+        #   "stripe"/True - sibling-major transpose so each DP shard gets DISTINCT
+        #                   prompts; decorrelates siblings but cannot adapt to
+        #                   runtime length (measured ~0 net effect).
+        #   "router"     - DYNAMIC least-in-flight: rank 0 holds the whole batch
+        #                   and routes each request over HTTP to the engine with
+        #                   the fewest in-flight requests, so long generations
+        #                   spread out instead of piling on one engine.
+        self.balance_rollout = balance_rollout if isinstance(balance_rollout, str) else bool(balance_rollout)
         # AIME-style periodic eval — avg@k accuracy on the eval prompt set
         # (run.eval_data_path), logged under eval/*. eval_interval=0 disables it.
         self.eval_interval = int(eval_interval)
@@ -124,6 +139,35 @@ class ARTrainer(BaseTrainer):
         )
         return req
 
+    def _balance_req_for_dp(self, req: RolloutReq):
+        """Rollout-side DP balance: decorrelate GRPO siblings across sglang engines.
+
+        ``_build_req`` lays the req out prompt-major (``[p0×K, p1×K, …]``) and
+        ``generate`` is dispatched ``DP_SCATTER`` (contiguous shards), so all K
+        siblings of a prompt go to ONE engine. Transpose to sibling-major
+        (``[s0 of every prompt, s1 of every prompt, …]``) so each contiguous DP
+        shard receives a spread of distinct prompts (≤ ⌈shard/P⌉ siblings each),
+        preventing a hard prompt's K long generations from piling on (and
+        KV-saturating) a single engine.
+
+        Returns ``(balanced_req, restore)``. This is a GENERATE-DISPATCH-ONLY
+        reorder: the response is restored to the original prompt-major order via
+        ``restore`` so siblings are contiguous again for ``compute_advantages``
+        (which requires group-by-parent contiguous ordering). ``RolloutReq`` /
+        ``RolloutTrack`` are ``Batch``es; ``select`` re-indexes every per-sample
+        field. No-op (``restore=None``) for K≤1 or ragged N.
+        """
+        k = int(self.sampling_params.samples_per_prompt)
+        n = int(req.batch_size)
+        if k <= 1 or n % k != 0:
+            return req, None
+        p = n // k
+        perm = [pi * k + ki for ki in range(k) for pi in range(p)]
+        restore = [0] * n
+        for j, old in enumerate(perm):
+            restore[old] = j
+        return req.select(perm), restore
+
     def train_step(
         self,
         req: RolloutReq,
@@ -142,7 +186,28 @@ class ARTrainer(BaseTrainer):
         self.rollout.wake_up()
         if sync_weights and self.weight_sync is not None:
             self.weight_sync.sync()
-        resp = self.rollout.generate(req)
+        if self.balance_rollout == "router":
+            # Dynamic least-in-flight router: rank 0 holds the whole batch and
+            # dispatches each request to the freest engine's SRT server. No
+            # static DP shard, so the resp comes back in the ORIGINAL order
+            # (siblings contiguous) — no restore needed.
+            urls = self.rollout.get_server_url()
+            resp = self.rollout.generate_routed(req, urls)
+            if isinstance(resp, list):  # BROADCAST+RANK_ZERO collect → [resp]
+                resp = resp[0]
+        elif self.balance_rollout:
+            # Static stripe: reorder ONLY the generate dispatch (decorrelate
+            # siblings across DP engines); req stays prompt-major so
+            # reward/advantage below see the original, sibling-contiguous order.
+            # Restore the resp to that order.
+            gen_req, restore = self._balance_req_for_dp(req)
+            resp = self.rollout.generate(gen_req)
+            if restore is not None:
+                for name, track in list(resp.tracks.items()):
+                    if int(track.batch_size) == len(restore):
+                        resp.tracks[name] = track.select(restore)
+        else:
+            resp = self.rollout.generate(req)
         self.rollout.sleep()
 
         for name, track in list(resp.tracks.items()):

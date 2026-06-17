@@ -85,6 +85,7 @@ class PhaseTimer:
 _STEP_PHASE_SPECS = (
     ("rollout", "wake_up", "wake_up"),
     ("rollout", "generate", "generate"),
+    ("rollout", "generate_routed", "generate"),  # dynamic-router generate path
     ("rollout", "sleep", "sleep"),
     ("weight_sync", "sync", "weight_sync"),
     ("reward", "score_and_attach", "reward"),
