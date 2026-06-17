@@ -653,8 +653,14 @@ class AsyncARTrainer(ARTrainer):
         upcoming sync — on-policy by construction, exactly as the exact-fit case.
         """
         target = max(self.batch_size, self._over_sampling_batch_size)
-        gens_for_target = -(-target // self.batch_size)  # ceil; reporting only
-        attempts = 0  # generations launched this consume — heavy-filter reporting
+        gens_for_target = -(-target // self.batch_size)  # ceil
+        # Bound the refill like verl's ``max_num_gen_batches``: dynamic_sampling
+        # can filter EVERY group on homogeneous data (all-correct / all-wrong), so
+        # ``have_valid`` would never reach ``target`` and this launch loop would run
+        # forever (bounded concurrency M, but unbounded total). Fail closed with a
+        # clear error instead of hanging.
+        max_attempts = max(20, 30 * gens_for_target)
+        attempts = 0  # generations launched this consume
         while True:
             self._reap_ready()
             have_valid = self._buffer.count_fresh(
@@ -669,11 +675,23 @@ class AsyncARTrainer(ARTrainer):
                 if picked is not None:
                     return picked
 
+            # Fail closed if filtering never lets us reach target (homogeneous data
+            # → every group zero-variance → dropped). Without this the loop hangs
+            # forever; verl raises the same way via max_num_gen_batches.
+            if have_valid < target and attempts >= max_attempts:
+                raise ValueError(
+                    f"async-ar over-sampling: only {have_valid}/{target} valid groups after "
+                    f"{attempts} generations (batch={self.batch_size}) — dynamic_sampling is "
+                    f"filtering almost everything. The data is likely too easy/hard (every group "
+                    f"collapses to zero reward-variance) or the filter is too strict; relax the "
+                    f"filter or fix the data."
+                )
+
             # Demand-driven launch gate: keep ``target`` groups in flight or in hand.
             # Each generation is for THIS consume under the current weight_version and
-            # is drained at the upcoming sync, so on-policy holds (stale=0). The gate
-            # cannot busy-spin: when short of target it always has launch budget (up
-            # to M) — DAPO keeps sampling until enough VALID groups exist, no deadlock.
+            # is drained at the upcoming sync, so on-policy holds (stale=0). When short
+            # of target it always has launch budget (up to M); DAPO keeps sampling until
+            # enough VALID groups exist or ``max_attempts`` trips the guard above.
             in_flight_groups = len(self._inflight) * self.batch_size
             while len(self._inflight) < M and have_valid + in_flight_groups < target:
                 self._launch(self._launch_id)
