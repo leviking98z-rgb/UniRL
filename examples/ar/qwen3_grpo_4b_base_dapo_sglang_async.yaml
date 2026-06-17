@@ -32,6 +32,16 @@ train_fraction: 0.5
 max_inflight: 1
 buffer_max_staleness: 0
 
+# Decoupled reward (DEFAULT OFF). When true, reward.score_and_attach runs in a
+# bounded thread pool off the driver critical path so heavy verifiers (code-exec
+# / LLM-judge / remote reward server) overlap the next generate/train step. With
+# the in-process math-verify backend below scoring is ~free, so leave it off.
+# reward_max_concurrent_scorings caps in-flight scorings; reward_score_timeout_s
+# fails the run on a hung verifier. See docs/decoupled_reward.md.
+reward_decoupled: false
+reward_max_concurrent_scorings: 2
+reward_score_timeout_s: null
+
 # Push the full dense weights into SGLang every N rollouts. =1 is the on-policy
 # reward-parity baseline vs the colocate ARTrainer (a sync sits between every
 # gen/train pair, so there is NO overlap). Set >1 to actually overlap

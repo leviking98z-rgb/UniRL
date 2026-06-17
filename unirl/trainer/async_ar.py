@@ -33,6 +33,7 @@ opens the colocate ``placement(fraction=1.0)`` block we replace with two slabs).
 import inspect
 import logging
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
@@ -97,6 +98,88 @@ class _RolloutBuffer:
         return picked
 
 
+class _DecoupledScorer:
+    """Bounded-concurrency, off-critical-path reward scoring (config-gated).
+
+    Default-off opt-in for ``AsyncARTrainer``: when enabled, a completed
+    generation's ``reward.score_and_attach`` runs in a worker thread instead of
+    blocking the driver thread, so scoring overlaps the next
+    ``generate``/``train`` step. The driver only *launches* scoring here; the
+    blocking part is the reward Handle's ``ray.get`` inside
+    ``score_and_attach`` (the dispatch is grad-free, so no GradContext / shared
+    ``_grad_call_counter`` is touched — safe to run from a thread).
+
+    This DOES NOT touch the rollout buffer: the trainer attaches the scored
+    track and buffers the group back on the single driver thread when it reaps
+    the future, so every group is still scored before it can be trained on and
+    ordering/identity (keyed by ``gen_id``) is preserved.
+
+    Bounding:
+      * ``max_concurrent`` — max in-flight scorings (the thread-pool width). A
+        completed generation whose scoring would exceed the cap blocks the
+        submit, applying natural backpressure (never unbounded fan-out).
+      * ``timeout_s`` — per-scoring wall clock for slow verifiers
+        (code-exec / model-judge). ``None`` waits indefinitely (today's
+        behavior). On timeout the future's exception surfaces on reap, failing
+        the run rather than silently dropping a group.
+
+    Heavy verifiers are the payoff: UniRL already overlaps generation per group
+    inline, so this mainly helps when the reward itself is slow.
+    """
+
+    def __init__(self, *, max_concurrent: int, timeout_s: Optional[float]) -> None:
+        self.max_concurrent = max(1, int(max_concurrent))
+        self.timeout_s = float(timeout_s) if timeout_s is not None else None
+        self._pool = ThreadPoolExecutor(max_workers=self.max_concurrent, thread_name_prefix="reward-score")
+        # gen_id -> (future, callback) for completed generations awaiting scoring.
+        self._pending: Dict[int, Tuple[Future, Any]] = {}
+
+    def submit(self, gen_id: int, fn, on_done) -> None:
+        """Launch ``fn()`` (the blocking score_and_attach) in the pool.
+
+        Blocks the caller while ``max_concurrent`` scorings are already in
+        flight (bounded backpressure), then schedules the new one. ``on_done``
+        is invoked on the DRIVER thread at reap time with the scoring result, so
+        buffer mutation stays single-threaded.
+        """
+        while len(self._pending) >= self.max_concurrent:
+            self._reap_one(block=True)
+        self._pending[gen_id] = (self._pool.submit(fn), on_done)
+
+    def _reap_one(self, *, block: bool) -> bool:
+        """Reap a single finished scoring; returns True if one was reaped."""
+        for gen_id, (fut, on_done) in list(self._pending.items()):
+            if block or fut.done():
+                result = fut.result(timeout=self.timeout_s)  # re-raises scoring errors / TimeoutError
+                self._pending.pop(gen_id, None)
+                on_done(result)
+                return True
+        return False
+
+    def reap_ready(self) -> None:
+        """Reap every scoring that has finished (non-blocking)."""
+        while self._reap_one(block=False):
+            pass
+
+    def reap_one_blocking(self) -> None:
+        """Block until one in-flight scoring is reaped + buffered (no-op if none)."""
+        if self._pending:
+            self._reap_one(block=True)
+
+    @property
+    def pending(self) -> bool:
+        """True iff at least one scoring is in flight."""
+        return bool(self._pending)
+
+    def drain(self) -> None:
+        """Block until every in-flight scoring has been reaped + buffered."""
+        while self._pending:
+            self._reap_one(block=True)
+
+    def shutdown(self) -> None:
+        self._pool.shutdown(wait=True)
+
+
 class AsyncARTrainer(ARTrainer):
     """Disaggregated async AR trainer (two slabs, resident engine, NCCL sync)."""
 
@@ -128,6 +211,10 @@ class AsyncARTrainer(ARTrainer):
         max_inflight: int = 1,
         buffer_max_staleness: Optional[int] = None,
         partial_rollout: bool = False,
+        # ---- decoupled reward (config-gated, DEFAULT OFF) ----
+        reward_decoupled: bool = False,
+        reward_max_concurrent: int = 2,
+        reward_score_timeout_s: Optional[float] = None,
     ) -> None:
         # Call BaseTrainer.__init__ directly: ARTrainer.__init__ opens the
         # colocate ``placement(fraction=1.0)`` block, which is exactly what we
@@ -155,6 +242,20 @@ class AsyncARTrainer(ARTrainer):
         self._partial = bool(partial_rollout)  # slime-style interrupt-at-sync + carry
         self._carry = []  # incomplete generations awaiting continuation after a sync
         self._server_urls = []  # cached sglang /abort_request targets (filled post-rollout)
+        # Decoupled reward: run scoring off the driver critical path (DEFAULT OFF =
+        # exactly today's inline per-group scoring inside _score_into_buffer).
+        self._reward_decoupled = bool(reward_decoupled)
+        self._scorer: Optional[_DecoupledScorer] = (
+            _DecoupledScorer(max_concurrent=reward_max_concurrent, timeout_s=reward_score_timeout_s)
+            if self._reward_decoupled
+            else None
+        )
+        if self._reward_decoupled:
+            logger.info(
+                "AsyncARTrainer: decoupled reward ON (max_concurrent=%d, timeout_s=%s)",
+                max(1, int(reward_max_concurrent)),
+                reward_score_timeout_s,
+            )
         # DP size of the TRAIN slab — the divisor for balance_shards (the parent
         # uses self.num_devices because colocate training spans the whole pool;
         # here training only spans the train slab).
@@ -307,12 +408,45 @@ class AsyncARTrainer(ARTrainer):
 
         Scoring must precede ``_drop_decoded`` (the reward reads ``decoded``).
         Keyed by ``gen_id`` so media panels behave like the old pipeline path.
+
+        Default path (``reward_decoupled=false``): score inline, then buffer —
+        the driver blocks on ``score_and_attach``. When decoupled, the blocking
+        scoring is handed to the thread pool and ``_finish_into_buffer`` runs on
+        the driver thread once the future is reaped (single-threaded buffer).
+        """
+        if self._scorer is None:
+            scored = self._score_tracks(rec, resp)
+            self._finish_into_buffer(rec, resp, scored)
+            return
+        # Decoupled: launch scoring off the critical path; buffer on reap.
+        self._scorer.submit(
+            int(rec["gen_id"]),
+            lambda: self._score_tracks(rec, resp),
+            lambda scored: self._finish_into_buffer(rec, resp, scored),
+        )
+
+    def _score_tracks(self, rec: Dict[str, Any], resp: RolloutResp) -> Dict[str, RolloutTrack]:
+        """Score every scorable track of ``resp`` (the blocking reward call).
+
+        Returns the per-name scored tracks; does NOT mutate driver state, so it
+        is safe to run in a worker thread under the decoupled path.
         """
         req = rec["req"]
-        for name, track in list(resp.tracks.items()):
-            if track.segment is not None:
-                resp.tracks[name] = self.reward.score_and_attach(req=req, track=track)
-        self._drop_decoded(req, resp, rollout_id=rec["gen_id"])
+        return {
+            name: self.reward.score_and_attach(req=req, track=track)
+            for name, track in resp.tracks.items()
+            if track.segment is not None
+        }
+
+    def _finish_into_buffer(self, rec: Dict[str, Any], resp: RolloutResp, scored: Dict[str, RolloutTrack]) -> None:
+        """Attach scored tracks, drop decoded, and split groups into the buffer.
+
+        Runs on the single driver thread (inline or at decoupled-reap), so the
+        buffer stays lock-free and ordering/identity (keyed by ``gen_id``) holds.
+        """
+        for name, track in scored.items():
+            resp.tracks[name] = track
+        self._drop_decoded(rec["req"], resp, rollout_id=rec["gen_id"])
         (track,) = resp.tracks.values()
         for group in track.split():
             self._buffer.put(group, weight_version=rec["weight_version"], gen_id=rec["gen_id"])
@@ -336,6 +470,10 @@ class AsyncARTrainer(ARTrainer):
             else:
                 still.append(rec)
         self._inflight = still
+        # Decoupled reward: harvest any scorings that finished off the critical
+        # path so their groups land in the buffer (no-op when reward is inline).
+        if self._scorer is not None:
+            self._scorer.reap_ready()
 
     # ------------------------------------------------------------------
     # Partial rollout (slime-style): interrupt in-flight generations at the
@@ -400,6 +538,10 @@ class AsyncARTrainer(ARTrainer):
         logger.info("partial-rollout: sync boundary — %d generations aborted, %d carried for continuation",
                     len(self._inflight), len(self._carry))
         self._inflight = []
+        # Decoupled reward: scorings launched by the just-completed generations
+        # must finish + buffer before the weight sync (same barrier as _drain_all).
+        if self._scorer is not None:
+            self._scorer.drain()
 
     def _relaunch_carry(self) -> None:
         """After a weight sync, continue each carried generation from its tokens-
@@ -424,6 +566,11 @@ class AsyncARTrainer(ARTrainer):
         for rec in self._inflight:
             self._score_into_buffer(rec, self._collect_resp(rec["refs"], rec["worker_local"]))
         self._inflight = []
+        # Decoupled reward: block until every launched scoring is reaped +
+        # buffered. MANDATORY here — a weight sync / eval / checkpoint must not
+        # proceed with scorings still in flight (no-op when reward is inline).
+        if self._scorer is not None:
+            self._scorer.drain()
 
     # ------------------------------------------------------------------
     # Train tail (mirrors ar.py:152-182, minus wake/sleep) — reward parity
@@ -544,7 +691,9 @@ class AsyncARTrainer(ARTrainer):
                     if self._partial:
                         self._relaunch_carry()  # continue carried generations under new weights
         finally:
-            self._drain_all()
+            self._drain_all()  # drains in-flight generations AND any decoupled scorings
+            if self._scorer is not None:
+                self._scorer.shutdown()
             self._finish_wandb()
 
     def _next_batch(self, rollout_id: int, interval: int, M: int, stale: int, num_rollouts: int):
@@ -572,5 +721,9 @@ class AsyncARTrainer(ARTrainer):
                 return picked
             if self._inflight:
                 ray.get(self._inflight[0]["refs"])  # block on oldest; next _reap_ready harvests it
+            elif self._scorer is not None and self._scorer.pending:
+                # Decoupled reward: no generation is in flight, but scorings are —
+                # block on one so its group lands in the buffer (next loop reaps it).
+                self._scorer.reap_one_blocking()
             else:
                 raise RuntimeError("async-ar: buffer underflow with no in-flight generations")

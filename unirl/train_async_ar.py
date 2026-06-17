@@ -19,6 +19,11 @@ Extra config knobs vs the colocate recipe:
   * ``max_inflight`` — concurrent generations (overlap depth). ``1`` ≈ one-step pipeline.
   * ``buffer_max_staleness`` — weight-syncs a buffered group may cross. ``0``/unset =
     on-policy (``ratio≈1``); ``>0`` = off-policy continuous buffer.
+  * ``reward_decoupled`` — run reward scoring off the driver critical path so it
+    overlaps the next generate/train step (DEFAULT ``false`` = today's inline
+    per-group scoring). ``reward_max_concurrent_scorings`` bounds in-flight
+    scorings; ``reward_score_timeout_s`` caps a slow verifier (see
+    ``docs/decoupled_reward.md``).
 """
 
 from __future__ import annotations
@@ -56,6 +61,12 @@ def main(cfg: DictConfig) -> None:
         max_inflight=int(cfg.get("max_inflight", 1)),
         buffer_max_staleness=cfg.get("buffer_max_staleness"),
         partial_rollout=bool(cfg.get("partial_rollout", False)),
+        # Decoupled reward knobs (top-level, like the other async knobs; the
+        # `reward` block is reserved for RewardService.__init__ kwargs). DEFAULT
+        # OFF: reward_decoupled=false ⇒ exactly today's inline per-group scoring.
+        reward_decoupled=bool(cfg.get("reward_decoupled", False)),
+        reward_max_concurrent=int(cfg.get("reward_max_concurrent_scorings", 2)),
+        reward_score_timeout_s=cfg.get("reward_score_timeout_s"),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),
