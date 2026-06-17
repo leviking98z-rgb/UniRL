@@ -200,7 +200,7 @@ in-flight straggler) dominates per-rollout time (drain 37s of 47s). There, remov
 the barrier is a 2.65× win.
 
 A second bench at **batch_size=64, max_new_tokens=8192** (matching the optstack
-vanilla-GRPO reference run , 512 samples/rollout) shows **no throughput
+vanilla-GRPO reference run b31s0usr, 512 samples/rollout) shows **no throughput
 gain**:
 
 | | baseline (drain) | partial (repeated-abort) |
