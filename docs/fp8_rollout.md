@@ -48,8 +48,9 @@ bf16-vs-bf16 does. If that gap were ignored, the update would be biased: we woul
 weight gradients by an `mu` the engine never actually sampled from.
 
 It is *not* ignored. The AR algorithms anchor the importance ratio on the
-**rollout engine's emitted logprobs** (`algorithm.old_logp_source='rollout'`, the
-default for GRPO/CPPO/DRPO). The per-token ratio is
+**rollout engine's emitted logprobs** — `algorithm.old_logp_source='rollout'` on
+CPPO/DRPO, while GRPO has no such field and uses the rollout-emitted logp
+unconditionally (equivalent to `'rollout'`). The per-token ratio is
 
 ```
 r_t = exp(new_logp - old_logp) = pi_BF16(a_t) / mu_FP8(a_t)
