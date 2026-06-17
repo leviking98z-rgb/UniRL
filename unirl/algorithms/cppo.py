@@ -54,7 +54,10 @@ from .base import (
     AlgorithmStepResult,
     BaseAlgorithmConfig,
     StageAlgorithm,
+    _validate_tis_level,
+    _validate_tis_mode,
     rollout_replay_logp_absdiff,
+    tis_correction,
     typed_conditions,
 )
 from .grpo import GRPO
@@ -110,6 +113,13 @@ class CPPOConfig(BaseAlgorithmConfig):
     # policy CPPO anchors on); "replay" freezes a train-side pi_old at pre-update
     # weights in prepare_segment instead.
     old_logp_source: str = "rollout"
+    # Truncated Importance Sampling (TIS, verl rollout_is). DEFAULT OFF (None).
+    # ~2.0 turns it on; see docs/tis.md. Requires old_logp_source='rollout' so the
+    # rollout logp mu is available and slice-aligned (segment.log_probs). Mirrors
+    # verl rollout_is_threshold/level/mode.
+    tis_clip: Optional[float] = None
+    tis_level: str = "token"
+    tis_mode: str = "truncate"
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +324,9 @@ class CPPO(StageAlgorithm):
         horizon: int = 8192,
         sampling_temperature: Optional[float] = None,
         old_logp_source: str = "rollout",
+        tis_clip: Optional[float] = None,
+        tis_level: str = "token",
+        tis_mode: str = "truncate",
         conditions_cls: Optional[Type[Any]] = None,
     ) -> None:
         super().__init__()
@@ -350,6 +363,17 @@ class CPPO(StageAlgorithm):
         self.old_logp_source = str(old_logp_source).strip().lower()
         if self.old_logp_source not in ("rollout", "replay"):
             raise ValueError(f"CPPO: old_logp_source must be 'rollout' or 'replay'; got {old_logp_source!r}")
+        # Truncated Importance Sampling (verl rollout_is). DEFAULT OFF. Requires
+        # old_logp_source='rollout': only then is segment.log_probs the rollout
+        # logp mu (in 'replay' mode prepare_segment overwrites it). See docs/tis.md.
+        self.tis_clip = None if tis_clip is None else float(tis_clip)
+        self.tis_level = _validate_tis_level(tis_level)
+        self.tis_mode = _validate_tis_mode(tis_mode)
+        if self.tis_clip is not None and self.old_logp_source != "rollout":
+            raise ValueError(
+                "CPPO: tis_clip requires old_logp_source='rollout' so the rollout logp mu "
+                "is available (in 'replay' mode prepare_segment overwrites segment.log_probs)."
+            )
 
     def prepare_segment(
         self,
@@ -417,6 +441,24 @@ class CPPO(StageAlgorithm):
             delta_b=self.cppo_delta_b,
         )
 
+        # Truncated Importance Sampling (TIS, verl rollout_is). OFF unless
+        # tis_clip is set; the constructor pins old_logp_source='rollout', so
+        # old_logp IS the rollout logp mu. Truncates the train-vs-rollout weight
+        # pi_train/mu one-sidedly and multiplies it (detached) onto the per-token
+        # loss — composed ON TOP OF the CPPO Binary-TV keep-mask. See docs/tis.md.
+        tis_metrics: Dict[str, Any] = {}
+        if self.tis_clip is not None:
+            tis_w, tis_m = tis_correction(
+                new_logp=new_logp,
+                rollout_logp=old_logp,
+                lengths=lengths,
+                tis_clip=self.tis_clip,
+                tis_level=self.tis_level,
+                tis_mode=self.tis_mode,
+            )
+            loss_per_elem = loss_per_elem * tis_w
+            tis_metrics = {k: float(v.item()) for k, v in tis_m.items()}
+
         # Apply loss_mask if present (token-level masking for padding/eos).
         if segment.loss_mask is not None:
             mask = segment.loss_mask.to(dtype=loss_per_elem.dtype, device=loss_per_elem.device)
@@ -437,6 +479,7 @@ class CPPO(StageAlgorithm):
             "cppo_delta": self.cppo_delta,
             **rollout_replay_logp_absdiff(new_logp, old_logp),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
+            **tis_metrics,
         }
         return AlgorithmStepResult(
             loss=float(loss.detach().item()),

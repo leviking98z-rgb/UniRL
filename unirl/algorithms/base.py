@@ -112,6 +112,133 @@ def _resolve_clip_range_from_schedule(clip_range: float, schedule: str, progress
     return clip_range
 
 
+def _validate_tis_level(tis_level: str) -> str:
+    """Normalize+validate the TIS level (verl ``rollout_is_level``)."""
+    level = str(tis_level).strip().lower()
+    if level not in ("token", "sequence"):
+        raise ValueError(f"tis_level must be 'token' or 'sequence'; got {tis_level!r}")
+    return level
+
+
+def _validate_tis_mode(tis_mode: str) -> str:
+    """Normalize+validate the TIS mode (verl ``rollout_is_mode``)."""
+    mode = str(tis_mode).strip().lower()
+    if mode not in ("truncate", "mask"):
+        raise ValueError(f"tis_mode must be 'truncate' or 'mask'; got {tis_mode!r}")
+    return mode
+
+
+def tis_correction(
+    *,
+    new_logp: torch.Tensor,
+    rollout_logp: torch.Tensor,
+    lengths: Optional[torch.Tensor],
+    tis_clip: float,
+    tis_level: str = "token",
+    tis_mode: str = "truncate",
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Truncated Importance Sampling (TIS) correction — verl ``rollout_is`` parity.
+
+    Returns a per-token multiplicative weight ``w`` (and metrics) that corrects
+    the rollout-vs-train distribution mismatch. The importance weight is
+
+        w_t = exp(new_logp_t - rollout_logp_t) = π_train(a_t) / μ_rollout(a_t)
+
+    i.e. the ratio of the *current train policy* to the *rollout (behaviour)
+    policy* μ that actually drew the tokens. ``rollout_logp`` is the rollout
+    engine's emitted log-prob (μ); ``new_logp`` is the train-time replay at the
+    current weights (π_train). The weight is then truncated **one-sidedly** at
+    ``tis_clip`` (verl ``rollout_is_threshold``) and **detached** — it is a
+    sampling-correction factor, not part of the differentiable objective, so it
+    rescales the gradient-carrying policy surrogate it multiplies rather than
+    re-introducing a gradient term (mirrors verl, which detaches ``tis_imp_ratio``).
+
+    Modes (verl ``rollout_is_mode``):
+      - ``"truncate"`` (default): ``w = min(IS, C)``. The weight saturates at the
+        cap but the surrogate it multiplies keeps its gradient — a soft
+        down-weighting of over-weighted tokens, NOT a hard clip that zeroes the
+        gradient the way the PPO ``torch.clamp`` does. This is the verl
+        ``truncate`` correction (one-sided, upper only).
+      - ``"mask"``: ``w = (IS <= C)`` — a 0/1 keep mask that drops tokens whose
+        train/rollout weight exceeds the cap (verl ``mask`` mode). The kept
+        tokens carry full weight 1, so this is an inclusion gate, not a rescale.
+
+    Levels (verl ``rollout_is_level``):
+      - ``"token"`` (default): the weight is per-token.
+      - ``"sequence"``: one weight per sequence, the product of its per-token IS
+        weights (``exp`` of the per-sequence sum of ``new_logp - rollout_logp``),
+        truncated once, then broadcast back over the sequence's tokens.
+        Requires ``lengths``.
+
+    Composition with the existing PPO clip / DRPO penalty: TIS is applied **on
+    top of** whatever per-token loss the algorithm already produced (which still
+    contains its own PPO ratio / clip / quadratic regularizer). See ``docs/tis.md``
+    for the precise relationship to UniRL's already-rollout-anchored ratio — in
+    particular, when ``old_logp_source='rollout'`` the PPO ratio denominator IS
+    ``rollout_logp``, so the PPO ratio already equals the IS weight; TIS then adds
+    only a one-sided truncation guard beyond the (two-sided) PPO clip. When
+    ``old_logp_source='replay'`` the PPO ratio is train/train (pure policy drift)
+    and TIS supplies the genuinely separate train/rollout correction verl applies.
+
+    Args:
+        new_logp: train-time replay log-probs π_train. ``[total_tokens]``.
+        rollout_logp: rollout engine log-probs μ. ``[total_tokens]``.
+        lengths: per-sequence token counts (needed for ``"sequence"`` level).
+        tis_clip: truncation cap ``C`` (verl ``rollout_is_threshold``; ~2.0).
+        tis_level: ``"token"`` | ``"sequence"``.
+        tis_mode: ``"truncate"`` | ``"mask"``.
+
+    Returns:
+        ``(weight, metrics)``. ``weight`` is detached ``[total_tokens]``; the
+        caller multiplies it into its per-token loss before reduction.
+    """
+    with torch.no_grad():
+        log_is = new_logp - rollout_logp  # log π_train/μ_rollout
+        if tis_level == "sequence":
+            if lengths is None:
+                raise ValueError("tis_correction: tis_level='sequence' requires `lengths`.")
+            parts = torch.split(log_is, lengths.tolist())
+            seq_log_is = torch.stack([p.sum() if p.numel() else p.new_zeros(()) for p in parts])
+            seq_is = torch.exp(seq_log_is)  # ∏_t π/μ over the sequence
+            if tis_mode == "mask":
+                seq_w = (seq_is <= tis_clip).to(dtype=new_logp.dtype)
+            else:  # truncate
+                seq_w = torch.clamp(seq_is, max=tis_clip)
+            chunks = [
+                seq_w[k].expand(int(lengths[k].item()))
+                for k in range(int(lengths.shape[0]))
+                if int(lengths[k].item()) > 0
+            ]
+            weight = (
+                torch.cat(chunks, dim=0)
+                if chunks
+                else torch.zeros(0, dtype=new_logp.dtype, device=new_logp.device)
+            )
+            is_ratio = seq_is
+        else:  # token level
+            is_ratio = torch.exp(log_is)
+            if tis_mode == "mask":
+                weight = (is_ratio <= tis_clip).to(dtype=new_logp.dtype)
+            else:  # truncate
+                weight = torch.clamp(is_ratio, max=tis_clip)
+        if is_ratio.numel() > 0:
+            metrics = {
+                "tis_weight_mean": weight.mean().detach(),
+                "tis_is_ratio_mean": is_ratio.mean().detach(),
+                "tis_is_ratio_max": is_ratio.max().detach(),
+                "tis_truncated_fraction": (is_ratio > tis_clip).float().mean().detach(),
+            }
+        else:
+            zero = torch.zeros((), dtype=new_logp.dtype, device=new_logp.device)
+            metrics = {
+                "tis_weight_mean": zero,
+                "tis_is_ratio_mean": zero,
+                "tis_is_ratio_max": zero,
+                "tis_truncated_fraction": zero,
+            }
+    return weight.detach(), metrics
+
+
 def _grpo_clip_loss(
     *,
     new_logp: torch.Tensor,
@@ -303,5 +430,6 @@ __all__ = [
     "StageAlgorithm",
     "gather_sde_field",
     "rollout_replay_logp_absdiff",
+    "tis_correction",
     "typed_conditions",
 ]
