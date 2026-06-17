@@ -194,5 +194,3 @@ Requirements / interactions:
   scheduler + barrier removal + recorded-logprob ratio) is argued above and built on
   the same recorded-logprob property that partial rollout validated end-to-end
   (`ratio_mean≈1.0` across syncs).
-</content>
-</invoke>
