@@ -105,6 +105,7 @@ class FullWeightSync(Remote):
         name_remap: Optional[Dict[str, Optional[str]]] = None,
         track_prefix: str = "",
         wire_dtype: Any = None,
+        fp8_block_size: Any = None,
     ) -> None:
         super().__init__()
         # Deferred: unirl.utils.dtypes imports torch at module scope, and this
@@ -145,6 +146,8 @@ class FullWeightSync(Remote):
         self._track_prefix = str(track_prefix or "")
         # Wire dtype for the weight walk (None = ship as-is); see class docstring.
         self._wire_dtype = parse_torch_dtype(wire_dtype, field_name="wire_dtype", allow_none=True)
+        # issue #94: block-FP8 re-quant on the wire (sender-side, verl-style).
+        self._fp8_block_size = [int(fp8_block_size[0]), int(fp8_block_size[1])] if fp8_block_size else None
         self.weight_version = 0
 
     # ------------------------------------------------------------------

@@ -51,6 +51,7 @@ class NCCLWeightSync(FullWeightSync):
         name_remap: Optional[Dict[str, Optional[str]]] = None,
         track_prefix: str = "",
         wire_dtype: Any = None,
+        fp8_block_size: Any = None,
     ) -> None:
         super().__init__(
             backend=backend,
@@ -61,6 +62,7 @@ class NCCLWeightSync(FullWeightSync):
             name_remap=name_remap,
             track_prefix=track_prefix,
             wire_dtype=wire_dtype,
+            fp8_block_size=fp8_block_size,
         )
         self._group_name = str(group_name)
         self._model_update_group = None  # set on rank 0 in connect()
@@ -158,6 +160,9 @@ class NCCLWeightSync(FullWeightSync):
         for bucket, is_last in self._iter_buckets():
             if not is_rank0:
                 continue  # ranks >= 1 only drive the train-mesh all-gather
+            if self._fp8_block_size is not None:
+                from unirl.distributed.weight_sync.transfer.fp8_requant import requantize_named_weights
+                bucket = list(requantize_named_weights(bucket, weight_block_size=self._fp8_block_size, verify=False))
             names = [n for n, _ in bucket]
             dtypes = [str(t.dtype) for _, t in bucket]
             shapes = [list(t.shape) for _, t in bucket]

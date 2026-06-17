@@ -221,15 +221,6 @@ def _launch_server_with_compat(server_args):
         )
     except Exception:
         pass
-    # issue #94: FP8 rollout needs block-FP8 + re-quant-on-load so online weight
-    # resync does not crash (per-tensor fp8 drops weight_loader). No-op otherwise.
-    try:
-        if getattr(server_args, "quantization", None) == "fp8":
-            from unirl.distributed.weight_sync.transfer.fp8_server_patch import patch_fp8_block_resync
-            patch_fp8_block_resync()
-    except Exception as _e:
-        import sys
-        print(f"[fp8-resync-patch] FAILED to apply: {_e}", file=sys.stderr)
     from sglang.srt.entrypoints.http_server import launch_server
     launch_server(server_args)
 
@@ -291,6 +282,19 @@ class HTTPBackend:
 
         allowed = {f.name for f in dataclasses.fields(rt["ServerArgs"])}
         server_kwargs = {k: v for k, v in server_intent.items() if k in allowed}
+        # issue #94: FP8 rollout = block-FP8 engine fed pre-quantized (fp8,scale_inv)
+        # weights by the sender (NCCLWeightSync). Configure the engine as block-FP8
+        # *serialized* via a model-config override, and skip the BF16 disk load
+        # (load_format=dummy) — the first weight sync (pre-rollout) provides real
+        # block-FP8 weights. No server-side load patch needed.
+        if server_kwargs.get("quantization") == "fp8":
+            import json as _json
+            _qc = {"quantization_config": {"quant_method": "fp8", "fmt": "e4m3",
+                   "activation_scheme": "dynamic", "weight_block_size": [128, 128]}}
+            if "json_model_override_args" in allowed:
+                server_kwargs["json_model_override_args"] = _json.dumps(_qc)
+            if "load_format" in allowed:
+                server_kwargs["load_format"] = "dummy"
 
         # --- Env quarantine: everything the SRT subprocess needs, set at the
         # spawn boundary (the spec's documented last resort) — never in the
