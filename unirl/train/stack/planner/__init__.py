@@ -14,6 +14,7 @@ reference the planners by ``_target_`` (resolved through ``unirl.train.stack``).
 """
 
 from unirl.train.stack.planner.count import CountPlanner, _count_plan
+from unirl.train.stack.planner.gap import GAPPlanner
 from unirl.train.stack.planner.packed import TokenBudgetPlanner
 from unirl.train.stack.planner.types import (
     MicroPlanner,
@@ -26,6 +27,7 @@ from unirl.train.stack.planner.types import (
 
 __all__ = [
     "CountPlanner",
+    "GAPPlanner",
     "MicroPlanner",
     "Plan",
     "Range",
