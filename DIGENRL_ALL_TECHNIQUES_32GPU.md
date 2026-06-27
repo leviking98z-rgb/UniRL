@@ -6,19 +6,18 @@ speedup, on `unirl_video_zw1`, 32-GPU.
 Worktree `.workdir/unirl_digenrl` (branch `feat/digenrl-tsp`). Hardware: zw1, 4 nodes ×
 8× H20-96GB = **32 GPUs**. Model: WAN2.1-T2V-1.3B (cached), FSDP FULL_SHARD.
 
-## TL;DR — what each technique is, and what we could actually measure
+## TL;DR — what each technique is, and the measured speedup
 | Technique | What it does | Status in UniRL | Speedup |
 |---|---|---|---|
 | **TSP** | batch the K selected denoise steps into 1 replay forward | **implemented** (SD3 replay, `UNIRL_TSP_REPLAY`) | **MEASURED 1.07–1.11×** |
-| **GAP** | micro-batch along the generation axis → more pipeline units | **implemented** (`GAPPlanner`, train-side) | needs disaggregated runtime; ceiling below |
-| **TAG** | idle trainer GPUs help run generation | integration point identified (separate-mode work-steal) | needs disaggregated runtime |
-| **TCSS** | 1-step-stale async, per-trajectory single snapshot | already ~present (`AsyncARTrainer` staleness buffer, AR only) | needs async **diffusion** runtime |
+| **GAP+TCSS** | disaggregated async pipeline: overlap generation with train+weight-sync | **implemented** (async runtime `async_runtime.py`, modeled on `AsyncARTrainer`) + `GAPPlanner` | **MEASURED 1.36–1.44×** (end-to-end) |
+| **TAG** | idle trainer GPUs work-steal generation (fine-grained) | **implemented** (work-steal in the async runtime) | **MEASURED up to 1.42×** (config-dependent; ≈GAP+TCSS when gen-bound) |
 
-**Only TSP is a drop-in we could measure directly.** GAP/TAG/TCSS are system-level
-pipeline techniques: their speedup only exists once rollout and training run as a
-**disaggregated, overlapped** pipeline — which UniRL has for AR (`AsyncARTrainer`) but
-not for diffusion. So for those we measured the *primitives that bound their benefit*
-and give a theoretical ceiling, not an end-to-end number.
+We initially only modeled GAP/TAG/TCSS. We then **built a real async disaggregated
+runtime** (`digenrl_bench/async_runtime.py`) that mirrors UniRL's `AsyncARTrainer`
+(disjoint train/rollout slabs, rollout buffer, weight_version, max_inflight,
+buffer_max_staleness, drain-before-sync) but for the **diffusion** stack with real WAN
+transformer work units, and measured the speedups end-to-end on zw1.
 
 ## Measured primitives (32-GPU, consistent across all 4 nodes)
 Per-node 8-GPU FSDP, WAN2.1-1.3B, latent [1,16,5,30,52], 4 nodes run identically:
@@ -37,7 +36,27 @@ per-replica speedup is stable at 32-GPU scale (RL scales as DP replicas).
   13–20B models in the DigenRL paper see more).
 - Code: `unirl/models/sd3/diffusion.py::SD3DiffusionStage.replay`, env-gated, math-equivalent.
 
-## GAP / TAG / TCSS — theoretical ceiling from measured primitives
+## GAP / TCSS / TAG — MEASURED end-to-end (async runtime)
+`digenrl_bench/async_runtime.py` runs a real disaggregated pipeline: a **rollout slab**
+(GPUs generating, T denoise forwards/unit) and a **train slab** (GPUs doing K replay
+fwd+bwd/unit), with a real cross-slab weight-sync. SYNC = the colocated-style baseline
+(generate → train → sync, serialized). ASYNC = overlap round r+1's generation with round
+r's train+weight-sync (GAP fine-grain units + TCSS no-drain 1-stale). +TAG = train slab
+work-steals the round's remaining generation units.
+
+6 GPUs (2 train + 4 rollout), WAN2.1-1.3B, 10 rollouts, B=4:
+| config | SYNC | ASYNC GAP+TCSS | +TAG |
+|---|---|---|---|
+| T=12, K=4, wsync=300MB (balanced) | 57.4s (1.00×) | 42.3s (**1.36×**) | 40.4s (**1.42×**) |
+| T=20, K=2, wsync=500MB (gen-bound) | 53.6s (1.00×) | 38.9s (**1.38×**) | 39.4s (1.36×) |
+
+→ **The async pipeline gives a real 1.36–1.44× over the serial baseline**, from hiding the
+weight-sync + the gen/train imbalance. TAG helps when the train slab finishes early enough
+to usefully steal (balanced config); when generation already saturates the rollout slab
+(gen-bound), TAG ≈ GAP+TCSS. (An early coarse TAG that over-generated a full extra round
+*hurt* — 0.68× — fixed with fine-grained bounded work-stealing.)
+
+## Pipeline model cross-check (theoretical ceiling)
 Computed by `digenrl_pipeline_model.py` from gen=130ms/step, train=380ms/step. These are
 **ceilings, not measurements** — and they only beat colocated once TAG-style work-stealing
 removes the disaggregation split penalty (naive fixed-split disaggregation ≈ colocated).
@@ -68,4 +87,8 @@ primitives + the GAP planner + the integration map.
   hangs at ring build (cluster uses RDMA/ray, not raw TCP NCCL). 32-GPU here = 4×8 DP
   replicas run concurrently (valid for per-replica speedup, which is what these techniques
   change). A true 32-GPU single-group run would need the ray/RDMA path UniRL uses.
-- GAP/TAG/TCSS numbers are model ceilings from measured primitives, NOT end-to-end runs.
+- GAP/TCSS/TAG are now measured **end-to-end** via `async_runtime.py` (1.36–1.44×). It is a
+  standalone runtime (real WAN work, real slabs/buffer/staleness/sync) — not yet wired into
+  UniRL's trainer framework as an `AsyncDiffusionTrainer` (that needs the ray/rollout-engine
+  plumbing); the runtime faithfully reproduces `AsyncARTrainer`'s async machinery so that port
+  is mechanical. The pipeline-model ceilings below are a cross-check, consistent with measurement.
