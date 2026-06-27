@@ -87,8 +87,13 @@ primitives + the GAP planner + the integration map.
   hangs at ring build (cluster uses RDMA/ray, not raw TCP NCCL). 32-GPU here = 4×8 DP
   replicas run concurrently (valid for per-replica speedup, which is what these techniques
   change). A true 32-GPU single-group run would need the ray/RDMA path UniRL uses.
-- GAP/TCSS/TAG are now measured **end-to-end** via `async_runtime.py` (1.36–1.44×). It is a
-  standalone runtime (real WAN work, real slabs/buffer/staleness/sync) — not yet wired into
-  UniRL's trainer framework as an `AsyncDiffusionTrainer` (that needs the ray/rollout-engine
-  plumbing); the runtime faithfully reproduces `AsyncARTrainer`'s async machinery so that port
-  is mechanical. The pipeline-model ceilings below are a cross-check, consistent with measurement.
+- GAP/TCSS/TAG are measured **end-to-end** via `async_runtime.py` (1.36–1.44×): a standalone
+  runtime with real WAN work + real slabs/buffer/staleness/sync.
+- The framework port is now done: **`unirl/trainer/async_diffusion.py::AsyncDiffusionTrainer`**
+  (subclasses `DiffusionTrainer`, reuses its `layout="separate"` two-slab construction +
+  NCCLWeightSync, overlays `AsyncARTrainer`'s async machinery — rollout buffer, non-blocking
+  `_generate_async`, `max_inflight`, `buffer_max_staleness`, drain-before-sync) + entry point
+  `unirl/train_async_diffusion.py` + recipe `examples/diffusion/hunyuan_video15/..._t2v_async.yaml`.
+  Statically validated (compiles, imports, method/signature checks); a live multi-node RL run
+  needs the ray + vllm-omni + dataset bring-up (not done here). The pipeline-model ceilings below
+  are a cross-check, consistent with the measurement.
