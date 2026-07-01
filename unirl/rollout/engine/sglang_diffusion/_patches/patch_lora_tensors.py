@@ -78,6 +78,13 @@ _METHODS_SENTINEL = "_unirl_lora_from_tensors_methods"
 _SETLORA_SENTINEL = "_unirl_lora_tensors_param"
 _LAYER_SENTINEL = "_unirl_lora_online_layer"
 
+# Reserved key for an adapter-level LoRA alpha, stored alongside the per-layer
+# weight keys in ``lora_adapters[nickname]`` and read by the fork's
+# ``_apply_lora_to_layers`` (which we do NOT override) as the scale source for
+# every layer. Value MUST match the fork's ``ADAPTER_ALPHA_KEY`` constant. The
+# double-underscore prefix cannot collide with any transformer layer name.
+_ADAPTER_ALPHA_KEY = "__adapter_alpha__"
+
 
 def patch_lora_tensors() -> None:
     """Install the fork's in-memory / online LoRA path on upstream ``LoRAPipeline``."""
@@ -151,8 +158,17 @@ def patch_lora_tensors() -> None:
             lora_nickname: str,
             lora_path,
             rank: int,
+            adapter_alpha=None,
         ) -> None:
-            """Shared logic: normalize names, merge fused params, store in lora_adapters."""
+            """Shared logic: normalize names, merge fused params, store in lora_adapters.
+
+            ``adapter_alpha`` (optional) is one alpha for the whole adapter, stored
+            once under ``_ADAPTER_ALPHA_KEY`` and consumed by the fork's
+            ``_apply_lora_to_layers`` as the scale (alpha / rank) for every layer.
+            This is the rename-robust path: unlike a per-layer ``<layer>.alpha`` key
+            (whose name must survive param-renaming to line up with its weight), one
+            adapter-level value needs no name alignment at all.
+            """
             if lora_nickname in self.lora_adapters:
                 self.lora_adapters[lora_nickname].clear()
 
@@ -168,6 +184,11 @@ def patch_lora_tensors() -> None:
             to_merge_params: defaultdict[Hashable, dict[Any, Any]] = defaultdict(dict)
             for name, weight in lora_state_dict.items():
                 name = name.replace("diffusion_model.", "")
+                # LoRA scale is delivered adapter-wide via ``adapter_alpha`` (below),
+                # not as per-layer ``<layer>.alpha`` wire keys. Drop any stray alpha
+                # key so it is not mis-handled as a weight by the mapping/merge path.
+                if name.endswith(".alpha"):
+                    continue
                 name = name.replace(".weight", "")
                 # misc-format -> HF-format
                 name, _, _ = lora_param_names_mapping_fn(name)
@@ -190,6 +211,10 @@ def patch_lora_tensors() -> None:
                         f"Dit target weight name {target_name} already exists in lora_adapters[{lora_nickname}]"
                     )
                 self.lora_adapters[lora_nickname][target_name] = weight.to(self.device)
+            if adapter_alpha is not None:
+                # One alpha for the whole adapter; the fork's _apply_lora_to_layers
+                # uses it as the scale source for every layer (scale = alpha / rank).
+                self.lora_adapters[lora_nickname][_ADAPTER_ALPHA_KEY] = torch.tensor(float(adapter_alpha))
             if lora_path is not None:
                 self.loaded_adapter_paths[lora_nickname] = lora_path
             logger.info("Rank %d: registered LoRA adapter %s", rank, lora_path or lora_nickname)
@@ -199,10 +224,13 @@ def patch_lora_tensors() -> None:
             lora_tensors: dict,
             lora_nickname: str,
             rank: int,
+            adapter_alpha=None,
         ) -> None:
             """Load LoRA adapter from in-memory tensors instead of a file path."""
             lora_state_dict = normalize_lora_state_dict(lora_tensors, logger=logger)
-            self._register_lora_state_dict(lora_state_dict, lora_nickname, None, rank)
+            self._register_lora_state_dict(
+                lora_state_dict, lora_nickname, None, rank, adapter_alpha=adapter_alpha
+            )
 
         def handle_weight_sync(self, updated_module_names: set) -> None:
             """Handle LoRA state after ALL weight sync buckets have been applied.
@@ -273,6 +301,7 @@ def patch_lora_tensors() -> None:
             merge_weights=None,
             merge_mode=None,
             lora_tensors=None,
+            lora_alpha=None,
         ):
             """Upstream ``set_lora`` + a fork ``lora_tensors=`` in-memory branch.
 
@@ -281,6 +310,10 @@ def patch_lora_tensors() -> None:
             config so upstream re-applies them (LoRA weights change every step),
             then delegate to upstream ``set_lora`` with ``lora_path=None``.
             Otherwise behaviour is byte-for-byte upstream.
+
+            ``lora_alpha`` (optional) is the adapter-level alpha for the in-memory
+            path; it is stored once per adapter and used as the scale source by
+            ``_apply_lora_to_layers``. ``None`` leaves the scale at alpha == rank.
             """
             if lora_tensors is not None:
                 # set_lora always pre-wraps layers when uninitialized, but the
@@ -296,7 +329,7 @@ def patch_lora_tensors() -> None:
                         self.convert_to_lora_layers()
                 # Always reload from tensors — LoRA weights change after each
                 # training step and must be refreshed on every sync.
-                self.load_lora_adapter_from_tensors(lora_tensors, nickname, rank)
+                self.load_lora_adapter_from_tensors(lora_tensors, nickname, rank, adapter_alpha=lora_alpha)
                 # Invalidate cached config so _check_lora_config_matches does not
                 # short-circuit re-application of the (changed) adapter.
                 tgt_list = target if isinstance(target, list) else [target]
