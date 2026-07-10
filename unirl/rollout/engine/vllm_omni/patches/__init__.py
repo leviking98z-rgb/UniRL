@@ -60,6 +60,18 @@ def install() -> None:
 
     VLLMOmniHijack.hijack()
 
+    # MoE route-capture for HunyuanImage3 (cross-engine route-replay): patches
+    # HunyuanImage3SparseMoeBlock.forward to record per-token expert selection
+    # when a capture_session is active. Gated by env (default off) so it never
+    # touches the normal rollout path unless route-replay is turned on. The
+    # patch itself is inert without an active session, so install is cheap.
+    import os
+
+    if os.environ.get("UNIRL_MOE_ROUTE_CAPTURE", "0") == "1":
+        from unirl.rollout.engine.vllm_omni.patches import moe_route_capture
+
+        moe_route_capture.install()
+
 
 def __getattr__(name: str):
     if name in ("VLLMOmniHijack", "OmniTensorLoRARequest"):
