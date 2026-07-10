@@ -215,24 +215,28 @@ def apply_route_replay(
 def _router_logits(gate: torch.nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
     """Full per-expert router logits [tokens, n_experts], differentiable.
 
-    HunyuanMoE's ``gate`` returns (topk_weights, topk_idx) when called; we need
-    the pre-topk logits to renormalize over the frozen experts. Probe, in order:
-      1) gate.get_logits(hidden_states)         (explicit accessor, if present)
-      2) gate.gate(hidden_states) / gate.wg(...)/ gate.weight linear
-      3) fallback: gate(hidden_states, topk_impl='full') -> full dense weights
-    Kept defensive because HunyuanImage3's gate is trust_remote_code and its
-    exact API isn't pinned here; a wrong path must fail loud, not silently.
+    HunyuanTopKGate computes ``logits = self.wg(hidden_states)`` where ``wg`` is
+    an fp32 ``nn.Linear`` (modeling_hunyuan_image_3.py:1111). We need these
+    pre-topk logits to reproduce ``easy_topk`` on the frozen experts. Probe order:
+      1) gate.get_logits(hidden_states)     (explicit accessor, if added)
+      2) gate.wg(hidden_states)             (HunyuanTopKGate's router linear)
+      3) gate.weight linear / gate.gate     (generic fallbacks)
+    Kept defensive + fail-loud: a wrong path must raise, not silently mis-route.
     """
     flat = hidden_states.reshape(-1, hidden_states.shape[-1])
     for attr in ("get_logits", "router_logits", "compute_logits"):
         fn = getattr(gate, attr, None)
         if callable(fn):
             return fn(flat)
+    # HunyuanTopKGate.wg is the fp32 router linear (matches modeling exactly).
+    wg = getattr(gate, "wg", None)
+    if isinstance(wg, torch.nn.Module):
+        return wg(flat.float() if getattr(getattr(wg, "weight", None), "dtype", None) == torch.float32 else flat)
     # a plain nn.Linear-style router: gate.weight [n_experts, hidden]
     w = getattr(gate, "weight", None)
     if isinstance(w, torch.Tensor) and w.dim() == 2:
         return torch.nn.functional.linear(flat.to(w.dtype), w)
-    inner = getattr(gate, "gate", None) or getattr(gate, "wg", None)
+    inner = getattr(gate, "gate", None)
     if isinstance(inner, torch.nn.Module):
         return inner(flat)
     raise RuntimeError(
@@ -247,15 +251,24 @@ def _recompute_gating_weights(
     forced_idx: torch.Tensor,
     ref: torch.Tensor,
 ) -> torch.Tensor:
-    """g_e on the frozen experts, from the router's CURRENT logits (differentiable).
+    """g_e on the frozen experts, reproducing HunyuanTopKGate.easy_topk EXACTLY,
+    but from the router's CURRENT logits (differentiable) so router keeps grad.
 
-    softmax-over-selected (renormalize on the top_k), matching HunyuanMoE's
-    ``easy_topk`` convention (softmax of the selected logits). This keeps the
-    gradient path Router -> logits -> g -> loss intact.
+    Official easy_topk (modeling_hunyuan_image_3.py:1132):
+        gates = softmax(logits, dim=-1)          # over ALL experts
+        w1, idx = topk(gates, moe_topk)
+        w = w1 / clamp(w1.sum(-1, keepdim=True), min=1e-8)
+    So the gating weight of a frozen expert e is:
+        softmax(logits)[e], then renormalized over the frozen top_k.
+    NOTE (route-replay pitfall #4): softmax is over ALL experts THEN gather —
+    NOT softmax over the selected logits. Getting this wrong makes g mismatch
+    even when the expert selection is correct.
     """
-    logits = _router_logits(gate, hidden_states)  # [tokens, n_experts], grad-enabled
-    sel = torch.gather(logits, dim=-1, index=forced_idx.to(logits.device))  # [tokens, top_k]
-    weights = torch.softmax(sel, dim=-1)
+    logits = _router_logits(gate, hidden_states)          # [tokens, n_experts], grad-enabled
+    gates = torch.softmax(logits, dim=-1)                 # over ALL experts (official)
+    sel = torch.gather(gates, dim=-1, index=forced_idx.to(logits.device))  # [tokens, top_k]
+    weight_sums = torch.clamp(sel.sum(dim=-1, keepdim=True), min=1e-8)
+    weights = sel / weight_sums                           # renormalize over frozen top_k
     return weights.to(ref.dtype)
 
 
