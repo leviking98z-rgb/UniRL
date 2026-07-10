@@ -621,14 +621,37 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
                     if hasattr(transformer.cached_rope, _rope_attr):
                         setattr(transformer.cached_rope, _rope_attr, None)
 
-            out = transformer(
-                input_ids=full_ids,
-                attention_mask=mask_4d,
-                mode="gen_text",
-                past_key_values=None,
-                use_cache=False,
-                return_dict=True,
+            # MoE route-replay: if the rollout recorded per-token expert routing
+            # (segment.routing, [total_tokens, n_layers, top_k]), force the
+            # response tokens onto the recorded experts so the teacher-forced
+            # replay can't route-flip vs the rollout (silent MoE logp divergence).
+            # The prompt tokens (offset=pl) keep live routing — their rollout
+            # routing lives in the rollout engine (cross-engine capture, separate
+            # step); response-only replay still aligns the tokens that enter loss.
+            # No-op (inert session) when segment.routing is None (dense / not recorded).
+            _resp_routing = None
+            if getattr(segment, "routing", None) is not None:
+                # [rl, n_layers, top_k] -> per-layer [rl, top_k] visit order
+                _rr = segment.routing[cu[b] : cu[b] + rl].to(device=device, dtype=torch.long)
+                _resp_routing = _rr.permute(1, 0, 2).contiguous()  # [n_layers, rl, top_k]
+
+            from unirl.train.backend.veomni.ep.route_replay import route_replay_session
+            from contextlib import nullcontext
+
+            _rr_ctx = (
+                route_replay_session(mode="replay", routing=_resp_routing, replay_offset=pl)
+                if _resp_routing is not None
+                else nullcontext()
             )
+            with _rr_ctx:
+                out = transformer(
+                    input_ids=full_ids,
+                    attention_mask=mask_4d,
+                    mode="gen_text",
+                    past_key_values=None,
+                    use_cache=False,
+                    return_dict=True,
+                )
             logits = getattr(out, "logits", None)
             if logits is None:
                 raise RuntimeError("HunyuanImage3ARStage.replay: model output has no .logits")

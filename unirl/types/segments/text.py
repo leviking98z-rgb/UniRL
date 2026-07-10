@@ -37,6 +37,12 @@ class TextSegment(Segment):
     tokens: Optional[torch.Tensor] = packed_field(default=None)
     log_probs: Optional[torch.Tensor] = packed_field(default=None)
     loss_mask: Optional[torch.Tensor] = packed_field(default=None)
+    # MoE route-replay: per-token expert selection recorded at rollout, shape
+    # ``[total_tokens, n_layers, top_k]`` (long). Packed along dim 0 exactly like
+    # ``tokens`` — so it rides through DP-shard / pack / slice / select with the
+    # token it belongs to (no token<->routing misalignment). None for dense
+    # models or MoE runs that don't record routing.
+    routing: Optional[torch.Tensor] = packed_field(default=None)
 
     def as_condition_with(self, encoder: Callable[..., Any]) -> Condition:
         """Re-embed packed tokens via the supplied encoder into a TextEmbedCondition.

@@ -140,6 +140,14 @@ class FusedHunyuanMoE(nn.Module):
         bsz, seq, hidden = hidden_states.shape
         shared = self.shared_mlp(hidden_states) if self.shared_mlp is not None else None
         topk_weights, topk_idx = self.gate(hidden_states, topk_impl="easy")
+        # MoE route-replay hook (inert unless a record/replay session is active):
+        # record mode captures topk_idx; replay mode forces the recorded experts
+        # and recomputes topk_weights from the live router (keeps router grad).
+        # Placed after the router, before the expert kernel, so the grouped-GEMM
+        # path below is unchanged.
+        from unirl.train.backend.veomni.ep.route_replay import apply_route_replay
+
+        topk_weights, topk_idx = apply_route_replay(self.gate, hidden_states, topk_weights, topk_idx)
         topk_weights = topk_weights.to(hidden_states.dtype)
         # The EP-sharded expert params are DTensors (each rank's local experts).
         # The Triton grouped-GEMM kernel needs raw local tensors, not DTensors.
