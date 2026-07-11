@@ -304,12 +304,96 @@ class VLLMOmniBackend:
                 generate_kwargs["lora_request"] = self._lora_request()
             flat = list(omni.generate(call.prompts, sp_list, **generate_kwargs))
             if call.group_by_request_id:
-                groups.extend(_group_by_request(flat, len(call.prompts)))
+                new_groups = _group_by_request(flat, len(call.prompts))
             else:
                 # Single-prompt call: its flat list IS the per-request group
                 # (the v1 dit_recaption per-prompt path, byte-for-byte).
-                groups.append(flat)
+                new_groups = [flat]
+            # MoE route-replay: drain the AR worker's captured routing and split
+            # it back to per-request slices, stamping each onto its stage-0
+            # output's custom_output. Env-gated + best-effort (never breaks gen).
+            self._maybe_drain_routing(new_groups)
+            groups.extend(new_groups)
         return groups
+
+    def _maybe_drain_routing(self, groups: List[List[OmniRawResult]]) -> None:
+        """Drain AR-worker MoE routing (UNIRL_MOE_ROUTE_CAPTURE=1) and stamp
+        per-request slices onto stage-0 outputs' custom_output['moe_routing'].
+
+        routing from the worker is [n_layers, total_tok, top_k] with a
+        forward_ntok list (token count per forward, serial across requests since
+        AR runs max_num_seqs=1). Each request's stage-0 output has token_ids of
+        known length; we consume forwards until we've covered that length.
+        Best-effort: any mismatch/exception leaves routing unstamped (falls back
+        to no-route-replay for this rollout).
+        """
+        import os
+
+        if os.environ.get("UNIRL_MOE_ROUTE_CAPTURE", "0") != "1":
+            return
+        try:
+            import torch
+
+            omni = self._require_omni()
+            # AR stage id: stage 0. Drain returns per-rank; TP=1 for AR here.
+            results = omni.engine.collective_rpc(method="_diffrl_drain_routing", stage_ids=[0])
+            rank0 = results[0] if isinstance(results, list) and results else results
+            if isinstance(rank0, list) and rank0:
+                rank0 = rank0[0]
+            if not rank0:
+                return
+            routing, forward_ntok = rank0  # ([n_layers, total_tok, top_k] | None, [int])
+            if routing is None or not forward_ntok:
+                return
+            # Walk requests in group order; consume forwards to cover each
+            # request's stage-0 token count.
+            tok_cursor = 0   # column into routing's total_tok axis
+            fwd_cursor = 0   # index into forward_ntok
+            fwd_starts = [0]
+            for n in forward_ntok:
+                fwd_starts.append(fwd_starts[-1] + n)
+            for grp in groups:
+                stage0 = next((o for o in grp if getattr(o, "stage_id", None) == 0), None)
+                if stage0 is None:
+                    continue
+                ro = getattr(stage0, "request_output", None)
+                outs = getattr(ro, "outputs", None) if ro is not None else None
+                n_resp = len(getattr(outs[0], "token_ids", []) or []) if outs else 0
+                # This request consumed prefill(prompt) + n_resp decode forwards.
+                # We only need the columns; consume forwards until their summed
+                # token count crosses the request's full span. But routing covers
+                # ALL tokens (prompt+response); response tokens are the LAST
+                # n_resp columns of this request's span. Consume forwards until
+                # we've advanced by (this request's total tokens).
+                # Determine this request's total tokens by consuming forwards
+                # until the next request would start — but we don't know prompt
+                # len here directly; instead consume forwards greedily: a request
+                # is prefill(>=1 tok) followed by n_resp single-token decodes.
+                start_col = tok_cursor
+                # consume 1 prefill forward + n_resp decode forwards
+                consumed_forwards = 1 + n_resp
+                end_fwd = fwd_cursor + consumed_forwards
+                if end_fwd > len(forward_ntok):
+                    break  # mismatch — bail, leave rest unstamped
+                span = sum(forward_ntok[fwd_cursor:end_fwd])
+                req_routing = routing[:, start_col:start_col + span, :]  # [L, span, top_k]
+                # response tokens are the LAST n_resp columns
+                if n_resp > 0 and req_routing.shape[1] >= n_resp:
+                    resp_routing = req_routing[:, -n_resp:, :]  # [L, n_resp, top_k]
+                    cout = getattr(stage0, "custom_output", None)
+                    if cout is None:
+                        try:
+                            stage0.custom_output = {}
+                            cout = stage0.custom_output
+                        except Exception:
+                            cout = None
+                    if cout is not None:
+                        cout["moe_routing"] = resp_routing
+                tok_cursor = start_col + span
+                fwd_cursor = end_fwd
+        except Exception:
+            # best-effort: routing capture must never break generation
+            return
 
     def _build_sampling_params(self, sampling: StageSampling, *, attach_lora: bool) -> Any:
         if sampling.kind == STAGE_KIND_AR:

@@ -36,7 +36,23 @@ class HI3ARWeightSyncExtension(
 ):
     """Receive-side extension for the HI3 AR stage."""
 
-    pass
+    def _diffrl_drain_routing(self):
+        """Drain the process-global MoE route-capture buffer on this worker.
+
+        Called by the driver via ``collective_rpc`` after each AR generate (when
+        UNIRL_MOE_ROUTE_CAPTURE=1). Returns ``(routing, forward_ntok)``: routing
+        is a CPU int64 tensor ``[n_layers, total_tok, top_k]`` (or None) and
+        forward_ntok is the per-forward token-count list the driver uses to split
+        routing back to per-request slices. Draining resets the buffer for the
+        next rollout. Inert ((None, [])) if capture disabled or this process never
+        ran the AR MoE.
+        """
+        try:
+            from unirl.rollout.engine.vllm_omni.patches.moe_route_capture import drain_global
+
+            return drain_global()
+        except Exception:
+            return None, []
 
 
 __all__ = ["HI3ARWeightSyncExtension"]

@@ -349,6 +349,7 @@ def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
 
     rows_tokens: List[List[int]] = []
     rows_logps: List[Optional[torch.Tensor]] = []
+    rows_routing: List[Optional[torch.Tensor]] = []
     found_any_stage0 = False
 
     for outputs in per_request:
@@ -360,12 +361,26 @@ def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
         if stage0 is None:
             rows_tokens.append([])
             rows_logps.append(None)
+            rows_routing.append(None)
             continue
         toks, logp = _extract_completion(stage0)
         if toks:
             found_any_stage0 = True
         rows_tokens.append(toks)
         rows_logps.append(logp)
+        # MoE route-replay: custom_output['moe_routing'] is [n_layers, n_resp, top_k]
+        # (stamped by the backend after draining the AR worker). TextSegment.routing
+        # wants per-sample [n_resp, n_layers, top_k] (packed dim-0 = token axis).
+        routing = None
+        cout = getattr(stage0, "custom_output", None)
+        if isinstance(cout, dict):
+            r = cout.get("moe_routing")
+            if r is not None:
+                try:
+                    routing = r.permute(1, 0, 2).contiguous().to(torch.long)  # [n_resp, n_layers, top_k]
+                except Exception:
+                    routing = None
+        rows_routing.append(routing)
 
     if not found_any_stage0:
         return None
@@ -376,9 +391,26 @@ def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
     if have_logp:
         log_probs_list = [lp if lp is not None else torch.zeros(0, dtype=torch.float32) for lp in rows_logps]
 
+    # routing: all-or-nothing across token-bearing rows, and each row's routing
+    # length must match its token count (else drop — never emit misaligned routing).
+    routing_list: Optional[List[torch.Tensor]] = None
+    have_routing = rows_routing and all(
+        (r is not None and r.shape[0] == len(toks))
+        for toks, r in zip(rows_tokens, rows_routing) if toks
+    )
+    if have_routing:
+        # infer n_layers/top_k from first non-empty
+        ref = next(r for r in rows_routing if r is not None and r.shape[0] > 0)
+        nlyr, topk = ref.shape[1], ref.shape[2]
+        routing_list = [
+            r if (r is not None and r.shape[0] > 0) else torch.zeros((0, nlyr, topk), dtype=torch.long)
+            for r in rows_routing
+        ]
+
     return TextSegment.pack(
         tokens=tokens_list,
         log_probs=log_probs_list,
+        routing=routing_list,
     )
 
 
