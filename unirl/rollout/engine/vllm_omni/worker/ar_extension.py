@@ -39,23 +39,26 @@ class HI3ARWeightSyncExtension(
     def _diffrl_drain_routing(self):
         """Drain the process-global MoE route-capture buffer on this worker.
 
-        Returns ``(routing_npy, forward_ntok)``: routing is a NumPy int16 array
-        ``[n_layers, total_tok, top_k]`` (or None). We return NumPy (not a torch
-        tensor) because collective_rpc's serialization turns torch tensors into
-        nested Python lists (losing the tensor type on the driver side); a NumPy
-        array round-trips as an array. int16 halves the wire size (expert ids <
-        64k). forward_ntok is the per-forward token-count list.
+        Returns ``(shape_tuple, raw_bytes, forward_ntok)`` or ``(None, None, [])``.
+
+        WHY bytes (Bug3c): vllm's collective_rpc serializes the return value with
+        ``msgspec.msgpack``. msgpack has NO numpy/torch support, so a returned
+        tensor/ndarray is coerced into nested Python lists (losing the type on the
+        driver side — that's the bug we hit). msgpack DOES pass ``bytes``
+        through verbatim, so we ship the routing as int16 raw bytes + its shape,
+        and the driver rebuilds the tensor with np.frombuffer. No collective_rpc
+        tensor-serialization, no NCCL group, no shared file.
         """
         try:
             from unirl.rollout.engine.vllm_omni.patches.moe_route_capture import drain_global
 
             routing, ntok = drain_global()
             if routing is None:
-                return None, []
-            # torch int64 [L, T, K] -> numpy int16 (expert ids are small)
-            return routing.to("cpu").numpy().astype("int16"), ntok
+                return None, None, []
+            arr = routing.to("cpu").numpy().astype("int16")  # expert ids < 64k
+            return tuple(int(s) for s in arr.shape), arr.tobytes(), ntok
         except Exception:
-            return None, []
+            return None, None, []
 
 
 __all__ = ["HI3ARWeightSyncExtension"]

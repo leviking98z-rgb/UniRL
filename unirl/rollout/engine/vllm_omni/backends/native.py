@@ -351,21 +351,22 @@ class VLLMOmniBackend:
             import torch as _t
 
             def _find_routing(obj, depth=0):
-                """Recursively find the first (routing, ntok) pair from the rpc
-                return. routing comes back as a NumPy array (worker returns
-                numpy so it survives collective_rpc serialization); convert to a
-                torch tensor. Returns (routing_tensor, ntok) or (None, [])."""
+                """Recursively find the routing payload from the rpc return.
+
+                Worker returns ``(shape_tuple, raw_bytes_int16, ntok_list)`` — bytes
+                survive msgpack verbatim (unlike tensors/ndarrays, which msgpack
+                coerces to nested lists; that was Bug3c). Rebuild the tensor via
+                np.frombuffer. Returns (routing_tensor, ntok) or (None, [])."""
                 import numpy as _np
 
-                if depth > 5:
+                if depth > 6:
                     return None, []
-                # a (routing, ntok) pair — tuple OR list (rpc may listify tuples)
-                if isinstance(obj, (tuple, list)) and len(obj) == 2:
-                    a, b = obj
-                    if isinstance(a, _np.ndarray) and a.ndim == 3:
-                        return _t.from_numpy(a.astype("int64")), b
-                    if _t.is_tensor(a) and a.dim() == 3:
-                        return a, b
+                # (shape_tuple, raw_bytes, ntok) triple
+                if isinstance(obj, (tuple, list)) and len(obj) == 3:
+                    shp, raw, ntok = obj
+                    if isinstance(raw, (bytes, bytearray)) and isinstance(shp, (tuple, list)) and len(shp) == 3:
+                        arr = _np.frombuffer(bytes(raw), dtype=_np.int16).reshape(tuple(int(s) for s in shp))
+                        return _t.from_numpy(arr.astype("int64")), list(ntok)
                 if isinstance(obj, (list, tuple)):
                     for it in obj:
                         r, n = _find_routing(it, depth + 1)
@@ -407,13 +408,18 @@ class VLLMOmniBackend:
                     break
             if routing is None or not forward_ntok:
                 return
-            # Walk requests in group order; consume forwards to cover each
-            # request's stage-0 token count.
-            tok_cursor = 0   # column into routing's total_tok axis
-            fwd_cursor = 0   # index into forward_ntok
-            fwd_starts = [0]
+            # Walk requests in group order. Each request's forward sequence is
+            # [prefill forward(s)] + [n_resp decode forwards]. With chunked
+            # prefill a prompt can span MULTIPLE prefill forwards, so we CANNOT
+            # assume "1 prefill + n_resp decodes". Instead we identify decode
+            # forwards by their token count == 1 (autoregressive step emits one
+            # token). We only need the response routing = the n_resp decode
+            # forwards' columns, so we walk forward: skip prefill forwards
+            # (ntok > 1), collect n_resp decode forwards (ntok == 1).
+            col_starts = [0]
             for n in forward_ntok:
-                fwd_starts.append(fwd_starts[-1] + n)
+                col_starts.append(col_starts[-1] + n)
+            fwd_cursor = 0
             for grp in groups:
                 stage0 = next((o for o in grp if getattr(o, "stage_id", None) == 0), None)
                 if stage0 is None:
@@ -421,27 +427,26 @@ class VLLMOmniBackend:
                 ro = getattr(stage0, "request_output", None)
                 outs = getattr(ro, "outputs", None) if ro is not None else None
                 n_resp = len(getattr(outs[0], "token_ids", []) or []) if outs else 0
-                # This request consumed prefill(prompt) + n_resp decode forwards.
-                # We only need the columns; consume forwards until their summed
-                # token count crosses the request's full span. But routing covers
-                # ALL tokens (prompt+response); response tokens are the LAST
-                # n_resp columns of this request's span. Consume forwards until
-                # we've advanced by (this request's total tokens).
-                # Determine this request's total tokens by consuming forwards
-                # until the next request would start — but we don't know prompt
-                # len here directly; instead consume forwards greedily: a request
-                # is prefill(>=1 tok) followed by n_resp single-token decodes.
-                start_col = tok_cursor
-                # consume 1 prefill forward + n_resp decode forwards
-                consumed_forwards = 1 + n_resp
-                end_fwd = fwd_cursor + consumed_forwards
-                if end_fwd > len(forward_ntok):
-                    break  # mismatch — bail, leave rest unstamped
-                span = sum(forward_ntok[fwd_cursor:end_fwd])
-                req_routing = routing[:, start_col:start_col + span, :]  # [L, span, top_k]
-                # response tokens are the LAST n_resp columns
-                if n_resp > 0 and req_routing.shape[1] >= n_resp:
-                    resp_routing = req_routing[:, -n_resp:, :]  # [L, n_resp, top_k]
+                if n_resp <= 0:
+                    continue
+                # collect the columns of this request's decode forwards
+                resp_cols = []
+                got = 0
+                while fwd_cursor < len(forward_ntok) and got < n_resp:
+                    nt = forward_ntok[fwd_cursor]
+                    if nt == 1:
+                        # a decode step -> one response token column
+                        resp_cols.append(col_starts[fwd_cursor])
+                        got += 1
+                    # else: prefill (chunked) forward -> skip its columns
+                    fwd_cursor += 1
+                if got < n_resp or not resp_cols:
+                    break  # ran out — leave the rest unstamped (best-effort)
+                # gather the response-token routing columns: [L, n_resp, top_k]
+                import torch as _t2
+                idx = _t2.tensor(resp_cols, dtype=_t2.long)
+                resp_routing = routing.index_select(1, idx)  # [L, n_resp, top_k]
+                if True:
                     cout = getattr(stage0, "custom_output", None)
                     if cout is None:
                         try:
@@ -451,8 +456,13 @@ class VLLMOmniBackend:
                             cout = None
                     if cout is not None:
                         cout["moe_routing"] = resp_routing
-                tok_cursor = start_col + span
-                fwd_cursor = end_fwd
+                        try:
+                            with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+                                _bf.write(f"    STAMP req: n_resp={n_resp} "
+                                          f"resp_routing={tuple(resp_routing.shape)} "
+                                          f"cols[{resp_cols[0]}..{resp_cols[-1]}]\n")
+                        except Exception:
+                            pass
         except Exception as _e:
             # best-effort: routing capture must never break generation
             try:

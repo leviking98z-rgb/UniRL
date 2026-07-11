@@ -392,19 +392,29 @@ def build_ar_segment(per_request: Sequence[Sequence[Any]]) -> Optional[Any]:
         log_probs_list = [lp if lp is not None else torch.zeros(0, dtype=torch.float32) for lp in rows_logps]
 
     # routing: all-or-nothing across token-bearing rows, and each row's routing
-    # length must match its token count (else drop — never emit misaligned routing).
+    # length must match its token count. Per-row: use the row's routing if it
+    # matches its token count; otherwise zero-fill THAT row (its ar.replay will
+    # inject a no-flip-safe zero which route_replay treats as "no recorded
+    # routing" -> that row falls back to live routing). This makes route-replay
+    # best-effort PER SAMPLE instead of all-or-nothing, so one missed request
+    # (e.g. drain ran out of decode forwards) doesn't drop the whole batch.
     routing_list: Optional[List[torch.Tensor]] = None
-    have_routing = rows_routing and all(
-        (r is not None and r.shape[0] == len(toks))
-        for toks, r in zip(rows_tokens, rows_routing) if toks
-    )
-    if have_routing:
-        # infer n_layers/top_k from first non-empty
-        ref = next(r for r in rows_routing if r is not None and r.shape[0] > 0)
+    _matched = [(r is not None and r.shape[0] == len(toks)) for toks, r in zip(rows_tokens, rows_routing)]
+    any_routing = any(_matched[i] for i, toks in enumerate(rows_tokens) if toks)
+    try:
+        import os as _os
+        if _os.environ.get("UNIRL_MOE_ROUTE_CAPTURE", "0") == "1":
+            with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+                _shapes = [(len(t), None if r is None else tuple(r.shape)) for t, r in zip(rows_tokens, rows_routing)]
+                _bf.write(f"  build_ar_segment: any_routing={any_routing} matched={_matched} (ntok,routing)={_shapes}\n")
+    except Exception:
+        pass
+    if any_routing:
+        ref = next(r for i, r in enumerate(rows_routing) if _matched[i] and r.shape[0] > 0)
         nlyr, topk = ref.shape[1], ref.shape[2]
         routing_list = [
-            r if (r is not None and r.shape[0] > 0) else torch.zeros((0, nlyr, topk), dtype=torch.long)
-            for r in rows_routing
+            (r if _matched[i] else torch.zeros((len(toks), nlyr, topk), dtype=torch.long))
+            for i, (toks, r) in enumerate(zip(rows_tokens, rows_routing))
         ]
 
     return TextSegment.pack(

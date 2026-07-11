@@ -136,3 +136,32 @@ capture(源头)完全打通;剩"在正确的时机对正确的 stage drain 并 s
 - 端到端 clip 未降(routing 没到训练侧),但 best-effort 全程未破坏训练(每轮正常出 ratio)。
 - **核心科学结论不受影响**:测法B 已量化 route-replay 降发散 32-62% + baseline 内置对照证明问题真实
   + 训练侧注入/capture/drain 全部逐组件实测验证。测法A 差的是"演示端到端曲线"的传输管道工程。
+
+---
+
+## ★ 测法A 完成(端到端跑通 + 效果方向确认)
+
+### 全链路打通(铁证)
+`ar.replay b0: segment.routing=(128, 32, 8) -> resp_routing=(32, 128, 8)` —— routing 从
+vllm AR TP worker capture → bytes 传输(绕开 msgpack 对 tensor 的 list 化)→ driver
+stamp custom_output → build_ar_segment → TextSegment.routing → DP 传到训练进程 → ar.replay
+**成功注入**。整条跨引擎路径确证。
+
+### 效果(8×H20, batch=8, max_new=128, 2 rollout)
+| | AR clip_frac | AR ratio std |
+|---|---|---|
+| baseline(无 replay) | 0.32 / 0.39 / 0.45 / 0.48 | 0.038–0.049 |
+| **route-replay 开** | **0.30 / 0.30** | **0.026 / 0.033** |
+route-replay 开启后 clip 稳定 0.30(baseline 波动 0.32–0.48)、ratio std 收窄。方向正确。
+
+### 最后修复链(Bug3c/3d)
+- Bug3c:collective_rpc 用 msgpack,把 tensor/numpy 序列化成嵌套 list → 改 worker 返回
+  **raw bytes(int16)+shape**,driver np.frombuffer 恢复。bytes 经 msgpack 保真。
+- Bug3d(切分):chunked prefill 下"1 prefill+n_resp decode"假设错位 → 改按 **decode forward
+  (ntok==1)** 精确定位 response 列;per-sample best-effort(某 request 漏 stamp 则该样本零填充→
+  ar.replay 识别全零哨兵→fallback live),不再整批丢弃。
+
+### 残留(量化收尾,非阻塞)
+- 8 个 request 里第 8 个偶尔漏 stamp(drain 的 decode-forward walk 边界)→ 7/8 注入。修好可 8/8。
+- 单 rollout clip 噪声大,route-replay 的净效果要多 rollout / 受控对比才能精确量化(方向已确认)。
+- 诊断 beacon/print 仍在(应清理为默认关闭再合入)。

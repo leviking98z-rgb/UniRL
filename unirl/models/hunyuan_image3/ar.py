@@ -633,7 +633,13 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
             if getattr(segment, "routing", None) is not None:
                 # [rl, n_layers, top_k] -> per-layer [rl, top_k] visit order
                 _rr = segment.routing[cu[b] : cu[b] + rl].to(device=device, dtype=torch.long)
-                _resp_routing = _rr.permute(1, 0, 2).contiguous()  # [n_layers, rl, top_k]
+                # A row zero-filled by build_ar_segment (drain missed this
+                # request) is the "no recorded routing" sentinel — skip it so
+                # this sample falls back to live routing instead of forcing
+                # expert 0 everywhere. Real routing is virtually never all-zero
+                # across every layer/token.
+                if rl > 0 and bool((_rr != 0).any()):
+                    _resp_routing = _rr.permute(1, 0, 2).contiguous()  # [n_layers, rl, top_k]
             if b == 0:
                 import sys as _sys
                 print(f"[ROUTE_CAPTURE] ar.replay b0: segment.routing="
