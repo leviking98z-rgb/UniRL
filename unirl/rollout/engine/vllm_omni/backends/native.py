@@ -331,18 +331,80 @@ class VLLMOmniBackend:
 
         if os.environ.get("UNIRL_MOE_ROUTE_CAPTURE", "0") != "1":
             return
+        # File beacon: confirm this runs (stderr may not reach the launcher log
+        # since VLLMOmniRolloutEngine.generate runs in a DP Ray actor).
+        try:
+            with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+                _bf.write(f"maybe_drain called, groups={len(groups)}\n")
+        except Exception:
+            pass
         try:
             import torch
 
             omni = self._require_omni()
-            # AR stage id: stage 0. Drain returns per-rank; TP=1 for AR here.
-            results = omni.engine.collective_rpc(method="_diffrl_drain_routing", stage_ids=[0])
-            rank0 = results[0] if isinstance(results, list) and results else results
-            if isinstance(rank0, list) and rank0:
-                rank0 = rank0[0]
-            if not rank0:
-                return
-            routing, forward_ntok = rank0  # ([n_layers, total_tok, top_k] | None, [int])
+            # Drain from whichever stage has the AR MoE capture. AR stage id isn't
+            # fixed to 0 (that hit the DiT worker, which lacks the verb), so try
+            # every stage and take the first non-empty routing. Per-stage rpc is
+            # wrapped so a stage without the verb (DiT) is skipped, not fatal.
+            routing = None
+            forward_ntok = []
+            import torch as _t
+
+            def _find_routing(obj, depth=0):
+                """Recursively find the first (routing, ntok) pair from the rpc
+                return. routing comes back as a NumPy array (worker returns
+                numpy so it survives collective_rpc serialization); convert to a
+                torch tensor. Returns (routing_tensor, ntok) or (None, [])."""
+                import numpy as _np
+
+                if depth > 5:
+                    return None, []
+                # a (routing, ntok) pair — tuple OR list (rpc may listify tuples)
+                if isinstance(obj, (tuple, list)) and len(obj) == 2:
+                    a, b = obj
+                    if isinstance(a, _np.ndarray) and a.ndim == 3:
+                        return _t.from_numpy(a.astype("int64")), b
+                    if _t.is_tensor(a) and a.dim() == 3:
+                        return a, b
+                if isinstance(obj, (list, tuple)):
+                    for it in obj:
+                        r, n = _find_routing(it, depth + 1)
+                        if r is not None:
+                            return r, n
+                return None, []
+
+            for sid in self._stage_ids():
+                try:
+                    results = omni.engine.collective_rpc(
+                        method="_diffrl_drain_routing", stage_ids=[int(sid)]
+                    )
+                except Exception as _e:
+                    try:
+                        with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+                            _bf.write(f"  stage {sid}: rpc raised {type(_e).__name__}\n")
+                    except Exception:
+                        pass
+                    continue
+                r, n = _find_routing(results)
+                try:
+                    with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+                        def _shape(o, d=0):
+                            if d > 3: return "..."
+                            if _t.is_tensor(o): return f"T{tuple(o.shape)}"
+                            if isinstance(o, (list, tuple)): return f"{type(o).__name__}[{','.join(_shape(x,d+1) for x in o[:4])}]"
+                            return type(o).__name__
+                        _bf.write(f"  stage {sid}: results={_shape(results)}\n")
+                except Exception:
+                    pass
+                try:
+                    with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+                        _bf.write(f"  stage {sid}: routing={'None' if r is None else tuple(r.shape)} "
+                                  f"n_forwards={len(n) if n else 0}\n")
+                except Exception:
+                    pass
+                if r is not None and n:
+                    routing, forward_ntok = r, n
+                    break
             if routing is None or not forward_ntok:
                 return
             # Walk requests in group order; consume forwards to cover each
@@ -391,8 +453,14 @@ class VLLMOmniBackend:
                         cout["moe_routing"] = resp_routing
                 tok_cursor = start_col + span
                 fwd_cursor = end_fwd
-        except Exception:
+        except Exception as _e:
             # best-effort: routing capture must never break generation
+            try:
+                import traceback
+                with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+                    _bf.write(f"  EXC {type(_e).__name__}: {_e}\n{traceback.format_exc()[-400:]}\n")
+            except Exception:
+                pass
             return
 
     def _build_sampling_params(self, sampling: StageSampling, *, attach_lora: bool) -> Any:

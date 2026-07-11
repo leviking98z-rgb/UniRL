@@ -634,6 +634,12 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
                 # [rl, n_layers, top_k] -> per-layer [rl, top_k] visit order
                 _rr = segment.routing[cu[b] : cu[b] + rl].to(device=device, dtype=torch.long)
                 _resp_routing = _rr.permute(1, 0, 2).contiguous()  # [n_layers, rl, top_k]
+            if b == 0:
+                import sys as _sys
+                print(f"[ROUTE_CAPTURE] ar.replay b0: segment.routing="
+                      f"{None if getattr(segment,'routing',None) is None else tuple(segment.routing.shape)} "
+                      f"-> resp_routing={None if _resp_routing is None else tuple(_resp_routing.shape)}",
+                      file=_sys.stderr, flush=True)
 
             from unirl.train.backend.veomni.ep.route_replay import route_replay_session
             from contextlib import nullcontext

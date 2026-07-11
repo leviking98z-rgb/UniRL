@@ -63,6 +63,22 @@ class BucketedIPCReceiveMixin:
         )
 
         monkey_patch_torch_reductions()
+
+        # MoE route-capture (UNIRL_MOE_ROUTE_CAPTURE=1): install the
+        # HunyuanImage3SparseMoeBlock.forward patch HERE — this __new__ runs in
+        # every vllm TP worker subprocess (the process that actually executes the
+        # MoE forward). Installing only via patches.install() in the outer stage
+        # worker misses these inner TP-spawned workers, so capture never fired.
+        # Idempotent + env-gated + best-effort (never break worker init).
+        import os as _os
+
+        if _os.environ.get("UNIRL_MOE_ROUTE_CAPTURE", "0") == "1":
+            try:
+                from unirl.rollout.engine.vllm_omni.patches import moe_route_capture as _mrc
+
+                _mrc.install()
+            except Exception:
+                pass
         return super().__new__(cls)
 
     # ------------------------------------------------------------------

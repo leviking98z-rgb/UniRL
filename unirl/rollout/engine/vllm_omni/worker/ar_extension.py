@@ -39,18 +39,21 @@ class HI3ARWeightSyncExtension(
     def _diffrl_drain_routing(self):
         """Drain the process-global MoE route-capture buffer on this worker.
 
-        Called by the driver via ``collective_rpc`` after each AR generate (when
-        UNIRL_MOE_ROUTE_CAPTURE=1). Returns ``(routing, forward_ntok)``: routing
-        is a CPU int64 tensor ``[n_layers, total_tok, top_k]`` (or None) and
-        forward_ntok is the per-forward token-count list the driver uses to split
-        routing back to per-request slices. Draining resets the buffer for the
-        next rollout. Inert ((None, [])) if capture disabled or this process never
-        ran the AR MoE.
+        Returns ``(routing_npy, forward_ntok)``: routing is a NumPy int16 array
+        ``[n_layers, total_tok, top_k]`` (or None). We return NumPy (not a torch
+        tensor) because collective_rpc's serialization turns torch tensors into
+        nested Python lists (losing the tensor type on the driver side); a NumPy
+        array round-trips as an array. int16 halves the wire size (expert ids <
+        64k). forward_ntok is the per-forward token-count list.
         """
         try:
             from unirl.rollout.engine.vllm_omni.patches.moe_route_capture import drain_global
 
-            return drain_global()
+            routing, ntok = drain_global()
+            if routing is None:
+                return None, []
+            # torch int64 [L, T, K] -> numpy int16 (expert ids are small)
+            return routing.to("cpu").numpy().astype("int16"), ntok
         except Exception:
             return None, []
 

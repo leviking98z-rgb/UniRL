@@ -120,17 +120,26 @@ def capture_session():
 
 # --- Worker-process global buffer (cross-process path) ----------------------
 # vllm-omni AR runs in a spawned worker subprocess; the driver can't share a
-# thread-local session with it. So when capture is env-enabled we keep a
-# PROCESS-GLOBAL session that the patched forward always writes to, and the
-# driver drains it via a collective_rpc verb (_diffrl_drain_routing) after each
-# generate. Gated so it's inert unless UNIRL_MOE_ROUTE_CAPTURE=1.
+# thread-local session with it. So we keep a PROCESS-GLOBAL session that the
+# patched forward writes to, and the driver drains it via a collective_rpc verb
+# (_diffrl_drain_routing) after each generate.
+#
+# IMPORTANT (Bug3b): do NOT gate the global buffer on reading the env var at
+# call time. capture (patched forward) and drain (collective_rpc handler) may
+# run in execution contexts where UNIRL_MOE_ROUTE_CAPTURE isn't in os.environ
+# (rpc handlers can start from a clean env). We decide ONCE at install() whether
+# capture is active (_CAPTURE_ON) and thereafter the buffer is always live in
+# this process — so capture-writes and drain-reads see the SAME _GLOBAL.
 _GLOBAL: Optional[_CaptureSession] = None
+_CAPTURE_ON: bool = False
 
 
 def _global_enabled() -> bool:
+    # True once install() decided capture is on for this process (env checked
+    # at install time), OR if the env is set now (belt-and-suspenders).
     import os
 
-    return os.environ.get("UNIRL_MOE_ROUTE_CAPTURE", "0") == "1"
+    return _CAPTURE_ON or os.environ.get("UNIRL_MOE_ROUTE_CAPTURE", "0") == "1"
 
 
 def global_session() -> Optional[_CaptureSession]:
@@ -144,11 +153,29 @@ def global_session() -> Optional[_CaptureSession]:
 
 def drain_global():
     """Worker-side: drain the process-global capture buffer. Returns
-    (routing_or_None, forward_ntok). Called via collective_rpc from the driver."""
-    g = global_session()
+    (routing_or_None, forward_ntok). Called via collective_rpc from the driver.
+
+    Reads _GLOBAL DIRECTLY (not env-gated) — if capture wrote anything this
+    process, we return it regardless of the rpc handler's env."""
+    import os
+
+    g = _GLOBAL  # read directly; capture-writes created it if any fired
     if g is None:
+        try:
+            with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+                _bf.write(f"    drain_global pid={os.getpid()} _GLOBAL=None "
+                          f"CAPTURE_ON={_CAPTURE_ON}\n")
+        except Exception:
+            pass
         return None, []
-    return g.drain()
+    r, n = g.drain()
+    try:
+        with open("/root/shared/.clusters/.tmp/drain_beacon.txt", "a") as _bf:
+            _bf.write(f"    drain_global pid={os.getpid()} "
+                      f"routing={'None' if r is None else tuple(r.shape)} nfwd={len(n) if n else 0}\n")
+    except Exception:
+        pass
+    return r, n
 
 
 def note_routing(layer_id: int, topk_indices) -> None:
@@ -168,7 +195,12 @@ def install() -> None:
     Idempotent. No-op if vllm-omni's HI3 model isn't importable in this process
     (e.g. the trainer process, which never runs the rollout MoE).
     """
-    global _INSTALLED
+    global _INSTALLED, _CAPTURE_ON
+    # install() is only reached when the caller decided capture is on (the
+    # BucketedIPCReceiveMixin.__new__ gate checks the env). Latch it so the
+    # buffer stays live in this process even if the env isn't visible later
+    # (e.g. inside a collective_rpc handler). See Bug3b.
+    _CAPTURE_ON = True
     if _INSTALLED:
         return
     try:
@@ -184,14 +216,24 @@ def install() -> None:
         return
 
     import torch
+    import sys
 
     orig_forward = Block.forward
+    _dbg = {"fired": False}
 
     def forward(self, hidden_states: torch.Tensor):  # noqa: ANN001
         # Fast path: no active capture (neither thread-local nor process-global)
         # -> call original untouched.
         if current_session() is None and global_session() is None:
+            if not _dbg["fired"]:
+                _dbg["fired"] = True
+                print(f"[ROUTE_CAPTURE] forward fired but NO session "
+                      f"(env_enabled={_global_enabled()})", file=sys.stderr, flush=True)
             return orig_forward(self, hidden_states)
+        if not _dbg["fired"]:
+            _dbg["fired"] = True
+            print(f"[ROUTE_CAPTURE] forward fired WITH session, capturing "
+                  f"(hs={tuple(hidden_states.shape)})", file=sys.stderr, flush=True)
         # Recompute the routing exactly as the model does (cheap: one softmax+topk
         # on the router logits) so we capture WITHOUT depending on the original's
         # internal packing. Mirrors hunyuan_image3.py lines ~1289-1293 and
@@ -208,6 +250,8 @@ def install() -> None:
     forward._route_capture = True  # type: ignore[attr-defined]
     Block.forward = forward
     _INSTALLED = True
+    print(f"[ROUTE_CAPTURE] installed on {Block.__name__}.forward "
+          f"(env_enabled={_global_enabled()})", file=sys.stderr, flush=True)
 
 
 __all__ = ["install", "capture_session", "current_session", "note_routing"]
