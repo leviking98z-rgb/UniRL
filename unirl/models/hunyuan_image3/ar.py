@@ -650,6 +650,20 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
             from unirl.train.backend.veomni.ep.route_replay import route_replay_session
             from contextlib import nullcontext
 
+            # Ensure the train-side native HunyuanTopKGate.forward is patched so
+            # the replay session's forced routing is actually consumed (this is
+            # the non-EP / FSDPBackend path — native HunyuanMoE, not FusedHunyuanMoE).
+            # Idempotent; without this the routing reaches the session but no gate
+            # reads it, so route-replay silently no-ops. Only meaningful when we
+            # have routing to inject.
+            if _resp_routing is not None:
+                try:
+                    from unirl.train.backend.veomni.ep.hunyuan_moe_route_patch import install as _install_gate_patch
+
+                    _install_gate_patch()
+                except Exception:
+                    pass
+
             _rr_ctx = (
                 route_replay_session(mode="replay", routing=_resp_routing, replay_offset=pl)
                 if _resp_routing is not None

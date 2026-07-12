@@ -84,12 +84,26 @@ class _RouteSession:
     routing_out: List[torch.Tensor] = field(default_factory=list)
     # monotonic counter: which MoE layer we're visiting in this forward.
     _cursor: int = 0
-    # replay row-offset: the recorded routing covers only the LAST ``rows`` tokens
-    # of each layer's [tokens, top_k] (the response). Tokens before the offset
-    # (the prompt) keep their live routing. None => the recorded routing covers
-    # ALL tokens (offset 0). Set when the replay forward prepends a prompt whose
-    # routing was not recorded (single-engine / response-only capture).
+    # STATELESS layer keying (activation-checkpointing safe): map a gate module's
+    # id() to a stable layer index assigned on first visit. Under activation
+    # checkpointing the forward runs TWICE (original + recompute); a monotonic
+    # cursor would advance twice and misalign/exhaust. Keying by gate id() makes
+    # replay idempotent — the same layer always gets the same recorded routing,
+    # regardless of how many times it's re-executed.
+    _id2layer: dict = field(default_factory=dict)
     replay_offset: Optional[int] = None
+
+    def layer_index_for(self, gate_id: int) -> int:
+        """Stable layer index for this gate module (assigned on first visit)."""
+        idx = self._id2layer.get(gate_id)
+        if idx is None:
+            idx = len(self._id2layer)
+            self._id2layer[gate_id] = idx
+        return idx
+
+    def recorded_for(self, layer_idx: int) -> torch.Tensor:
+        assert self.routing_in is not None, "replay session has no routing"
+        return self.routing_in[layer_idx]
 
     def next_recorded(self) -> torch.Tensor:
         assert self.routing_in is not None, "replay session has no routing"
@@ -182,8 +196,13 @@ def apply_route_replay(
         sess.capture(topk_idx)
         return topk_weights, topk_idx
 
-    # replay
-    forced_idx = sess.next_recorded().to(topk_idx.device)  # [rows, top_k]
+    # replay — key by gate module id (stateless / checkpoint-safe), NOT a cursor.
+    _lidx = sess.layer_index_for(id(gate))
+    if _lidx >= len(sess.routing_in):
+        # more MoE layers than recorded (shouldn't happen for matched models) —
+        # skip injection for this layer, keep live routing.
+        return topk_weights, topk_idx
+    forced_idx = sess.recorded_for(_lidx).to(topk_idx.device)  # [rows, top_k]
     n_live = topk_idx.shape[0]
     n_rec = forced_idx.shape[0]
 
@@ -207,6 +226,29 @@ def apply_route_replay(
                 f"(require offset>=0 and offset+rows==tokens and matching top_k)"
             )
         merged_idx = torch.cat([topk_idx[:offset], forced_idx], dim=0)
+
+    # --- Measurement: replay-recomputed vs rollout-recorded expert agreement ---
+    # (see below). Always record when in a replay session — the env var doesn't
+    # reliably reach the training Ray worker (clean-env spawn, same issue as the
+    # capture latch), so we gate on "replay session active" instead of env.
+    try:
+        live_resp = topk_idx if sess.replay_offset is None else topk_idx[sess.replay_offset:]
+        rec = forced_idx  # [rows, top_k]
+        if live_resp.shape == rec.shape and live_resp.numel() > 0:
+            k = rec.shape[-1]
+            rec = rec.to(live_resp.device)
+            # per (token): size of set-intersection of the two top-k sets
+            inter = (live_resp.unsqueeze(-1) == rec.unsqueeze(-2)).any(-1).sum(-1)  # [tokens]
+            agree_experts = int(inter.sum().item())          # total matched expert slots
+            total_experts = int(inter.numel() * k)           # total slots
+            exact_tokens = int((inter == k).sum().item())    # tokens with ALL k correct
+            n_tok = int(inter.numel())
+            with open("/root/shared/.clusters/.tmp/flip_measure.txt", "a") as _bf:
+                _bf.write(f"layer_call tokens={n_tok} topk={k} "
+                          f"agree_experts={agree_experts}/{total_experts} "
+                          f"exact_tokens={exact_tokens}/{n_tok}\n")
+    except Exception:
+        pass
 
     weights = _recompute_gating_weights(gate, hidden_states, merged_idx, ref=topk_weights)
     return weights, merged_idx

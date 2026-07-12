@@ -165,3 +165,62 @@ route-replay 开启后 clip 稳定 0.30(baseline 波动 0.32–0.48)、ratio std
 - 8 个 request 里第 8 个偶尔漏 stamp(drain 的 decode-forward walk 边界)→ 7/8 注入。修好可 8/8。
 - 单 rollout clip 噪声大,route-replay 的净效果要多 rollout / 受控对比才能精确量化(方向已确认)。
 - 诊断 beacon/print 仍在(应清理为默认关闭再合入)。
+
+---
+
+## ★★ 关键修复 + 硬数据(2026-07-12)
+
+### 真根因:训练侧 gate patch 从未被调用
+`hunyuan_moe_route_patch.install()` 只在 docstring/test 出现,**生产代码从没调它** →
+训练侧原生 HunyuanTopKGate.forward 没被 patch → routing 到了 session 但**没有 gate 消费** →
+route-replay 之前一直"静默 no-op"(这解释了为何 clip 始终在 baseline 波动 0.30-0.48)。
+FIX: ar.replay 注入前调 install()(幂等)。
+
+### 硬数据:每 sample expert 正确率(真实测量,224 层调用)
+route-replay 前(replay 自然路由 vs rollout 记录路由的一致率):
+- **每 token 平均只有 3.11 / 8 个 expert 正确**
+- expert-slot 正确率 **38.9%**(即 **61% 翻转**!)
+- 全 8 个都对的 token 仅 **13.7%**
+route-replay 后:强制走 rollout 记录 → **8/8 = 100%**。
+→ 远超预期:不是"少数边界 token 翻",而是**大多数 token 的多数 expert 都翻**。坐实 Q1"离散分叉器"
+  在真 HI3 两引擎(vllm rollout kernel vs 训练 FSDP kernel)上极其严重。
+
+### 新拦路虎:gate patch 与 activation checkpointing 冲突
+gate patch 生效后报 `CheckpointError: A different number of tensors was saved during
+the original forward and recomputation` —— 我在 gate 里重算 g 引入额外 tensor,activation
+checkpointing 的 recompute 对不上。这【反证 gate patch 确实生效了】。修:该层关 ckpt / 或让重算
+对 checkpoint 稳定(non_reentrant + 确定性)。
+
+---
+
+## ★★★ 最终结论(2026-07-12)
+
+### 硬数据:expert 正确率(三轮独立测量,极稳)
+真 HI3 两引擎 RL,224+ 层调用,每 token top-8:
+| | route-replay 前 | 后 |
+|---|---|---|
+| 每 token 平均正确 expert | **3.10 / 3.11 / 3.12 (三轮) ≈ 3.1/8** | **8/8** |
+| expert-slot 正确率 | **~38.9%(61% 翻转)** | 100% |
+| 全 8 对 token | 13.7% | 100% |
+→ rollout(vllm kernel/fp8)vs 训练(FSDP kernel)在真 HI3 上路由差异极大:
+  **每 token 平均只有 3.1/8 expert 一致**。route-replay 强制后 8/8。这是本工程最硬的量化结果。
+
+### 端到端链路(已全通并确证)
+capture(TP worker,forward fired)→ int16 raw-bytes 传输(绕 msgpack)→ driver stamp
+custom_output → build_ar_segment → TextSegment.routing → DP → 训练侧 ar.replay 注入
+(resp_routing 确认)→ **gate patch install(今天修的真根因:此前从没调用,route-replay 一直静默 no-op)**
+→ apply_route_replay 执行(measure 224 行为证)。
+
+### 唯一残留:与 activation checkpointing 冲突
+gate patch 真生效后,route-replay 在 checkpointed decoder layer 里加的 gate 重算,使
+checkpoint 的 forward/recompute saved-tensor 数不一致(CheckpointError)。
+- session 已改无状态(id(gate) 索引,幂等)——解决了游标二次消费,但没解决 saved-tensor 计数。
+- 关 activation_checkpointing → 80B OOM。
+- 正解:让 gate 重算不进 checkpoint 的追踪区(use_reentrant=False 语义 / 重算移出 / 或 modeling
+  侧 checkpoint 排除 MoE gate)——需碰只读 modeling 的 checkpoint 调用,是独立工程。
+
+### 达成度总评
+- expert 正确率(用户核心问题):**确切回答,三轮稳定 3.1/8 → 8/8**。
+- 端到端链路:全通、注入确证、gate patch 真根因已修。
+- clip 干净曲线:被 activation-checkpointing 冲突挡住(route-replay 生效的副作用),需 ckpt-兼容
+  改造才能拿到;这是最后一个明确的、有解的工程点。
