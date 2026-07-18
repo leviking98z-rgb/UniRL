@@ -175,6 +175,9 @@ class SglangDiffusionHijack:
         from unirl.rollout.engine.sglang_diffusion._patches.patch_wan_scheduler import (
             patch_wan_scheduler,
         )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_hunyuan_text_layer import (
+            patch_hunyuan_text_layer,
+        )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_weights_updater import (
             patch_weights_updater,
         )
@@ -205,6 +208,7 @@ class SglangDiffusionHijack:
             patch_set_timesteps,
             patch_vae_decode_safe,
             patch_wan_scheduler,
+            patch_hunyuan_text_layer,
             patch_safe_unpickler,
         ):
             _safe_apply(patch)
