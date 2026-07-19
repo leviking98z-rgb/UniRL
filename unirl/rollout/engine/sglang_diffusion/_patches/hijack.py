@@ -213,6 +213,18 @@ class SglangDiffusionHijack:
         from unirl.rollout.engine.sglang_diffusion._patches.patch_wan_scheduler import (
             patch_wan_scheduler,
         )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_scheduler import (
+            patch_ltx2_scheduler,
+        )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_force_math_sdp import (
+            patch_force_math_sdp,
+        )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_rollout_sde import (
+            patch_ltx2_rollout_sde,
+        )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_qk_norm import (
+            patch_ltx2_qk_norm,
+        )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_weights_updater import (
             patch_weights_updater,
         )
@@ -243,6 +255,10 @@ class SglangDiffusionHijack:
             patch_set_timesteps,
             patch_vae_decode_safe,
             patch_wan_scheduler,
+            patch_ltx2_scheduler,
+            patch_force_math_sdp,
+            patch_ltx2_rollout_sde,
+            patch_ltx2_qk_norm,
             patch_safe_unpickler,
         ):
             _safe_apply(patch)

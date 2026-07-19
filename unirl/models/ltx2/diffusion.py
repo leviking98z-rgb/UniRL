@@ -18,6 +18,7 @@ LTX2-specific deviations from other models:
 
 from __future__ import annotations
 
+import inspect
 import os
 from contextlib import nullcontext
 from typing import ClassVar, List, Optional, Set, Tuple
@@ -36,6 +37,27 @@ from .conditions import LTX2Conditions
 from .config import LTX2_SPATIAL_COMPRESSION, LTX2_TEMPORAL_COMPRESSION
 
 _LTX2_TIMESTEP_SCALE: float = 1000.0
+
+# diffusers 0.37.x LTX2VideoTransformer3DModel.forward rejects sigma/audio_sigma/
+# isolate_modalities (LTX-2.3-only kwargs) -> TypeError. Drop any kwarg the bound
+# forward() doesn't declare (pass through if it declares **kwargs). Cached per class.
+_FORWARD_PARAMS_CACHE: dict = {}
+
+
+def _filter_forward_kwargs(transformer, kwargs):
+    cls = type(transformer)
+    params = _FORWARD_PARAMS_CACHE.get(cls)
+    if params is None:
+        sig = inspect.signature(cls.forward)
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            params = True
+        else:
+            params = set(sig.parameters)
+        _FORWARD_PARAMS_CACHE[cls] = params
+    if params is True:
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in params}
+
 
 # LTX-2 is a UNIFIED audiovisual transformer: ``forward`` always runs both the
 # video and audio branches AND, by design, injects an audio→video cross-attn
@@ -175,15 +197,13 @@ class LTX2DiffusionStep(DiffusionStep[LTX2Bundle, LTX2Conditions]):
             if os.environ.get("UNIRL_LTX_NO_TEXT_MASK") in ("1", "true", "True"):
                 enc_mask = None
                 a_enc_mask = None
-            out = transformer(
+            _fwd = dict(
                 hidden_states=v_in,
                 audio_hidden_states=a_in,
                 encoder_hidden_states=enc_hs,
                 audio_encoder_hidden_states=a_enc_hs,
                 timestep=ts_in,
                 audio_timestep=ts_in,
-                # ``sigma``/``audio_sigma`` are consumed only by LTX-2.3 prompt
-                # modulation; harmless for 2.0 and required by 2.3 — pass them.
                 sigma=ts_in,
                 audio_sigma=ts_in,
                 encoder_attention_mask=enc_mask,
@@ -196,6 +216,7 @@ class LTX2DiffusionStep(DiffusionStep[LTX2Bundle, LTX2Conditions]):
                 isolate_modalities=False,
                 return_dict=False,
             )
+            out = transformer(**_filter_forward_kwargs(transformer, _fwd))
             # forward returns (video_out, audio_out).
             return out[0], out[1]
 
