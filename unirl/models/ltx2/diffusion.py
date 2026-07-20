@@ -18,6 +18,7 @@ LTX2-specific deviations from other models:
 
 from __future__ import annotations
 
+import os
 from contextlib import nullcontext
 from typing import ClassVar, List, Optional, Set, Tuple
 
@@ -158,6 +159,22 @@ class LTX2DiffusionStep(DiffusionStep[LTX2Bundle, LTX2Conditions]):
         audio_encoder_attention_mask = audio_text_cond.attn_mask
 
         def _run(v_in, a_in, ts_in, enc_hs, enc_mask, a_enc_hs, a_enc_mask):
+            # LTX-2.3 prompt-cross-attention masking alignment.
+            #
+            # The sglang rollout engine treats the ltx_2_3 checkpoint as an
+            # LTX-2.3 variant and, in that path, passes NO prompt attention mask
+            # to the transformer (sglang ltx_2_denoising
+            # ``_get_ltx_prompt_attention_mask`` returns None for the 2.3 variant)
+            # — so attn2 attends to all text tokens, padding included. The
+            # trainside replay must match that forward, or the FlowGRPO importance
+            # ratio exp(new_logp - old_logp) drifts from 1.0 (measured ~2.5e-3;
+            # dropping the mask here removes ~40% of the deviation, and together
+            # with the audio-cross-attn alignment brings ratio -> 1.0000).
+            # Env-gated for now; the final form should key off the checkpoint's
+            # ltx_2_3 variant flag rather than an env var.
+            if os.environ.get("UNIRL_LTX_NO_TEXT_MASK") in ("1", "true", "True"):
+                enc_mask = None
+                a_enc_mask = None
             out = transformer(
                 hidden_states=v_in,
                 audio_hidden_states=a_in,
