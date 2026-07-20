@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 
 @dataclass
@@ -13,7 +13,7 @@ class LoraConfig:
     # Useful when ``target_modules`` is broad (e.g. ``all-linear``) but some
     # sub-towers are frozen and must not receive adapters. ``None`` keeps PEFT's
     # default (no exclusions).
-    exclude_modules: Optional[Tuple[str, ...]] = None
+    exclude_modules: Optional[Union[str, Tuple[str, ...]]] = None
     dropout: float = 0.0
     bias: str = "none"
     task_type: str = "FEATURE_EXTRACTION"

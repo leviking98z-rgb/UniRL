@@ -11,13 +11,26 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from functools import partial
-from typing import Iterator, Optional, Sequence
+from typing import Iterator, Optional, Sequence, Union
 
 from torch import nn
 
 from unirl.train.deferred import _stamp
 
 logger = logging.getLogger(__name__)
+
+ExcludeModules = Optional[Union[str, Sequence[str]]]
+NormalizedExcludeModules = Optional[Union[str, list[str]]]
+
+
+def _normalize_exclude_modules(exclude_modules: ExcludeModules) -> NormalizedExcludeModules:
+    """Preserve PEFT's regex-string semantics while normalizing name sequences."""
+    if isinstance(exclude_modules, str):
+        return exclude_modules or None
+    if exclude_modules is None:
+        return None
+    modules = list(exclude_modules)
+    return modules or None
 
 
 def inject_lora(
@@ -26,7 +39,7 @@ def inject_lora(
     rank: int,
     alpha: int,
     target_modules: Sequence[str],
-    exclude_modules: Optional[Sequence[str]] = None,
+    exclude_modules: ExcludeModules = None,
     dropout: float = 0.0,
     bias: str = "none",
     task_type: str = "FEATURE_EXTRACTION",
@@ -35,12 +48,13 @@ def inject_lora(
     """Inject a single LoRA adapter.  No Shadow, no EMA."""
     from peft import LoraConfig, inject_adapter_in_model
 
+    normalized_exclude_modules = _normalize_exclude_modules(exclude_modules)
     peft_cfg = LoraConfig(
         r=int(rank),
         lora_alpha=int(alpha),
         lora_dropout=float(dropout),
         target_modules=list(target_modules),
-        exclude_modules=list(exclude_modules) if exclude_modules else None,
+        exclude_modules=normalized_exclude_modules,
         bias=str(bias),
         task_type=str(task_type),
     )
@@ -54,7 +68,7 @@ def inject_lora(
             rank,
             alpha,
             tuple(target_modules),
-            tuple(exclude_modules) if exclude_modules else None,
+            normalized_exclude_modules,
             n_trainable,
         )
 

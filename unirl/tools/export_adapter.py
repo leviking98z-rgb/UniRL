@@ -17,12 +17,13 @@ import argparse
 import os
 import pickle
 from collections.abc import Iterable
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import torch
 from safetensors.torch import save_file
 
 PEFT_PREFIX = "base_model.model."
+ExcludeModules = Optional[Union[str, List[str]]]
 
 
 def export_adapter_state_dict(
@@ -61,6 +62,7 @@ def write_adapter_config(
     r: int,
     lora_alpha: int,
     target_modules: List[str],
+    exclude_modules: ExcludeModules = None,
     lora_dropout: float = 0.0,
     bias: str = "none",
     task_type: str = "FEATURE_EXTRACTION",
@@ -73,6 +75,7 @@ def write_adapter_config(
             r=int(r),
             lora_alpha=int(lora_alpha),
             target_modules=list(target_modules),
+            exclude_modules=exclude_modules,
             lora_dropout=float(lora_dropout),
             bias=str(bias),
             task_type=str(task_type),
@@ -101,6 +104,7 @@ def write_adapter_config(
                     "r": int(r),
                     "rank_pattern": {},
                     "revision": None,
+                    "exclude_modules": exclude_modules,
                     "target_modules": list(target_modules),
                     "task_type": str(task_type),
                     "use_rslora": False,
@@ -151,6 +155,18 @@ def _require_modules(value: object) -> List[str]:
     return modules
 
 
+def _optional_exclude_modules(value: object) -> ExcludeModules:
+    """Keep a regex string intact; normalize an iterable of names for JSON/PEFT."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, Iterable):
+        modules = [str(item) for item in value]
+        return modules or None
+    raise SystemExit("invalid LoRA exclude_modules in checkpoint; expected a regex string or a list of names")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint", required=True, help="checkpoint-<step> dir, or the checkpoint.pt itself")
@@ -177,6 +193,7 @@ def main() -> None:
     r = args.lora_r if args.lora_r is not None else recorded.get("rank")
     alpha = args.lora_alpha if args.lora_alpha is not None else recorded.get("alpha")
     target_modules = _split_modules(args.target_modules) or _require_modules(recorded.get("target_modules"))
+    exclude_modules = _optional_exclude_modules(recorded.get("exclude_modules"))
     dropout = args.lora_dropout if args.lora_dropout is not None else recorded.get("dropout", 0.0)
     bias = args.bias if args.bias is not None else recorded.get("bias", "none")
     task_type = args.task_type if args.task_type is not None else recorded.get("task_type", "FEATURE_EXTRACTION")
@@ -195,6 +212,7 @@ def main() -> None:
         r=_require_int(r, name="r"),
         lora_alpha=_require_int(alpha, name="alpha"),
         target_modules=target_modules,
+        exclude_modules=exclude_modules,
         lora_dropout=float(dropout),
         bias=str(bias),
         task_type=str(task_type),
