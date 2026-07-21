@@ -27,7 +27,13 @@ model_config:
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Lightricks/LTX-2}
   model_precision: bf16
   autocast_precision: bf16
-  trajectory_precision: fp16
+  # bf16 (NOT fp16): the sglang rollout SDE carries the trajectory as fp32 and
+  # its DiT consumes round_bf16(x_k). The replay must round the SAME carried fp32
+  # to bf16 so the new_logp DiT sees a bit-identical x_k — an fp16 round diverges
+  # (10 vs 7 mantissa bits) and drives a systematic ~e-3 per-step logp bias that
+  # grows as σ→0. bf16 makes x_k rel=0 and the per-step logp diff → e-5. See
+  # ltx2_t2v_sglang_loramerge trajectory-precision fix.
+  trajectory_precision: bf16
   logprob_precision: fp32
   shift: 1.0
   max_sequence_length: 512
@@ -173,7 +179,8 @@ sampling:
   seed: 42
   init_same_noise: false
   autocast_precision: bf16
-  trajectory_precision: fp16
+  # bf16 to match the sglang rollout DiT input (see model_config note above).
+  trajectory_precision: bf16
   logprob_precision: fp32
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler
