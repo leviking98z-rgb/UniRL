@@ -86,6 +86,7 @@ def _patch_av_decode_carry() -> None:
     from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding_av import (
         LTX2AVDecodingStage,
     )
+
     from unirl.rollout.engine.sglang_diffusion._patches.patch_conditions import (
         _copy_conditions,
     )
@@ -134,6 +135,7 @@ def _patch_sde_logprob_bridge() -> None:
     from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
         LTX2DenoisingStage,
     )
+
     from unirl.rollout.engine.sglang_diffusion._patches.patch_denoising import (
         _make_step_generators,
         _resolve_base_seed,

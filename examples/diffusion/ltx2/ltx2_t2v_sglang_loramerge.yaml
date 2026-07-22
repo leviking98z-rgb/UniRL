@@ -19,7 +19,10 @@
 
 num_devices: 8
 batch_size: 4
-adv_use_global_std: true
+# Match the trainside LTX FlowGRPO recipe: normalize each prompt group by its
+# own std. A batch-global std changes the relative gradient weight of prompt
+# groups and produces a different learning curve even when rollout/replay match.
+adv_use_global_std: false
 num_rollouts: 1000
 
 model_config:

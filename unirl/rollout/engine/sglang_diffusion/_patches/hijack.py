@@ -167,6 +167,9 @@ class SglangDiffusionHijack:
         from unirl.rollout.engine.sglang_diffusion._patches.patch_denoising import (
             patch_denoising,
         )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_force_math_sdp import (
+            patch_force_math_sdp,
+        )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_gpu_worker import (
             patch_gpu_worker,
         )
@@ -181,6 +184,15 @@ class SglangDiffusionHijack:
         )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_lora_tensors import (
             patch_lora_tensors,
+        )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_qk_norm import (
+            patch_ltx2_qk_norm,
+        )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_rollout_sde import (
+            patch_ltx2_rollout_sde,
+        )
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_scheduler import (
+            patch_ltx2_scheduler,
         )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_pipeline import (
             patch_pipeline,
@@ -212,18 +224,6 @@ class SglangDiffusionHijack:
         )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_wan_scheduler import (
             patch_wan_scheduler,
-        )
-        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_scheduler import (
-            patch_ltx2_scheduler,
-        )
-        from unirl.rollout.engine.sglang_diffusion._patches.patch_force_math_sdp import (
-            patch_force_math_sdp,
-        )
-        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_rollout_sde import (
-            patch_ltx2_rollout_sde,
-        )
-        from unirl.rollout.engine.sglang_diffusion._patches.patch_ltx2_qk_norm import (
-            patch_ltx2_qk_norm,
         )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_weights_updater import (
             patch_weights_updater,
