@@ -99,11 +99,7 @@ def _concat_rollout_trajectory_data(output_batches: list):
         # ``dit_trajectory`` by ``patch_ltx2_rollout_sde``. Concat it dim-0 like the
         # video latents so the grouped (nopp>1) merge preserves per-output audio.
         # ``RolloutDitTrajectory.__init__`` has no such field, so set it post-hoc.
-        _auds = [
-            getattr(r.dit_trajectory, "audio_latents", None)
-            for r in rtds
-            if r.dit_trajectory is not None
-        ]
+        _auds = [getattr(r.dit_trajectory, "audio_latents", None) for r in rtds if r.dit_trajectory is not None]
         if _auds and all(a is not None for a in _auds):
             new_dit.audio_latents = _cat0(_auds)
 

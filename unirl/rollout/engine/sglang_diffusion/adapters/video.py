@@ -148,8 +148,6 @@ class Wan21T2VAdapter(VideoAdapter):
     pass
 
 
-
-
 @register_adapter("ltx2")
 class Ltx2T2VAdapter(VideoAdapter):
     """LTX-2 / LTX-2.3 T2V — ~2.4B video DiT, Gemma3 text encoding, proper video
@@ -188,8 +186,7 @@ class Ltx2T2VAdapter(VideoAdapter):
         traj = utils.collect_trajectory_latents(results)
         if traj.ndim < 3:
             raise ValueError(
-                f"ltx2: expected a packed trajectory [B, T+1, ...]; got rank {traj.ndim}, "
-                f"shape {tuple(traj.shape)}."
+                f"ltx2: expected a packed trajectory [B, T+1, ...]; got rank {traj.ndim}, shape {tuple(traj.shape)}."
             )
         # LTX-2 co-denoises an AUDIO latent the video DiT cross-attends to; collect
         # the parallel audio trajectory and stamp it as ``segment.aux_latents`` so the

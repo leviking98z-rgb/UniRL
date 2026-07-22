@@ -91,7 +91,11 @@ class LTX2Bundle(Bundle):
         transformer = transformer.to(device, dtype=dtype)
 
         # Video VAE (frozen)
-        vae = AutoencoderKLLTX2Video.from_pretrained(vae_path, subfolder="vae", torch_dtype=vae_dtype).to(aux_device).eval()
+        vae = (
+            AutoencoderKLLTX2Video.from_pretrained(vae_path, subfolder="vae", torch_dtype=vae_dtype)
+            .to(aux_device)
+            .eval()
+        )
         vae.requires_grad_(False)
 
         # Text encoder — Gemma3 (frozen). LTX-2 uses Gemma-3-12B whose config is

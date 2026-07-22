@@ -52,8 +52,12 @@ def patch_force_math_sdp() -> None:
     F.scaled_dot_product_attention = _math_sdpa
     # Also flip the globals (belt-and-suspenders for code paths that call the
     # C-level op directly rather than the python F.* wrapper).
-    for setter, val in (("enable_flash_sdp", False), ("enable_mem_efficient_sdp", False),
-                        ("enable_cudnn_sdp", False), ("enable_math_sdp", True)):
+    for setter, val in (
+        ("enable_flash_sdp", False),
+        ("enable_mem_efficient_sdp", False),
+        ("enable_cudnn_sdp", False),
+        ("enable_math_sdp", True),
+    ):
         fn = getattr(getattr(torch.backends, "cuda", None), setter, None)
         if fn is not None:
             try:
