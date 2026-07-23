@@ -135,6 +135,7 @@ class BaseFSDP2Backend(Remote):
                 dropout=lora_cfg.dropout,
                 bias=lora_cfg.bias,
                 task_type=lora_cfg.task_type,
+                init_seed=lora_cfg.init_seed,
             )
         if ema_cfg is not None:
             shadow = inject_mirror(model, prefix=ema_cfg.shadow_prefix)

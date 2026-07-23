@@ -12,6 +12,8 @@ class LoraConfig:
     dropout: float = 0.0
     bias: str = "none"
     task_type: str = "FEATURE_EXTRACTION"
+    # None preserves the historical process-RNG initialization.
+    init_seed: Optional[int] = None
 
 
 @dataclass

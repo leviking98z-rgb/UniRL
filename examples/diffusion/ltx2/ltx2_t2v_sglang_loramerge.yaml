@@ -93,6 +93,7 @@ backend:
     dropout: 0.0
     bias: none
     task_type: FEATURE_EXTRACTION
+    init_seed: ${sampling.seed}
     target_modules:
       - attn1.to_q
       - attn1.to_k
