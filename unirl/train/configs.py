@@ -12,9 +12,6 @@ class LoraConfig:
     dropout: float = 0.0
     bias: str = "none"
     task_type: str = "FEATURE_EXTRACTION"
-    # Optional deterministic adapter initialization seed. ``None`` preserves
-    # the historical process-RNG behavior.
-    init_seed: Optional[int] = None
 
 
 @dataclass
