@@ -55,12 +55,9 @@ deterministic driver-aligned per-sample noise.
 
 from __future__ import annotations
 
-import hashlib
 import os
 
 import torch
-
-_MAX_TORCH_SEED = (1 << 63) - 1
 
 
 def _make_step_generators(
@@ -76,15 +73,13 @@ def _make_step_generators(
     accepted for signature parity but unused (generators are always CPU).
     """
     del device
-    generators: list[torch.Generator] = []
-    for seed_key in denoise_seeds:
-        payload = (f"{int(base_seed)}::step::{int(step_index)}::sample::{str(seed_key)}").encode("utf-8")
-        digest = hashlib.blake2b(payload, digest_size=8).digest()
-        seed = int.from_bytes(digest, byteorder="big", signed=False) % _MAX_TORCH_SEED
-        g = torch.Generator(device="cpu")
-        g.manual_seed(seed)
-        generators.append(g)
-    return generators
+    from unirl.sde.noise import make_denoise_step_generators
+
+    return make_denoise_step_generators(
+        base_seed=int(base_seed),
+        step_index=int(step_index),
+        sample_ids=[str(seed_key) for seed_key in denoise_seeds],
+    )
 
 
 def _resolve_base_seed(batch) -> int | None:
@@ -110,9 +105,15 @@ def _resolve_fallback_seed(batch) -> int:
     sample_key = str(denoise_seeds[0]) if denoise_seeds else None
     if base_seed is not None and sample_key is not None:
         payload = (f"{int(base_seed)}::fallback::sample::{sample_key}").encode("utf-8")
+        import hashlib
+
+        from unirl.sde.noise import MAX_TORCH_SEED
+
         digest = hashlib.blake2b(payload, digest_size=8).digest()
-        return int.from_bytes(digest, byteorder="big", signed=False) % _MAX_TORCH_SEED
-    return int.from_bytes(os.urandom(8), byteorder="big") % _MAX_TORCH_SEED
+        return int.from_bytes(digest, byteorder="big", signed=False) % MAX_TORCH_SEED
+    from unirl.sde.noise import MAX_TORCH_SEED
+
+    return int.from_bytes(os.urandom(8), byteorder="big") % MAX_TORCH_SEED
 
 
 def patch_denoising() -> None:

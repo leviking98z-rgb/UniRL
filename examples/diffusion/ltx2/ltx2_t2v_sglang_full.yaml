@@ -26,7 +26,7 @@ model_config:
   autocast_precision: bf16
   # The sglang SDE carries x_k in fp32 but its DiT consumes round_bf16(x_k).
   # Replay must use the same rounding or new_logp gets a systematic e-3 bias.
-  trajectory_precision: bf16
+  trajectory_precision: fp32
   logprob_precision: fp32
   shift: 1.0
   max_sequence_length: 512
@@ -165,7 +165,7 @@ sampling:
   init_same_noise: false
   autocast_precision: bf16
   # Match the bf16 DiT input used by the sglang rollout.
-  trajectory_precision: bf16
+  trajectory_precision: fp32
   logprob_precision: fp32
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler

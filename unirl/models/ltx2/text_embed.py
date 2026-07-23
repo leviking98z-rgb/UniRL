@@ -89,12 +89,49 @@ class LTX2TextEmbedStage:
             attention_mask=inputs.attention_mask,
             output_hidden_states=True,
         )
-        # Stack ALL hidden layers (embedding + each block) on a new trailing
-        # axis, then flatten into the channel dim → (B, seq, C * num_layers).
-        # This is the connector's expected ``text_encoder_dim`` input.
+        # Stack ALL hidden layers, then apply diffusers'
+        # ``LTX2Pipeline._pack_text_embeds`` normalization before flattening.
         stacked = torch.stack(outputs.hidden_states, dim=-1)  # (B, seq, C, L)
-        packed = stacked.flatten(2, 3).to(self.dtype)  # (B, seq, C*L)
+        packed = self._pack_text_embeds(
+            stacked,
+            sequence_lengths=inputs.attention_mask.sum(dim=-1),
+            padding_side=self.tokenizer.padding_side,
+        ).to(self.dtype)
         return packed, inputs.attention_mask
+
+    @staticmethod
+    def _pack_text_embeds(
+        text_hidden_states: torch.Tensor,
+        *,
+        sequence_lengths: torch.Tensor,
+        padding_side: str = "left",
+        scale_factor: int = 8,
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """Normalize and pack Gemma all-layer states exactly like diffusers."""
+        batch_size, seq_len, hidden_dim, num_layers = text_hidden_states.shape
+        original_dtype = text_hidden_states.dtype
+        token_indices = torch.arange(seq_len, device=text_hidden_states.device).unsqueeze(0)
+        if padding_side == "right":
+            mask = token_indices < sequence_lengths[:, None]
+        elif padding_side == "left":
+            mask = token_indices >= (seq_len - sequence_lengths[:, None])
+        else:
+            raise ValueError(f"padding_side must be 'left' or 'right', got {padding_side!r}")
+        mask = mask[:, :, None, None]
+
+        masked = text_hidden_states.masked_fill(~mask, 0.0)
+        valid_count = (sequence_lengths * hidden_dim).view(batch_size, 1, 1, 1)
+        masked_mean = masked.sum(dim=(1, 2), keepdim=True) / (valid_count + eps)
+        x_min = text_hidden_states.masked_fill(~mask, float("inf")).amin(dim=(1, 2), keepdim=True)
+        x_max = text_hidden_states.masked_fill(~mask, float("-inf")).amax(dim=(1, 2), keepdim=True)
+
+        normalized = (text_hidden_states - masked_mean) / (x_max - x_min + eps)
+        normalized = normalized * scale_factor
+        normalized = normalized.flatten(2)
+        mask_flat = mask.squeeze(-1).expand(-1, -1, hidden_dim * num_layers)
+        normalized = normalized.masked_fill(~mask_flat, 0.0)
+        return normalized.to(dtype=original_dtype)
 
     def _apply_connectors(
         self,
@@ -116,14 +153,19 @@ class LTX2TextEmbedStage:
         import inspect
 
         conn_kwargs = {}
+        connector_mask = attention_mask
         try:
-            if "padding_side" in inspect.signature(self.connectors.forward).parameters:
+            params = inspect.signature(self.connectors.forward).parameters
+            if "additive_mask" in params:
+                connector_mask = (1 - attention_mask.to(packed_hidden.dtype)) * -1_000_000.0
+                conn_kwargs["additive_mask"] = True
+            if "padding_side" in params:
                 conn_kwargs["padding_side"] = getattr(self.tokenizer, "padding_side", "left")
         except (TypeError, ValueError):  # pragma: no cover - exotic forward; fall back to no kwarg
             pass
         video_embeds, audio_embeds, conn_mask = self.connectors(
             packed_hidden,
-            attention_mask,
+            connector_mask,
             **conn_kwargs,
         )
         return video_embeds, audio_embeds, conn_mask

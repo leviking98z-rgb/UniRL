@@ -31,6 +31,7 @@ _SENTINEL = "_unirl_ltx2_rollout_sde"
 
 def patch_ltx2_rollout_sde() -> None:
     _patch_sigma_alignment()
+    _patch_audio_trajectory_alignment()
     _patch_av_decode_carry()
     _patch_sde_logprob_bridge()
 
@@ -111,6 +112,30 @@ def _patch_av_decode_carry() -> None:
 
     forward._unirl_ltx2_rollout_sde = True  # type: ignore[attr-defined]
     LTX2AVDecodingStage.forward = forward
+
+
+def _patch_audio_trajectory_alignment() -> None:
+    """Prepend audio x_T so auxiliary trajectory indices match video T+1."""
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
+        LTX2DenoisingStage,
+    )
+
+    orig = LTX2DenoisingStage._before_denoising_loop
+    if getattr(orig, "_unirl_audio_traj_align", False):
+        return
+
+    def _before_denoising_loop(self, ctx, batch, server_args):
+        result = orig(self, ctx, batch, server_args)
+        if (
+            getattr(batch, "return_trajectory_latents", False)
+            and getattr(ctx, "audio_latents", None) is not None
+            and not getattr(ctx, "trajectory_audio_latents", None)
+        ):
+            ctx.trajectory_audio_latents.append(ctx.audio_latents)
+        return result
+
+    _before_denoising_loop._unirl_audio_traj_align = True  # type: ignore[attr-defined]
+    LTX2DenoisingStage._before_denoising_loop = _before_denoising_loop
 
 
 def _patch_sde_logprob_bridge() -> None:

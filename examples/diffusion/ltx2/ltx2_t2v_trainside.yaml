@@ -36,7 +36,10 @@ bundle:
     pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Lightricks/LTX-2}
     model_precision: bf16
     autocast_precision: bf16
-    trajectory_precision: fp16
+    # Keep the denoising state in fp32. SGLang's LTX scheduler updates and
+    # carries fp32 state while casting only the DiT input to bf16; matching that
+    # boundary is required for cross-engine rollout-distribution parity.
+    trajectory_precision: fp32
     logprob_precision: fp32
     shift: 1.0
     max_sequence_length: 512
@@ -155,7 +158,7 @@ sampling:
   seed: 42
   init_same_noise: false
   autocast_precision: bf16
-  trajectory_precision: fp16
+  trajectory_precision: fp32
   logprob_precision: fp32
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler

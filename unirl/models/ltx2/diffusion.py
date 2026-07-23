@@ -28,6 +28,7 @@ import torch
 from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
 from unirl.models.types.replay_result import ReplayResult
 from unirl.sde.kernels import StepStrategy
+from unirl.sde.noise import make_denoise_step_generators
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment, make_video_segment
 from unirl.utils.dtypes import parse_torch_dtype
@@ -42,6 +43,7 @@ _LTX2_TIMESTEP_SCALE: float = 1000.0
 # isolate_modalities (LTX-2.3-only kwargs) -> TypeError. Drop any kwarg the bound
 # forward() doesn't declare (pass through if it declares **kwargs). Cached per class.
 _FORWARD_PARAMS_CACHE: dict = {}
+_BF16_ROPE_INSTALLED = False
 
 
 def _filter_forward_kwargs(transformer, kwargs):
@@ -57,6 +59,56 @@ def _filter_forward_kwargs(transformer, kwargs):
     if params is True:
         return kwargs
     return {k: v for k, v in kwargs.items() if k in params}
+
+
+def _maybe_patch_bf16_rope() -> None:
+    """Match diffusers LTX RoPE arithmetic to the SGLang bf16 rollout."""
+    global _BF16_ROPE_INSTALLED
+    if _BF16_ROPE_INSTALLED:
+        return
+    if os.environ.get("UNIRL_LTX_BF16_ROPE") not in ("1", "true", "True"):
+        return
+
+    import diffusers.models.transformers.transformer_ltx2 as module
+
+    def _bf16_interleaved_rotary_emb(x, freqs):
+        cos, sin = freqs
+        cos = cos.to(x.dtype)
+        sin = sin.to(x.dtype)
+        x_real, x_imag = x.unflatten(2, (-1, 2)).unbind(-1)
+        x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(2)
+        return x * cos + x_rotated * sin
+
+    def _bf16_split_rotary_emb(x, freqs):
+        cos, sin = freqs
+        x_dtype = x.dtype
+        needs_reshape = False
+        if x.ndim != 4 and cos.ndim == 4:
+            batch, heads, tokens, _ = cos.shape
+            x = x.reshape(batch, tokens, heads, -1).swapaxes(1, 2)
+            needs_reshape = True
+        last = x.shape[-1]
+        if last % 2:
+            raise ValueError(f"Expected an even rotary dim, got {last}")
+        half = last // 2
+        split_x = x.reshape(*x.shape[:-1], 2, half)
+        first_x = split_x[..., :1, :]
+        second_x = split_x[..., 1:, :]
+        cos = cos.to(split_x.dtype).unsqueeze(-2)
+        sin = sin.to(split_x.dtype).unsqueeze(-2)
+        out = split_x * cos
+        first_out = out[..., :1, :]
+        second_out = out[..., 1:, :]
+        first_out.addcmul_(-sin, second_x)
+        second_out.addcmul_(sin, first_x)
+        out = out.reshape(*out.shape[:-2], last)
+        if needs_reshape:
+            out = out.swapaxes(1, 2).reshape(batch, tokens, -1)
+        return out.to(dtype=x_dtype)
+
+    module.apply_interleaved_rotary_emb = _bf16_interleaved_rotary_emb
+    module.apply_split_rotary_emb = _bf16_split_rotary_emb
+    _BF16_ROPE_INSTALLED = True
 
 
 # LTX-2 is a UNIFIED audiovisual transformer: ``forward`` always runs both the
@@ -181,6 +233,7 @@ class LTX2DiffusionStep(DiffusionStep[LTX2Bundle, LTX2Conditions]):
         audio_encoder_attention_mask = audio_text_cond.attn_mask
 
         def _run(v_in, a_in, ts_in, enc_hs, enc_mask, a_enc_hs, a_enc_mask):
+            _maybe_patch_bf16_rope()
             # LTX-2.3 prompt-cross-attention masking alignment.
             #
             # The sglang rollout engine treats the ltx_2_3 checkpoint as an
@@ -310,6 +363,8 @@ class LTX2DiffusionStage(DiffusionStage[LTX2Conditions]):
         initial_latents: torch.Tensor,
         initial_audio_latents: Optional[torch.Tensor] = None,
         sde_indices: Optional[List[int]] = None,
+        denoise_seed_keys: Optional[List[str]] = None,
+        denoise_base_seed: int = 0,
     ) -> LatentSegment:
         """Run the full denoising loop, collecting trajectory for RL.
 
@@ -322,6 +377,9 @@ class LTX2DiffusionStage(DiffusionStage[LTX2Conditions]):
                 128) resolved by the pipeline from the same NoiseRecipe as video.
                 ``None`` falls back to a bare randn (non-pipeline/test callers).
             sde_indices: Which steps to use SDE (stochastic) for RL.
+            denoise_seed_keys: Stable per-sample keys used to derive the same
+                per-step SDE noise as SGLang.
+            denoise_base_seed: Base seed paired with ``denoise_seed_keys``.
 
         Returns:
             LatentSegment with trajectory and log-probs at SDE steps.
@@ -332,6 +390,11 @@ class LTX2DiffusionStage(DiffusionStage[LTX2Conditions]):
         audio_t = _audio_num_frames(int(params.num_frames), _LTX2_FRAME_RATE)
 
         device = initial_latents.device
+        if denoise_seed_keys is not None and len(denoise_seed_keys) != int(initial_latents.shape[0]):
+            raise ValueError(
+                "LTX2DiffusionStage.generate: denoise_seed_keys length "
+                f"{len(denoise_seed_keys)} != batch size {int(initial_latents.shape[0])}"
+            )
         num_steps = len(sigmas) - 1
         sigmas = sigmas.to(device)
         self.strategy.init_schedule(sigmas)
@@ -378,6 +441,15 @@ class LTX2DiffusionStage(DiffusionStage[LTX2Conditions]):
                 sigma = sigmas[step_idx].to(device)
                 sigma_next = sigmas[step_idx + 1].to(device)
                 step_eta = eta if step_idx in sde_set else 0.0
+                step_generators = (
+                    make_denoise_step_generators(
+                        base_seed=int(denoise_base_seed),
+                        step_index=step_idx,
+                        sample_ids=[str(key) for key in denoise_seed_keys],
+                    )
+                    if step_eta > 0.0 and denoise_seed_keys is not None
+                    else None
+                )
 
                 video_pred, audio_pred = self.step_kernel.predict_noise(
                     self.bundle,
@@ -400,6 +472,7 @@ class LTX2DiffusionStage(DiffusionStage[LTX2Conditions]):
                     sigma=sigma,
                     sigma_next=sigma_next,
                     eta=step_eta,
+                    generator=step_generators,
                     sigma_max=sigma_max,
                     step_index=step_idx,
                 )

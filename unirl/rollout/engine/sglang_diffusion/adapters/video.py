@@ -164,6 +164,26 @@ class Ltx2T2VAdapter(VideoAdapter):
     sglang output shape/format with a 1-rollout EMBED dump before alignment.
     """
 
+    def schedule_policy(self):
+        from unirl.models.ltx2.schedule import build_ltx2_schedule_policy
+
+        return build_ltx2_schedule_policy(float(self.model_config.shift))
+
+    def build_sampling(self, req: RolloutReq, *, diffusion: Any) -> Dict[str, Any]:
+        kwargs = super().build_sampling(req, diffusion=diffusion)
+        kwargs["max_sequence_length"] = int(self.model_config.max_sequence_length)
+
+        from unirl.models.ltx2.diffusion import audio_latent_shape
+        from unirl.types.noise_recipe import NoiseRecipe
+
+        audio_noise = NoiseRecipe.from_rollout_req(req).resolve(
+            salt="audio",
+            latent_shape=audio_latent_shape(diffusion),
+        )
+        if audio_noise is not None:
+            kwargs["initial_audio_noise"] = audio_noise
+        return kwargs
+
     def build_segment(
         self,
         req: RolloutReq,
