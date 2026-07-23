@@ -95,9 +95,11 @@ logger = logging.getLogger(__name__)
 # Wrapped as ``[value]`` to fit the list-based merge/slice path.
 _COND_FIELDS = (
     "prompt_embeds",
+    "audio_prompt_embeds",
     "pooled_prompt_embeds",
     "encoder_attention_mask",
     "negative_prompt_embeds",
+    "negative_audio_prompt_embeds",
     "neg_pooled_prompt_embeds",
     "negative_attention_mask",
     "image_latent",
@@ -121,11 +123,13 @@ _COND_FIELDS = (
 # mask-drop and the adapter-side all-ones backfill.
 _POS_MAP = {
     "prompt_embeds": "prompt_embeds",
+    "audio_prompt_embeds": "audio_prompt_embeds",
     "pooled_prompt_embeds": "pooled_embeds",
     "encoder_attention_mask": "prompt_embeds_mask",
 }
 _NEG_MAP = {
     "negative_prompt_embeds": "negative_prompt_embeds",
+    "negative_audio_prompt_embeds": "negative_audio_prompt_embeds",
     "neg_pooled_prompt_embeds": "neg_pooled_embeds",
     "negative_attention_mask": "negative_prompt_embeds_mask",
 }
@@ -136,7 +140,14 @@ _NEG_MAP = {
 # ``hidden_states[0][mask]`` for batch-size 1). Only these dests get a batch dim
 # added at ingestion; pooled (``[B, hidden]``) and masks (``[B, seq]``) are already
 # batched and must be sliced/merged as-is.
-_TOKEN_EMBED_DESTS = frozenset({"prompt_embeds", "negative_prompt_embeds"})
+_TOKEN_EMBED_DESTS = frozenset(
+    {
+        "prompt_embeds",
+        "audio_prompt_embeds",
+        "negative_prompt_embeds",
+        "negative_audio_prompt_embeds",
+    }
+)
 
 # Sentinels.
 _OUTPUT_BATCH_FIELDS_SENTINEL = "_unirl_conditions_output_batch_fields"

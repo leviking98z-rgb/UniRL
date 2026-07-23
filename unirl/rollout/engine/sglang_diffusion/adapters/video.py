@@ -25,10 +25,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import torch
+
 from unirl.rollout.engine.sglang_diffusion import utils
 from unirl.rollout.engine.sglang_diffusion.adapters.base import register_adapter
 from unirl.rollout.engine.sglang_diffusion.adapters.image import ImageAdapter
 from unirl.rollout.engine.sglang_diffusion.backends import RawResult
+from unirl.types.conditions.text import TextEmbedCondition
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.segments.latent import make_video_segment
 
@@ -183,6 +186,40 @@ class Ltx2T2VAdapter(VideoAdapter):
         if audio_noise is not None:
             kwargs["initial_audio_noise"] = audio_noise
         return kwargs
+
+    @staticmethod
+    def _fuse_audio_condition(results: List[RawResult], field: str, attn_mask) -> Optional[TextEmbedCondition]:
+        tensors = []
+        for result in results:
+            value = utils.fuse_encoder_outputs(getattr(result, field, None))
+            if value is not None:
+                tensors.append(value.detach().cpu())
+        if not tensors:
+            return None
+        return TextEmbedCondition(
+            embeds=torch.cat(tensors, dim=0),
+            attn_mask=attn_mask,
+        )
+
+    def build_condition(self, results: List[RawResult]) -> Dict[str, Any]:
+        out = super().build_condition(results)
+        text = out.get("text")
+        negative_text = out.get("negative_text")
+        audio_text = self._fuse_audio_condition(
+            results,
+            "audio_prompt_embeds",
+            text.attn_mask if text is not None else None,
+        )
+        negative_audio_text = self._fuse_audio_condition(
+            results,
+            "negative_audio_prompt_embeds",
+            negative_text.attn_mask if negative_text is not None else None,
+        )
+        if audio_text is not None:
+            out["audio_text"] = audio_text
+        if negative_audio_text is not None:
+            out["negative_audio_text"] = negative_audio_text
+        return out
 
     def build_segment(
         self,
