@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from functools import partial
 from typing import Iterator, Sequence
 
+import torch
 from torch import nn
 
 from unirl.train.deferred import _stamp
@@ -30,6 +31,7 @@ def inject_lora(
     bias: str = "none",
     task_type: str = "FEATURE_EXTRACTION",
     adapter_name: str = "default",
+    init_seed: int | None = None,
 ) -> None:
     """Inject a single LoRA adapter.  No Shadow, no EMA."""
     from peft import LoraConfig, inject_adapter_in_model
@@ -42,7 +44,8 @@ def inject_lora(
         bias=str(bias),
         task_type=str(task_type),
     )
-    inject_adapter_in_model(peft_cfg, model, adapter_name=adapter_name)
+    with _adapter_init_seed(init_seed):
+        inject_adapter_in_model(peft_cfg, model, adapter_name=adapter_name)
 
     if _current_rank() == 0:
         n_trainable = sum(1 for p in model.parameters() if p.requires_grad)
@@ -55,19 +58,35 @@ def inject_lora(
             n_trainable,
         )
 
-    _stamp(model, partial(_reset_adapter, name=adapter_name))
+    _stamp(model, partial(_reset_adapter, name=adapter_name, init_seed=init_seed))
 
 
-def _reset_adapter(model: nn.Module, *, name: str) -> None:
+def _reset_adapter(model: nn.Module, *, name: str, init_seed: int | None = None) -> None:
     from peft.tuners.lora import LoraLayer
 
     n_reset = 0
-    for m in model.modules():
-        if isinstance(m, LoraLayer):
-            m.reset_lora_parameters(name, init_lora_weights=True)
-            n_reset += 1
+    with _adapter_init_seed(init_seed):
+        for m in model.modules():
+            if isinstance(m, LoraLayer):
+                m.reset_lora_parameters(name, init_lora_weights=True)
+                n_reset += 1
     if _current_rank() == 0:
         logger.info("_reset_adapter(%r): %d LoraLayer(s)", name, n_reset)
+
+
+@contextmanager
+def _adapter_init_seed(seed: int | None) -> Iterator[None]:
+    """Temporarily seed CPU/CUDA RNGs for reproducible LoRA initialization."""
+    if seed is None:
+        yield
+        return
+
+    devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(int(seed))
+        yield
 
 
 @contextmanager
