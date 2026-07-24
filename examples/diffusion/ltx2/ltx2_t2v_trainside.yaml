@@ -62,6 +62,10 @@ backend:
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
+    # Keep the trainable LoRA/Adam master in fp32 while FSDP all-gathers bf16
+    # compute copies. Tiny cross-engine gradient deltas otherwise quantize to
+    # different bf16 adapter values and accumulate into a curve split.
+    master_dtype: fp32
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full
