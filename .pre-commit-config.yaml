@@ -61,3 +61,11 @@ repos:
         language: python
         pass_filenames: false
         always_run: true
+      # Cross-cutting video support is documented as a recipe-backed matrix.
+      # Keep its links, engine claims, reward claims, owners, and evidence live.
+      - id: check-video-support-matrix
+        name: video support matrix matches recipes
+        entry: python lint/check_video_support_matrix.py
+        language: python
+        pass_filenames: false
+        files: ^(docs/tracks/video\.md|examples/.*\.ya?ml|experimental/refl/.*\.ya?ml|unirl/(models|reward|rollout)/.*\.py|lint/check_video_support_matrix\.py|\.pre-commit-config\.yaml)$
