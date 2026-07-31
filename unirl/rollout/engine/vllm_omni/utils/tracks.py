@@ -171,9 +171,9 @@ def build_image_segment(
     """Build ``LatentSegment`` from the DiT stage's per-request outputs.
 
     Each per-prompt result carries its own ``trajectory_latents`` /
-    ``trajectory_log_probs`` (``[1, T+1, ...]`` / ``[1, K]`` — with
+    ``trajectory_log_probs`` (``[1, P, ...]`` / ``[1, K]`` — with
     ``runtime.max_inflight=1`` they are NOT shared refs to a full-batch
-    tensor); concatenate across outputs to recover ``[B, T+1, ...]`` /
+    tensor); concatenate across outputs to recover ``[B, P, ...]`` /
     ``[B, K]``. ``sigmas`` / ``indices`` / ``sde_indices`` are sample-shared,
     read off the first output:
 
@@ -184,8 +184,9 @@ def build_image_segment(
       via :func:`verify_engine_used_sigmas` so a broken wire surfaces here.
     - ``sde_logp`` from ``trajectory_log_probs`` ``[B, K]`` (K = SDE-gated
       step count; can be < T for sparse SDE, 0 for NFT/forward-process).
-    - ``indices`` — dense ``arange(T+1)`` storage slots; ``sde_indices`` — the
-      sparse step ids echoed via ``custom_output["sde_step_indices"]``.
+    - ``indices`` — sparse full-schedule positions echoed through
+      ``custom_output["trajectory_positions"]``; ``sde_indices`` — the sparse
+      step ids echoed via ``custom_output["sde_step_indices"]``.
     """
     per_latents: List[torch.Tensor] = []
     per_log_probs: List[torch.Tensor] = []
@@ -212,16 +213,28 @@ def build_image_segment(
     )
     head_custom = getattr(head, "custom_output", None) or {}
     sde_step_indices_raw = head_custom.get("sde_step_indices")
+    trajectory_positions_raw = head_custom.get("trajectory_positions")
 
     indices: Optional[torch.Tensor] = None
     sde_indices: Optional[torch.Tensor] = None
+    if traj_latents is not None:
+        if trajectory_positions_raw is not None:
+            indices = torch.as_tensor([int(i) for i in trajectory_positions_raw], dtype=torch.long)
+            if int(indices.numel()) != int(traj_latents.shape[1]):
+                raise RuntimeError(
+                    "build_image_segment: scheduler reported trajectory_positions "
+                    f"of length {int(indices.numel())} but trajectory_latents has "
+                    f"{int(traj_latents.shape[1])} stored positions."
+                )
+        else:
+            # Legacy dense-worker fallback.
+            indices = torch.arange(int(traj_latents.shape[1]), dtype=torch.long)
+
     # K == 0 happens when the algorithm requested zero SDE steps (NFT /
     # forward-process). Treat identically to "no log_probs at all":
     # clean-latents segment with no sde_logp / sde_indices.
     K = int(traj_log_probs.shape[1]) if traj_log_probs is not None else 0
     if K > 0:
-        T_plus_1 = int(traj_latents.shape[1]) if traj_latents is not None else K + 1
-        indices = torch.arange(T_plus_1, dtype=torch.long)
         if sde_step_indices_raw is not None:
             sde_indices = torch.as_tensor([int(i) for i in sde_step_indices_raw], dtype=torch.long)
             if int(sde_indices.numel()) != K:
@@ -249,8 +262,6 @@ def build_image_segment(
         # clean-latents branch can look up the final latent, but drop the
         # ``[B, 0]`` log-probs placeholder (it confuses downstream replay).
         traj_log_probs = None
-        T_plus_1 = int(traj_latents.shape[1])
-        indices = torch.arange(T_plus_1, dtype=torch.long)
         sde_indices = None
 
     return make_image_segment(

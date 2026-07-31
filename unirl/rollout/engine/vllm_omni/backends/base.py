@@ -114,8 +114,8 @@ class OmniRawResult(Protocol):
       / ``.text``) — and ``prompt_token_ids`` (the sample's true, un-padded
       prompt; vLLM runs prompts per-request with no batch padding).
     - DiT stage (``"image"`` / ``"video"``): ``images`` (PIL list; per-prompt
-      frame list for video), ``trajectory_latents`` ``[1, T+1, ...]`` (dense —
-      every step recorded), ``trajectory_timesteps`` ``[T+1]`` (the field name
+      frame list for video), ``trajectory_latents`` ``[1, P, ...]`` (selected
+      replay positions), ``trajectory_timesteps`` ``[T+1]`` (the field name
       reads "timesteps" but the RL pipeline subclass overwrites its contents
       with the true [0, 1] σ schedule), ``trajectory_log_probs`` ``[1, K]``
       (K = SDE-gated step count; 0 for NFT/forward-process), and
@@ -123,7 +123,8 @@ class OmniRawResult(Protocol):
       worker IPC boundary. Documented keys: ``"fused_mm_capture"`` (HI3
       ``prepare_inputs_for_generation`` capture), ``"text_capture"`` (SD3 /
       HV1.5 ``encode_prompt`` capture), ``"sde_step_indices"`` (the SDE-gated
-      step ids echoed by the scheduler). Missing capture is a fatal
+      step ids echoed by the scheduler), ``"trajectory_positions"`` (the
+      selected full-schedule latent positions). Missing capture is a fatal
       misconfiguration the *adapter* raises on — the seam passes the dict
       through structurally.
     """

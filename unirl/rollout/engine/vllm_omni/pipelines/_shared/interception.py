@@ -82,6 +82,9 @@ def drain_trajectory_into(out: Any, scheduler: Any) -> None:
     out.trajectory_timesteps = sigmas
     out.trajectory_log_probs = log_probs
     stamp_custom_output(out, "sde_step_indices", scheduler.last_sde_step_indices)
+    trajectory_positions = getattr(scheduler, "last_trajectory_positions", None)
+    if trajectory_positions is not None:
+        stamp_custom_output(out, "trajectory_positions", trajectory_positions)
 
 
 def _grouped_span(idx: int, spp: int) -> tuple[int, int]:

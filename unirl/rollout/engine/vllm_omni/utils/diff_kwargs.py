@@ -20,8 +20,8 @@ def core_diff_kwargs(req: RolloutReq, diff_params: Any) -> Dict[str, Any]:
     Every value reads off the request's typed ``DiffusionSamplingParams``
     — the engine keeps no sampling defaults. ``eta`` rides as a typed
     first-class field; ``guidance_scale_provided`` marks the explicit CFG
-    choice; trajectory latents are always requested (dense — replay needs
-    ``x_t`` at every slot).
+    choice; trajectory latents are always requested (the worker records only
+    SDE-pair positions plus the terminal clean latent).
     """
     num_inference_steps = int(diff_params.num_inference_steps)
     diff_kwargs: Dict[str, Any] = dict(

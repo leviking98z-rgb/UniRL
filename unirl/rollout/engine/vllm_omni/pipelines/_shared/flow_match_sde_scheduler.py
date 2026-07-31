@@ -20,6 +20,8 @@ from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import BaseOutput
 from diffusers.utils.torch_utils import randn_tensor
 
+from unirl.types.sampling import compute_trajectory_positions
+
 
 @dataclass
 class FlowMatchSDESchedulerOutput(BaseOutput):
@@ -65,6 +67,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
     _traj_timesteps: List[torch.Tensor]
     _traj_log_probs: List[torch.Tensor]
     _traj_sde_step_indices: List[int]
+    _traj_positions: List[int]
 
     def __init__(self, *args, eta: float = 1.0, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -72,9 +75,9 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         # Euler ODE branch (we gate the SDE math on ``_sde_indices_set``,
         # not on eta — see ``step``). Installing this scheduler with eta=0
         # is the right call when the algorithm has no SDE step but we
-        # still need the dense latent trajectory captured (NFT and other
-        # forward-process flows that go through ``resp_to_samples`` which
-        # requires ``segment.latents`` to be non-empty). Negative eta is
+        # still need the terminal clean latent captured (NFT and other
+        # forward-process flows that go through ``resp_to_samples`` require
+        # ``segment.latents`` to be non-empty). Negative eta is
         # still nonsense.
         if eta < 0.0:
             raise ValueError(f"FlowMatchSDEDiscreteScheduler.eta must be >= 0; got eta={eta!r}.")
@@ -84,13 +87,16 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         self._traj_latents = []
         self._traj_timesteps = []
         self._traj_log_probs = []
+        self._traj_positions = []
         # Step indices that actually ran the SDE branch (and therefore wrote
         # an entry to ``_traj_log_probs``). Empty when ``_sde_indices_set``
         # is ``None`` / empty (no SDE step fires).
         self._traj_sde_step_indices = []
+        # Storage positions required by replay. Populated after the request's
+        # schedule is materialized in set_timesteps().
+        self._capture_positions: frozenset[int] = frozenset()
         # Position-0 capture — see ``step`` below. Stored separately so
-        # ``drain_trajectory`` can prepend it without polluting the
-        # per-step buffers (which must stay length-T to match log_probs).
+        # ``drain_trajectory`` can prepend it when SDE replay needs x_T.
         self._initial_latent: Optional[torch.Tensor] = None
         self._initial_timestep: Optional[torch.Tensor] = None
         # SDE-vs-ODE per-step gating, set by the pipeline subclass before
@@ -103,8 +109,8 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         # - ``frozenset({i,…})`` — those step indices run the SDE branch
         #   + capture log_prob; all other steps degenerate to Euler ODE.
         #
-        # Latent / timestep capture stays dense across both kinds of steps
-        # so trainer-side replay always has ``x_t`` at every storage slot.
+        # Latent capture keeps only the (x_t, x_{t+1}) pairs required by SDE
+        # replay plus the terminal clean latent.
         # This scheduler is installed unconditionally by the pipeline
         # subclass — ``resp_to_samples`` requires ``segment.latents`` to
         # be non-empty regardless of SDE choice, and only this scheduler
@@ -245,8 +251,16 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         self._traj_timesteps = []
         self._traj_log_probs = []
         self._traj_sde_step_indices = []
+        self._traj_positions = []
         self._initial_latent = None
         self._initial_timestep = None
+        num_steps = int(len(self.timesteps))
+        sde_indices = set(self._sde_indices_set or ())
+        needed = set(compute_trajectory_positions(sde_indices, num_steps))
+        # The terminal clean latent is consumed by decode / forward-process
+        # algorithms even when no SDE step is selected.
+        needed.add(num_steps)
+        self._capture_positions = frozenset(needed)
         return out
 
     # ------------------------------------------------------------------
@@ -278,11 +292,9 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         if self.step_index is None:
             self._init_step_index(timestep)
 
-        # Position-0 capture — stash the input ``sample`` (initial noise
-        # for the first call after set_timesteps) so trajectory_latents
-        # can be returned shape ``[B, T+1, ...]``. Only fires on the first
-        # step() per request.
-        if self._initial_latent is None:
+        # Position-0 capture — stash x_T only when the selected SDE pairs
+        # require it. Only fires on the first step() per request.
+        if int(self.step_index) == 0 and 0 in self._capture_positions:
             self._initial_latent = sample.detach().clone()
             if torch.is_tensor(timestep):
                 init_t = timestep.detach().to(sample.device).clone()
@@ -380,16 +392,18 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             prev_sample = prev_sample_mean.to(original_dtype)
             log_prob = None
 
-        # Trajectory stash — DENSE for latents/timesteps (every storage
-        # slot recorded so replay has ``x_t`` at every step), SPARSE for
-        # log_probs (only SDE-branch steps contribute).
-        self._traj_latents.append(prev_sample.detach().clone())
-        if torch.is_tensor(timestep):
-            t_for_capture = timestep.detach().to(prev_sample.device).clone()
-        else:
-            t_for_capture = torch.as_tensor(float(timestep), device=prev_sample.device)
-        # Broadcast to [B] so torch.stack(..., dim=1) yields [B, T] cleanly.
-        self._traj_timesteps.append(t_for_capture.expand(prev_sample.shape[0]).clone())
+        # Trajectory stash — sparse for both latents (selected SDE pairs +
+        # terminal clean latent) and log-probs (SDE-branch steps only).
+        result_position = int(sigma_idx) + 1
+        if result_position in self._capture_positions:
+            self._traj_latents.append(prev_sample.detach().clone())
+            if torch.is_tensor(timestep):
+                t_for_capture = timestep.detach().to(prev_sample.device).clone()
+            else:
+                t_for_capture = torch.as_tensor(float(timestep), device=prev_sample.device)
+            # Broadcast to [B] so torch.stack(..., dim=1) yields [B, K] cleanly.
+            self._traj_timesteps.append(t_for_capture.expand(prev_sample.shape[0]).clone())
+            self._traj_positions.append(result_position)
         if log_prob is not None:
             self._traj_log_probs.append(log_prob.detach().clone())
             self._traj_sde_step_indices.append(int(sigma_idx))
@@ -422,18 +436,24 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         """
         return list(self._traj_sde_step_indices)
 
+    @property
+    def last_trajectory_positions(self) -> List[int]:
+        """Stored latent positions for the most recent denoise loop."""
+        positions = list(self._traj_positions)
+        if self._initial_latent is not None:
+            positions.insert(0, 0)
+        return positions
+
     def drain_trajectory(
         self,
     ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """Return ``(latents [B,T+1,...], sigmas [T+1], timesteps [B,T+1], log_probs [B,K])`` or ``None``.
+        """Return sparse replay latents plus the full sigma schedule.
 
-        Latents / timesteps are dense — length ``T+1`` — regardless of SDE
-        vs ODE gating: position-0 is the input ``sample`` captured on the
-        first ``step()`` call (the x_T), plus ``T`` post-step states. This
-        is required by the trainer-side clean-latents replay path
-        (``resp_to_samples`` raises when ``segment.latents`` is empty),
-        which is why the pipeline subclasses install this scheduler
-        unconditionally (see ``RLStableDiffusion3Pipeline._ensure_scheduler_for_eta``).
+        Latents contain only the ``(i, i+1)`` positions needed by selected
+        SDE transitions plus terminal position ``T``. Their full-schedule
+        coordinates are exposed by :attr:`last_trajectory_positions`.
+        Sigmas remain dense ``[T+1]`` because replay indexes them by the
+        original step id.
 
         Log-probs length ``K = len(last_sde_step_indices)``:
         - ``K == T`` when ``_sde_indices_set`` covers every step
@@ -456,10 +476,10 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         ``set_timesteps`` call does that, so re-reads of the same
         trajectory are idempotent.
         """
-        if not self._traj_latents:
+        if not self._traj_latents and self._initial_latent is None:
             return None
-        post_latents = torch.stack(self._traj_latents, dim=1)
-        post_timesteps = torch.stack(self._traj_timesteps, dim=1)
+        post_latents = torch.stack(self._traj_latents, dim=1) if self._traj_latents else None
+        post_timesteps = torch.stack(self._traj_timesteps, dim=1) if self._traj_timesteps else None
         if self._traj_log_probs:
             log_probs = torch.stack(self._traj_log_probs, dim=1)
         else:
@@ -467,24 +487,30 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             # i.e. NFT / forward-process). ``[B, 0]`` keeps tensor ops
             # alive; response.py collapses to ``sde_logp = None`` for the
             # clean-latents segment.
-            B = post_latents.shape[0]
-            log_probs = post_latents.new_zeros((B, 0), dtype=torch.float32)
+            reference = post_latents if post_latents is not None else self._initial_latent
+            assert reference is not None
+            B = reference.shape[0]
+            log_probs = reference.new_zeros((B, 0), dtype=torch.float32)
 
         if self._initial_latent is not None and self._initial_timestep is not None:
             # Prepend position-0: cast initial latent to the post-step
             # dtype so torch.cat is well-typed (post-step is the model's
             # original dtype, possibly bf16; initial latent matches the
             # input ``sample`` dtype which is the same).
-            init_lat = self._initial_latent.to(post_latents.dtype).unsqueeze(1)
-            init_ts = self._initial_timestep.to(post_timesteps.dtype).unsqueeze(1)
-            latents = torch.cat([init_lat, post_latents], dim=1)
-            timesteps = torch.cat([init_ts, post_timesteps], dim=1)
+            if post_latents is not None and post_timesteps is not None:
+                init_lat = self._initial_latent.to(post_latents.dtype).unsqueeze(1)
+                init_ts = self._initial_timestep.to(post_timesteps.dtype).unsqueeze(1)
+                latents = torch.cat([init_lat, post_latents], dim=1)
+                timesteps = torch.cat([init_ts, post_timesteps], dim=1)
+            else:
+                latents = self._initial_latent.unsqueeze(1)
+                timesteps = self._initial_timestep.unsqueeze(1)
         else:
+            assert post_latents is not None and post_timesteps is not None
             latents = post_latents
             timesteps = post_timesteps
 
-        T_plus_1 = int(latents.shape[1])
-        sigmas = self.sigmas[:T_plus_1].detach().clone().to(latents.device)
+        sigmas = self.sigmas.detach().clone().to(latents.device)
 
         return latents, sigmas, timesteps, log_probs
 
