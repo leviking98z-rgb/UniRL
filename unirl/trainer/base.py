@@ -12,13 +12,13 @@ from omegaconf import DictConfig
 from unirl.algorithms.advantage import AdvantageEstimator
 from unirl.config.execution import ExecutionPlan, LoopKind, PlacementMode
 from unirl.distributed.group.device_pool import DevicePool
+from unirl.distributed.process import run_with_timeout
 from unirl.models.types.plugin import ModelPluginPlan
 from unirl.observability import create_observer, observer_state_dict
 from unirl.observability.instrumentation import install_phase_timing
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import ARSamplingParams, BaseSamplingParams, total_samples_per_prompt
-from unirl.utils.graceful_shutdown import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ class BaseTrainer:
         # until subclass initialization finishes, so install() runs at lifecycle
         # observability startup.
         # None when disabled (logging.memory.enabled=false / UNIRL_MEM_MONITOR=0).
-        from unirl.utils.memory_monitor import install_memory_monitoring
+        from unirl.observability.memory import install_memory_monitoring
 
         self._memory_monitor = install_memory_monitoring(self)
 

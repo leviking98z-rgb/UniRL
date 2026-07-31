@@ -26,9 +26,9 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
+from unirl.config.dtypes import canonical_torch_dtype_name, parse_torch_dtype
 from unirl.models.types.bundle import Bundle
 from unirl.models.types.meta_init import finalize_meta_init
-from unirl.utils.dtypes import canonical_torch_dtype_name, parse_torch_dtype
 
 
 class Qwen3MoeBundle(Bundle):

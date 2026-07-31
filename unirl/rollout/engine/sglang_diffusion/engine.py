@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
@@ -37,7 +38,6 @@ from unirl.sde.runtime import ensure_sample_sigmas
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import DiffusionSamplingParams
-from unirl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 

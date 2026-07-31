@@ -66,7 +66,7 @@ class RewardRequest:
         prim = self.generated.get("image")
         if prim is None:
             return None
-        from unirl.utils.media import tensor_frame_to_pil
+        from unirl.types.media_conversion import tensor_frame_to_pil
 
         return [tensor_frame_to_pil(img) for img in prim.pixels.unbind(0)]
 

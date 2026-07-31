@@ -30,9 +30,9 @@ import os
 import re
 import sys
 import threading
-from glob import glob
 from typing import Any, Dict, List, Optional, Tuple
 
+from unirl.data.alfworld import list_alfworld_games
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Primitive, Sample
 
@@ -60,27 +60,6 @@ _SYSTEM = (
     "Observation: You turn on the desklamp 1. Task complete.\n\n"
     "Now solve the following task the same way."
 )
-
-
-def list_alfworld_games(split: str = "train", data_dir: Optional[str] = None) -> List[str]:
-    """Enumerate ALFWorld TextWorld game files for a split (sorted → stable indices).
-
-    Shared by :class:`AlfworldEnv` and ``unirl.utils.prepare_alfworld`` so a data row's
-    ``game_index`` maps to the same game on both sides. Globs ``$ALFWORLD_DATA`` (or
-    ``data_dir``) for the ``game.tw-pddl`` task games."""
-    root = data_dir or os.environ.get("ALFWORLD_DATA", "")
-    if not root:
-        return []
-    patterns = [
-        os.path.join(root, "json_2.1.1", split, "**", "game.tw-pddl"),
-        os.path.join(root, "json_2.1.1", split, "**", "*.tw-pddl"),
-        os.path.join(root, "**", split, "**", "*.tw-pddl"),
-    ]
-    for pat in patterns:
-        games = sorted(glob(pat, recursive=True))
-        if games:
-            return games
-    return []
 
 
 def _parse_action(text: Optional[str]) -> str:

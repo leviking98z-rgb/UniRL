@@ -12,7 +12,7 @@ from unirl.config.require import require
 if TYPE_CHECKING:
     import torch
 
-    from unirl.utils.scheduler_utils import TimestepScheduler
+    from unirl.sde.scheduler import TimestepScheduler
 
 
 @dataclass

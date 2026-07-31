@@ -629,12 +629,17 @@ def check_observer_contract(errors: list[str], simple: dict[str, list[ClassInfo]
     for trainer_path in _iter_python(ROOT / "unirl/trainer"):
         tree = ast.parse(trainer_path.read_text(encoding="utf-8"), filename=str(trainer_path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "unirl.utils.wandb_logger":
+            if isinstance(node, ast.ImportFrom) and node.module in {
+                "unirl.observability.wandb",
+                "unirl.utils.wandb_logger",
+            }:
                 errors.append(
                     f"{trainer_path.relative_to(ROOT)}:{node.lineno}: trainers must depend on "
                     "unirl.observability, not the WandB adapter"
                 )
-            if isinstance(node, ast.Import) and any(alias.name == "unirl.utils.wandb_logger" for alias in node.names):
+            if isinstance(node, ast.Import) and any(
+                alias.name in {"unirl.observability.wandb", "unirl.utils.wandb_logger"} for alias in node.names
+            ):
                 errors.append(
                     f"{trainer_path.relative_to(ROOT)}:{node.lineno}: trainers must depend on "
                     "unirl.observability, not the WandB adapter"

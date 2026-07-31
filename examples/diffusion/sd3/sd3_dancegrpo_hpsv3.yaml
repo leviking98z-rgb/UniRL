@@ -80,7 +80,7 @@ sampling:
   eta: 0.7
   init_same_noise: false
   scheduler:
-    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.sde.scheduler.AllSDEScheduler
     timestep_fraction: [0.0, 0.5]   # SDE steps drawn from the first half (v1)
     num_sde_steps: 3
 

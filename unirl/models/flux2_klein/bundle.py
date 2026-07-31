@@ -43,9 +43,9 @@ from typing import Any, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.models.types.bundle import Bundle
 from unirl.models.types.meta_init import build_meta_init_transformer
-from unirl.utils.dtypes import parse_torch_dtype
 
 from .config import Flux2KleinPipelineConfig
 

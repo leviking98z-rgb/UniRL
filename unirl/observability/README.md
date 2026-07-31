@@ -39,3 +39,7 @@ migration.
 `instrumentation.py` owns phase timing independently of the selected provider.
 It wraps the standard rollout, reward, weight-sync, and train collaborators and
 injects `perf/<phase>_time_s` at the `Observer.log_rollout_step` boundary.
+
+WandB adaptation, metric extraction, profiling, and driver-side memory
+orchestration are owned by this package; worker probes live in the distributed
+runtime. See [`MEMORY.md`](MEMORY.md) for the GPU memory workflow.

@@ -13,7 +13,7 @@ class, and writes a standard HF folder — ready for ``from_pretrained`` or
 the recorded tensors onto the freshly loaded base (DCP may omit frozen/meta
 entries), while ``save_mode=adapter`` folds the LoRA keys onto those base weights.
 
-The fold mirrors :func:`unirl.utils.peft_merge.merged_state_dict` (fp32 merge,
+The fold mirrors :func:`unirl.distributed.peft.merged_state_dict` (fp32 merge,
 same key grammar) but runs offline on the checkpoint dict. The LoRA scaling
 (alpha / rank) comes from the ``lora_config`` the checkpoint records;
 ``--lora-alpha`` overrides it (and is the only path for checkpoints predating

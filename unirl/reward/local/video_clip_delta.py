@@ -29,8 +29,8 @@ from typing import TYPE_CHECKING, List
 import torch
 
 from unirl.reward.base import BaseRewardComponentSpec
+from unirl.types.media_conversion import tensor_frame_to_pil
 from unirl.types.reward import RewardRequest
-from unirl.utils.media import tensor_frame_to_pil
 
 from .pickscore import PickScoreRewardScorer
 

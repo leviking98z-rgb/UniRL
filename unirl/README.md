@@ -29,7 +29,7 @@ As source, the package falls into four groups:
 - **Training loop** (`rollout/`, `reward/`, `algorithms/`, `train/`) — the four
   pluggable components of one rollout, plus what they share: `models/`
   (per-model bundles), `sde/` (step kernels / σ schedule), and `data/` (sources).
-- **Foundation** (`distributed/`, `config/`, `types/`, `utils/`) — the
+- **Foundation** (`distributed/`, `config/`, `types/`, `runtime.py`) — the
   cross-cutting infrastructure every layer rests on: the Ray
   worker/dispatch/transport runtime, config build-and-validate, the shared typed
   contracts, and helpers.
@@ -57,9 +57,9 @@ config · types · sde · distributed/{group,tensor}
 without importing the runtime. `lint/check_framework_contracts.py` pins the
 stdlib-checkable extension surfaces (rollout engines, model pipelines, train
 backends, `Sample`/`Part`, and entrypoints). Both run in pre-commit and lint CI.
-`utils/` remains a transitional ownership bucket rather than a kernel layer;
-helpers should move to their consuming component instead of creating new
-cross-layer imports there.
+`utils/` is a compatibility namespace, not a dependency layer. Implementations
+live with their owning component; a static guard keeps framework source from
+adding imports from the legacy facades.
 
 ## Module Map
 
@@ -78,7 +78,7 @@ cross-layer imports there.
 | `sde/` | SDE step kernels, σ schedule/shift, initial-noise generation (the `NoiseRecipe` contract lives in `types/`) |
 | [`types/`](types/README.md) | Shared typed contracts: `Sample` / `Part`, primitives, conditions, segments, rewards, sampling; includes the request/response migration guide |
 | `data/` | Data source and dataset readers |
-| `utils/` | Logging, dtype, media, timing, checkpoint, and misc helpers |
+| `utils/` | Lazy compatibility facades for pre-refactor imports and data-prep commands; contains no framework implementation |
 
 ## Deployment modes
 
@@ -121,6 +121,7 @@ before applying the same reward, advantage, and train-stack contracts.
 
 - `trainer/README.md`: the orchestration hub — how a `<Domain>Trainer` places workers and drives the loop.
 - `observability/README.md`: the provider-neutral metrics/media/progress contract and backward-compatible logging configuration.
+- `observability/MEMORY.md`: worker probes, phase attribution, and memory-snapshot workflow.
 - `types/README.md`: the `Sample` / `Part` contract and migration from the retired request/response API.
 - `config/README.md`: bounded-composition recipes — `require`/precision validators, `_target_` instantiation, cross-component contracts.
 - `rollout/README.md`: rollout modes, engines, and the `Sample` / `Part` generation flow.

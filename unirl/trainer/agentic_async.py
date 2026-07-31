@@ -48,12 +48,12 @@ from omegaconf import DictConfig
 
 from unirl.algorithms.advantage import GroupedAdvantageEstimator
 from unirl.config.execution import Capability, LoopKind, PlacementMode
+from unirl.config.remote import parse_hydra_cfg, remote_hydra
 from unirl.distributed.group.placement import placement, remote
 from unirl.trainer.agentic import AgenticTrainer
 from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import BaseSamplingParams
-from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
 

@@ -33,6 +33,7 @@ from typing import Optional, Tuple
 
 import torch
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.models.types.bundle import Bundle
 from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig, resolve_trainable_module
 from unirl.train.backend.base_backend import BaseFSDP2Backend
@@ -59,7 +60,6 @@ from unirl.train.configs import (
     LoraConfig,
 )
 from unirl.train.deferred import apply_deferred_ops
-from unirl.utils.dtypes import parse_torch_dtype
 
 
 class VeOmniBackend(BaseFSDP2Backend):

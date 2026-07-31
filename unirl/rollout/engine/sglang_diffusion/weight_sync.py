@@ -21,8 +21,8 @@ from typing import Dict, List, Optional
 
 import torch
 
+from unirl.distributed.peft import adapt_lora_for_sglang
 from unirl.rollout.engine.sglang_diffusion.backends import Backend
-from unirl.utils.peft_merge import adapt_lora_for_sglang
 
 logger = logging.getLogger(__name__)
 

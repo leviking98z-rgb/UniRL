@@ -12,7 +12,7 @@ This stage reads **exactly like** :class:`unirl.models.sd3.diffusion.SD3Diffusio
   ``build_schedule_policy``), passed in as ``schedule`` — NOT computed here.
 - **which steps run SDE** comes from ``params.sde_indices`` (the driver resolved it
   via :meth:`DiffusionSamplingParams.resolve_sde_indices` → the recipe's indices
-  scheduler, ``unirl.utils.scheduler_utils.AllSDEScheduler``) — NOT drawn here.
+  scheduler, ``unirl.sde.scheduler.AllSDEScheduler``) — NOT drawn here.
 - **the SDE transition + log-prob** is :class:`unirl.sde.kernels.FlowSDEStrategy`
   (``strategy.denoise``) — NOT a flow_grpo port.
 - **the initial noise x_T** is the driver-authored :class:`NoiseRecipe` value passed
@@ -43,12 +43,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import torch
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.config.require import require
 from unirl.models.diffusion import DiffusionStage, ReplayResult
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment
-from unirl.utils.dtypes import parse_torch_dtype
 
 from . import rl_ops
 from .conditions import BagelDiffusionConditions
@@ -76,7 +76,7 @@ class BagelDiffusionParams(DiffusionSamplingParams):
 
     The SDE machinery is now **all inherited / central**: ``eta`` is the SDE noise
     scale (flow_grpo's ``noise_level``); ``scheduler`` (the recipe's
-    :class:`~unirl.utils.scheduler_utils.AllSDEScheduler`) picks the SDE steps via
+    :class:`~unirl.sde.scheduler.AllSDEScheduler`) picks the SDE steps via
     :meth:`resolve_sde_indices`; the σ schedule rides on ``params.sigmas``. No
     Bagel-specific window / schedule fields remain.
     """

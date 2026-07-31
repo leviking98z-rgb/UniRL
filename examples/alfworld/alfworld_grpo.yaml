@@ -10,7 +10,7 @@
 # Prerequisites (on the pod):
 #   - QWEN3_INSTRUCT_PATH : local Qwen3 checkpoint dir
 #   - ALFWORLD_DATA       : ALFWorld data dir (after `alfworld-download`)
-#   - DATA_PATH           : game-index jsonl (python -m unirl.utils.prepare_alfworld --out-dir data/alfworld)
+#   - DATA_PATH           : game-index jsonl (python -m unirl.data.prepare.alfworld --out-dir data/alfworld)
 #   - ALFWORLD_CONFIG (optional): ALFWorld base_config.yaml (else the package default)
 #
 # Run (single node, whole 8-GPU node):

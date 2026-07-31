@@ -9,6 +9,7 @@ from omegaconf import DictConfig
 
 from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.config.execution import Capability
+from unirl.config.remote import parse_hydra_cfg, remote_hydra
 from unirl.distributed.group.placement import placement, remote
 from unirl.reward.ops import score_frontier
 from unirl.train.stack import TrainStepResult
@@ -17,7 +18,6 @@ from unirl.trainer.eval_suites import EvalRewardSuite, build_eval_suites
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
-from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
 

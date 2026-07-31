@@ -25,11 +25,11 @@ from typing import Any, Callable, ClassVar, Generic, List, Mapping, Optional, Ty
 
 import torch
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.models.diffusion.contracts import DiffusionLatentSpec, ReplayResult
 from unirl.sde.kernels import StepStrategy
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment, make_video_segment
-from unirl.utils.dtypes import parse_torch_dtype
 
 B = TypeVar("B")
 C = TypeVar("C")

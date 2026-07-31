@@ -27,7 +27,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from unirl.utils.dtypes import canonical_torch_dtype_name, parse_torch_dtype
+from unirl.config.dtypes import canonical_torch_dtype_name, parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 

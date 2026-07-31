@@ -77,7 +77,7 @@ sampling:
   eta: 0.0                      # DiffusionNFT: forward-process, no SDE noise injection
   init_same_noise: false
   scheduler:
-    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.sde.scheduler.AllSDEScheduler
     num_sde_steps: 0            # DiffusionNFT forward-process: no SDE steps recorded
 
 logging:

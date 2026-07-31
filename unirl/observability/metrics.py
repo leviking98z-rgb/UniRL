@@ -1,0 +1,241 @@
+"""Provider-neutral helpers for building structured training metrics."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+import torch
+
+
+def _coerce_scalar(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if torch.is_tensor(value):
+        tensor = value.detach()
+        if tensor.numel() == 0:
+            return None
+        if tensor.numel() == 1:
+            return float(tensor.item())
+        return float(tensor.to(dtype=torch.float32).mean().item())
+    return None
+
+
+def flatten_numeric_metrics(
+    payload: Dict[str, Any],
+    *,
+    prefix: str = "",
+) -> Dict[str, float]:
+    """Flatten nested dict payload into numeric metrics only."""
+    output: Dict[str, float] = {}
+
+    def _walk(node: Dict[str, Any], node_prefix: str) -> None:
+        for key, value in node.items():
+            metric_key = f"{node_prefix}{key}" if node_prefix else str(key)
+            if isinstance(value, dict):
+                _walk(value, f"{metric_key}/")
+                continue
+            scalar = _coerce_scalar(value)
+            if scalar is not None:
+                output[metric_key] = scalar
+
+    _walk(payload, prefix)
+    return output
+
+
+def flatten_dict(payload: dict, parent_key: str = "", sep: str = "/") -> dict:
+    """Flatten a nested dictionary while preserving non-numeric values."""
+    items = []
+    for key, value in payload.items():
+        output_key = f"{parent_key}{sep}{key}" if parent_key else key
+        if isinstance(value, dict):
+            items.extend(flatten_dict(value, output_key, sep=sep).items())
+        else:
+            items.append((output_key, value))
+    return dict(items)
+
+
+def aggregate_numeric_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Average every numeric metric present across repeated payloads."""
+    aggregated: Dict[str, float] = {}
+    if not metrics_list:
+        return aggregated
+
+    all_keys = set()
+    for metrics in metrics_list:
+        all_keys.update(metrics.keys())
+
+    for key in all_keys:
+        values: List[float] = []
+        for metrics in metrics_list:
+            if key not in metrics:
+                continue
+            value = metrics[key]
+            if isinstance(value, torch.Tensor):
+                value = value.item() if value.numel() == 1 else value.mean().item()
+            if isinstance(value, bool):
+                values.append(float(value))
+            elif isinstance(value, (int, float)):
+                values.append(float(value))
+        if values:
+            aggregated[key] = sum(values) / len(values)
+    return aggregated
+
+
+def _tensor_stats(prefix: str, tensor: Optional[torch.Tensor]) -> Dict[str, float]:
+    if tensor is None or (not torch.is_tensor(tensor)) or tensor.numel() == 0:
+        return {}
+    flat = tensor.detach().to(dtype=torch.float32).reshape(-1).cpu()
+    return {
+        f"{prefix}_mean": float(flat.mean().item()),
+        f"{prefix}_std": float(flat.std(unbiased=False).item()),
+        f"{prefix}_min": float(flat.min().item()),
+        f"{prefix}_max": float(flat.max().item()),
+    }
+
+
+def _zero_std_group_counts_from_ids(
+    rewards: torch.Tensor,
+    group_ids: Optional[List[str]],
+) -> tuple[int, int]:
+    if not isinstance(group_ids, list) or len(group_ids) != int(rewards.shape[0]):
+        return 0, 0
+    ordered: Dict[str, List[float]] = {}
+    rewards_f = rewards.to(dtype=torch.float32).reshape(-1)
+    for sample_idx, raw_group_id in enumerate(group_ids):
+        group_id = str(raw_group_id).strip()
+        if not group_id:
+            continue
+        ordered.setdefault(group_id, []).append(float(rewards_f[sample_idx].item()))
+    if not ordered:
+        return 0, 0
+    zero_std = 0
+    for values in ordered.values():
+        if len(values) <= 1:
+            continue
+        std = torch.tensor(values, dtype=torch.float32).std(unbiased=False)
+        if float(std.item()) <= 1e-8:
+            zero_std += 1
+    return zero_std, len(ordered)
+
+
+def compute_rollout_sample_metrics(*, sample: Any, trunc_len: Optional[int] = None) -> Dict[str, float]:
+    """Build rollout metrics directly from a :class:`Sample`.
+
+    Walks the **gen Parts** of ``sample`` (those with ``sampling_params``
+    set) and emits per-part metrics under the ``rollout/`` prefix:
+
+    - ``num_samples`` (the sample's ``batch_size``)
+    - For each gen Part: ``reward_{mean,std,min,max}``,
+      ``advantage_{mean,std,min,max}``,
+      ``reward_<component>_{mean,std,min,max}`` per
+      ``part.component_rewards`` entry (``/`` flattened to ``_``),
+      ``group_count``, ``zero_std_group_ratio``,
+      ``zero_std_group_count`` when the part's ``group_ids`` is
+      populated.
+
+    Each gen Part is named ``"ar"`` when its ``sampling_params`` is an
+    :class:`ARSamplingParams`, else ``"image"`` (matching
+    ``BaseTrainer._drop_decoded``). For a single gen-part sample (the
+    common case today: one diffusion or one AR part) keys are emitted
+    unprefixed. With multiple gen Parts each part's metrics are
+    namespaced under its derived name (e.g. ``image_reward_mean``,
+    ``ar_reward_mean``).
+    """
+    from unirl.types.sampling import ARSamplingParams
+
+    metrics: Dict[str, float] = {}
+
+    parts = getattr(sample, "parts", None)
+    if not isinstance(parts, list):
+        metrics["num_samples"] = float(int(getattr(sample, "batch_size", 0)))
+        return metrics
+
+    gen_parts = [p for p in parts if getattr(p, "is_gen", False)]
+    # num_samples = the generated-sample count (frontier gen Part), restoring the
+    # pre-migration resp.batch_size. sample.batch_size is the root prompt count P,
+    # which under-reports by the fan-out factor (N for AR/diffusion, N*M for the
+    # PE/unified image stage).
+    metrics["num_samples"] = (
+        float(int(gen_parts[-1].batch_size)) if gen_parts else float(int(getattr(sample, "batch_size", 0)))
+    )
+    multi = len(gen_parts) > 1
+    for part in gen_parts:
+        name = "ar" if isinstance(part.sampling_params, ARSamplingParams) else "diffusion"
+        prefix = f"{name}_" if multi else ""
+        rewards = getattr(part, "rewards", None)
+        if torch.is_tensor(rewards) and rewards.numel() > 0:
+            rewards_f = rewards.detach().to(dtype=torch.float32).reshape(-1).cpu()
+            metrics.update(_tensor_stats(f"{prefix}reward", rewards_f))
+            zero_cnt, group_cnt = _zero_std_group_counts_from_ids(
+                rewards_f,
+                # Buckets are sibling groups (immediate parent), regardless of the
+                # lineage layer the advantages were normalized at.
+                getattr(part, "group_ids", None),
+            )
+            if group_cnt > 0:
+                metrics[f"{prefix}zero_std_group_ratio"] = float(zero_cnt) / float(group_cnt)
+                metrics[f"{prefix}zero_std_group_count"] = float(zero_cnt)
+                metrics[f"{prefix}group_count"] = float(group_cnt)
+
+        advantages = getattr(part, "advantages", None)
+        if torch.is_tensor(advantages) and advantages.numel() > 0:
+            adv_f = advantages.detach().to(dtype=torch.float32).reshape(-1).cpu()
+            metrics.update(_tensor_stats(f"{prefix}advantage", adv_f))
+
+        # Response-length stats from the packed varlen segment (AR parts):
+        # `segment.lengths[i]` = generated tokens for sample i. `trunc_ratio` is
+        # the fraction that hit the generation budget (= truncated, usually no
+        # final answer -> reward 0) — mirrors verl's response_length/{mean,clip_ratio}.
+        segment = getattr(part, "segment", None)
+        lengths = getattr(segment, "lengths", None) if segment is not None else None
+        if torch.is_tensor(lengths) and lengths.numel() > 0:
+            len_f = lengths.detach().to(dtype=torch.float32).reshape(-1).cpu()
+            metrics.update(_tensor_stats(f"{prefix}response_len", len_f))
+            if trunc_len is not None and int(trunc_len) > 0:
+                metrics[f"{prefix}trunc_ratio"] = float(
+                    (len_f >= float(int(trunc_len))).to(dtype=torch.float32).mean().item()
+                )
+
+        component_rewards = getattr(part, "component_rewards", None)
+        if isinstance(component_rewards, dict):
+            for cname, tensor in component_rewards.items():
+                if not torch.is_tensor(tensor) or tensor.numel() == 0:
+                    continue
+                safe_name = str(cname).replace("/", "_")
+                cat = tensor.detach().to(dtype=torch.float32).reshape(-1).cpu()
+                metrics.update(_tensor_stats(f"{prefix}reward_{safe_name}", cat))
+
+    return metrics
+
+
+def build_sync_metrics(
+    sync_result: Any,
+    prefix: str = "sync/",
+) -> Dict[str, float]:
+    """Flatten weight-sync result into numeric metrics."""
+    if sync_result is None:
+        return {}
+
+    metrics: Dict[str, float] = {}
+    for key in ("elapsed_ms", "version", "rollout_id"):
+        scalar = _coerce_scalar(getattr(sync_result, key, None))
+        if scalar is not None:
+            metrics[f"{prefix}{key}"] = scalar
+
+    extra = getattr(sync_result, "extra", None)
+    if isinstance(extra, dict):
+        metrics.update(flatten_numeric_metrics(extra, prefix=f"{prefix}extra/"))
+    return metrics
+
+
+__all__ = [
+    "aggregate_numeric_metrics",
+    "build_sync_metrics",
+    "compute_rollout_sample_metrics",
+    "flatten_dict",
+    "flatten_numeric_metrics",
+]

@@ -360,7 +360,7 @@ class RemoteRewardBackend(RewardBackend):
         if prim_image is None:
             return None
         # Images batch has .pixels [B, C, H, W]
-        from unirl.utils.media import tensor_frame_to_pil
+        from unirl.types.media_conversion import tensor_frame_to_pil
 
         return [tensor_frame_to_pil(img) for img in prim_image.pixels.unbind(0)]
 

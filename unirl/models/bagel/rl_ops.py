@@ -40,7 +40,7 @@ Everything else the RL loop needs is UniRL's, NOT a flow_grpo port:
 
 - the SDE transition + log-prob  → :class:`unirl.sde.kernels.FlowSDEStrategy`
 - which steps run SDE            → :meth:`DiffusionSamplingParams.resolve_sde_indices`
-                                   (``unirl.utils.scheduler_utils.AllSDEScheduler``)
+                                   (``unirl.sde.scheduler.AllSDEScheduler``)
 - the σ / timestep schedule      → :class:`unirl.sde.runtime.FlowMatchSchedulePolicy`
 - the initial noise x_T          → :class:`unirl.types.noise_recipe.NoiseRecipe`
 

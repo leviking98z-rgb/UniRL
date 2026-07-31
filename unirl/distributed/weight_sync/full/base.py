@@ -107,9 +107,9 @@ class FullWeightSync(Remote):
         wire_dtype: Any = None,
     ) -> None:
         super().__init__()
-        # Deferred: unirl.utils.dtypes imports torch at module scope, and this
+        # Deferred: unirl.config.dtypes imports torch at module scope, and this
         # module must stay driver-importable without torch.
-        from unirl.utils.dtypes import parse_torch_dtype
+        from unirl.config.dtypes import parse_torch_dtype
 
         self._backend = backend
         self._bucket_bytes = int(bucket_size_mb) * 1024 * 1024
@@ -133,7 +133,7 @@ class FullWeightSync(Remote):
                     f"for this model. Unsupported EP params: {unsupported[:4]}."
                 )
         if ep_enabled and hasattr(self._backend.model, "peft_config"):
-            from unirl.utils.peft_merge import lora_targets_ep_experts
+            from unirl.distributed.peft import lora_targets_ep_experts
 
             if lora_targets_ep_experts(self._backend.model):
                 raise ValueError(
@@ -211,7 +211,7 @@ class FullWeightSync(Remote):
         happens shard-side before the redistribute and every consumer
         (``_iter_buckets`` sizing included) sees wire-width tensors.
         """
-        from unirl.utils.peft_merge import merged_state_dict, raw_state_dict
+        from unirl.distributed.peft import merged_state_dict, raw_state_dict
 
         remap = self._name_remap
         # Expert-parallel models always need the EP-aware walk: even when LoRA
@@ -255,13 +255,13 @@ class FullWeightSync(Remote):
         rank ends up with the full per-expert set and pushes it to its co-located
         engine, exactly like the dense BROADCAST sync.
         """
+        from unirl.distributed.peft import merged_state_dict, raw_state_dict
         from unirl.train.backend.veomni import _compat
         from unirl.train.backend.veomni.ep.models.qwen3_moe import (
             fused_expert_kind,
             iter_hf_expert_tensors,
         )
         from unirl.train.backend.veomni.ep.placement import gather_stacked_expert_block
-        from unirl.utils.peft_merge import merged_state_dict, raw_state_dict
 
         _compat.ensure_installed()
         from veomni.distributed.parallel_state import get_parallel_state

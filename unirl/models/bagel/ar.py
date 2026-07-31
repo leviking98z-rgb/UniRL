@@ -35,11 +35,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.config.require import require
 from unirl.models.types.ar import ARStage, ARStep
 from unirl.types.sampling import ARSamplingParams
 from unirl.types.segments import TextSegment
-from unirl.utils.dtypes import parse_torch_dtype
 
 from . import rl_ops
 from .conditions import BagelARConditions

@@ -14,7 +14,7 @@
 #                   "media": [{"modality": "image", "role": "target", "uri": ...}]})
 #   SFT_EVAL_DATA   eval manifest (defaults to SFT_DATA — supply a real split!)
 #
-# Data prep: shared with sd3_sft (python -m unirl.utils.prepare_sft_t2i).
+# Data prep: shared with sd3_sft (python -m unirl.data.prepare.sft_t2i).
 #
 # Launch:
 #   ENTRY=train_sft SFT_DATA=data/sft_t2i/train.jsonl SFT_EVAL_DATA=data/sft_t2i/val.jsonl \

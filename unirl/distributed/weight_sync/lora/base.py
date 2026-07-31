@@ -41,8 +41,8 @@ def _extract_canonical_lora(backend: Any, *, param_prefix: str, adapter_name: st
     backends predating ``weight_sync_dtype`` (e.g. an all-bf16-master setup where
     no cast is needed).
     """
+    from unirl.distributed.peft import extract_lora_tensors
     from unirl.distributed.weight_sync.payload import _peft_config_dict
-    from unirl.utils.peft_merge import extract_lora_tensors
 
     model = backend.model
     weight_sync_dtype = getattr(backend, "weight_sync_dtype", None)
@@ -82,7 +82,7 @@ class LoraWeightSyncBase(Remote):
     ) -> None:
         super().__init__()
         self._backend = backend
-        from unirl.utils.peft_merge import lora_targets_ep_experts
+        from unirl.distributed.peft import lora_targets_ep_experts
 
         if lora_targets_ep_experts(backend.model):
             raise ValueError(

@@ -13,8 +13,8 @@ from typing import Dict, Optional, Tuple
 import torch
 from torch import nn
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.config.require import require
-from unirl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 
