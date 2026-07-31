@@ -33,6 +33,33 @@ As source, the package falls into four groups:
   worker/dispatch/transport runtime, config build-and-validate, the shared typed
   contracts, and helpers.
 
+### Enforced dependency direction
+
+The physical package names are broader than the reusable **framework kernel**.
+The kernel is the stable contract/substrate subset: `config/`, `types/`, `sde/`,
+and `distributed/{group,tensor}`. Loop components consume that subset; `trainer/`
+orchestrates the components. A stable component may have several implementations,
+but the dependency arrow never points back from the kernel to one model, engine,
+backend, or trainer.
+
+```text
+train_*.py
+    ↓
+trainer/
+    ↓
+data · models · rollout · reward · algorithms · train · weight_sync
+    ↓
+config · types · sde · distributed/{group,tensor}
+```
+
+`lint/check_architecture_boundaries.py` enforces the damaging reverse-edge rules
+without importing the runtime. `lint/check_framework_contracts.py` pins the
+stdlib-checkable extension surfaces (rollout engines, model pipelines, train
+backends, `Sample`/`Part`, and entrypoints). Both run in pre-commit and lint CI.
+`utils/` remains a transitional ownership bucket rather than a kernel layer;
+helpers should move to their consuming component instead of creating new
+cross-layer imports there.
+
 ## Module Map
 
 | Path | Responsibility |

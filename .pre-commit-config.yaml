@@ -61,3 +61,20 @@ repos:
         language: python
         pass_filenames: false
         always_run: true
+      # Framework dependency direction: kernel never reaches into model/engine/
+      # trainer implementations, and loop components do not import their
+      # orchestrator or unrelated peers.
+      - id: check-architecture-boundaries
+        name: framework architecture boundaries hold
+        entry: python lint/check_architecture_boundaries.py
+        language: python
+        pass_filenames: false
+        always_run: true
+      # CPU/stdlib conformance checks for the stable engine, pipeline, backend,
+      # Sample/Part, and entrypoint extension surfaces.
+      - id: check-framework-contracts
+        name: framework extension contracts conform
+        entry: python lint/check_framework_contracts.py
+        language: python
+        pass_filenames: false
+        always_run: true
