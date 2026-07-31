@@ -14,6 +14,7 @@ from unirl.distributed.group.device_pool import DevicePool
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import ARSamplingParams, BaseSamplingParams, total_samples_per_prompt
+from unirl.utils.graceful_shutdown import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,11 @@ logger = logging.getLogger(__name__)
 # OOM'd mid-backward) cannot service the flush's ray.get, so the bound stops it hanging
 # forever and masking the primary exception. Env-tunable.
 _TEARDOWN_FLUSH_TIMEOUT_S = float(os.environ.get("UNIRL_TEARDOWN_FLUSH_TIMEOUT_S", "120"))
+
+# A healthy engine may spend tens of seconds tearing down a TP group and CUDA
+# contexts. Keep engine shutdown bounded so DevicePool teardown still gets a
+# chance to kill actors and release GPUs if one engine is wedged mid-generate.
+_ROLLOUT_SHUTDOWN_TIMEOUT_S = 60.0
 
 
 def prepare_input_sample(
@@ -135,16 +141,15 @@ class BaseTrainer:
     """Owns a DevicePool. Subclasses use ``placement(self.pool, ...)`` to
     instantiate their ``Remote`` roles inside ``__init__`` / ``setup``.
 
-    Also owns the (rank-0/driver) Weights & Biases logger shared by every
-    trainer. Subclasses call :meth:`_init_wandb` once at the top of ``train``
-    (it always builds a logger — a no-op null-object when reporting is off),
-    then ``self.wandb_logger.log_rollout_step(...)`` / ``log_progress(...)``
-    after each ``train_step``, and :meth:`_finish_wandb` in a ``finally``.
+    Also owns the rank-0 logger and the typed loop-program selector shared by
+    every trainer. :class:`~unirl.trainer.program.TrainerLifecycle` initializes
+    and finalizes logging around the selected program.
     """
 
     LOOP_KIND: LoopKind = LoopKind.BATCH_RL
     PLACEMENT_OVERRIDE: Optional[PlacementMode] = None
     REQUIRED_SYNC_CAPABILITIES = frozenset()
+    DEFAULT_SAVE_MODE = "auto"
 
     def __init__(
         self,
@@ -417,9 +422,10 @@ class BaseTrainer:
         else:
             cleanup(_ray_get_timeout=timeout)
 
-    def _finish_wandb(self) -> None:
+    def _finish_wandb(self, *, active_exception: Optional[bool] = None) -> None:
         """Flush pending work, clean transport artifacts, and close wandb."""
-        active_exception = sys.exc_info()[0] is not None
+        if active_exception is None:
+            active_exception = sys.exc_info()[0] is not None
         # On the exception path, bound the flush's ray.get: a worker wedged in an NCCL
         # collective (e.g. one that OOM'd mid-backward) can't service it, so an
         # unbounded flush would hang forever and mask the primary exception. A healthy
@@ -439,6 +445,105 @@ class BaseTrainer:
         finally:
             if self.wandb_logger is not None:
                 self.wandb_logger.finish()
+
+    # ---- loop-program hooks and runtime ownership -------------------------
+
+    def _loop_restore_data(self, start_step: int) -> None:
+        """Restore a replayable batch stream by consuming prior steps."""
+        for _ in range(start_step):
+            self.data_source.get_samples(self.batch_size)
+
+    def _loop_wandb_extra(self) -> Optional[Dict[str, Any]]:
+        """Additional run metadata supplied to the loop program."""
+        return None
+
+    def _loop_before_step(self, state: Any) -> None:
+        """Domain hook immediately before one synchronous batch-RL step."""
+
+    def _loop_force_sync(self, state: Any) -> bool:
+        """Whether a domain-specific condition forces a pre-generation sync."""
+        return False
+
+    def _loop_on_error(self, state: Any) -> None:
+        """Optional immediate reporting before lifecycle teardown."""
+
+    def _loop_evaluate_baseline(self, state: Any) -> None:
+        """Evaluate the restored/current policy before entering the loop."""
+        self.evaluate(state.start_step)
+
+    def _loop_evaluate_periodic(self, state: Any) -> None:
+        """Evaluate after a completed optimizer step."""
+        self.evaluate(state.completed_step)
+
+    def train(
+        self,
+        *,
+        num_rollouts: int,
+        weight_sync_interval: int = 1,
+        save_interval: int = 0,
+        save_dir: Optional[str] = None,
+        load_dir: Optional[str] = None,
+        save_mode: Optional[str] = None,
+    ) -> None:
+        """Select the typed outer-loop program declared by ``LOOP_KIND``."""
+        from unirl.trainer.program import AgenticRLProgram, BatchRLProgram, LoopSpec
+
+        spec = LoopSpec(
+            total_steps=num_rollouts,
+            weight_sync_interval=weight_sync_interval,
+            save_interval=save_interval,
+            save_dir=save_dir,
+            load_dir=load_dir,
+            save_mode=save_mode if save_mode is not None else self.DEFAULT_SAVE_MODE,
+        )
+        progress_logger = logging.getLogger(type(self).__module__)
+        if self.LOOP_KIND is LoopKind.ASYNC_BATCH_RL:
+            BatchRLProgram(self, progress_logger).run_async(spec)
+        elif self.LOOP_KIND is LoopKind.AGENTIC_RL:
+            AgenticRLProgram(self, progress_logger).run_barrier(spec)
+        elif self.LOOP_KIND is LoopKind.PARTIAL_AGENTIC_RL:
+            AgenticRLProgram(self, progress_logger).run_partial(spec)
+        elif self.LOOP_KIND is LoopKind.ASYNC_AGENTIC_RL:
+            AgenticRLProgram(self, progress_logger).run_async(spec)
+        elif self.LOOP_KIND is LoopKind.BATCH_RL:
+            BatchRLProgram(self, progress_logger).run(spec)
+        else:
+            raise ValueError(f"{type(self).__name__} requires a domain-specific loop for {self.LOOP_KIND.value!r}.")
+
+    def shutdown(self) -> None:
+        """Release every runtime resource this trainer owns. Idempotent."""
+        self._shutdown_runtime()
+
+    def _shutdown_runtime(self) -> None:
+        """Best-effort ordered teardown for rollout children and Ray actors."""
+        if getattr(self, "_runtime_shutdown_done", False):
+            return
+        self._runtime_shutdown_done = True
+
+        rollouts = []
+        rollout = getattr(self, "rollout", None)
+        if rollout is not None:
+            rollouts.append(rollout)
+        for attr in ("ar_rollouts", "dit_rollouts"):
+            rollouts.extend(getattr(self, attr, ()) or ())
+
+        seen: set[int] = set()
+        for engine in rollouts:
+            if id(engine) in seen:
+                continue
+            seen.add(id(engine))
+            shutdown = getattr(engine, "shutdown", None)
+            if callable(shutdown):
+                run_with_timeout(
+                    shutdown,
+                    timeout=_ROLLOUT_SHUTDOWN_TIMEOUT_S,
+                    what=f"{type(self).__name__} rollout engine shutdown",
+                )
+
+        try:
+            self.pool.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down %s device pool", type(self).__name__)
 
     # ---- checkpointing (shared by single-backend trainers) -----------------
 

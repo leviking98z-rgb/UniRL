@@ -32,7 +32,6 @@ opens the colocate ``placement(fraction=1.0)`` block we replace with two slabs).
 """
 
 import logging
-import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -43,12 +42,7 @@ from omegaconf import DictConfig
 from unirl.config.execution import Capability, LoopKind, PlacementMode
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
-from unirl.rollout.async_runtime import (
-    AsyncRolloutScheduler,
-    BufferedRolloutGroup,
-    InflightGeneration,
-    RayGenerationDispatcher,
-)
+from unirl.rollout.async_runtime import InflightGeneration
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
@@ -65,6 +59,7 @@ class AsyncARTrainer(ARTrainer):
     LOOP_KIND: LoopKind = LoopKind.ASYNC_BATCH_RL
     PLACEMENT_OVERRIDE: PlacementMode = PlacementMode.SEPARATE
     REQUIRED_SYNC_CAPABILITIES = frozenset({Capability.NCCL_RENDEZVOUS})
+    DEFAULT_SAVE_MODE = "full"
 
     def __init__(
         self,
@@ -225,15 +220,6 @@ class AsyncARTrainer(ARTrainer):
         self._drop_decoded(scored, rollout_id=job.gen_id)
         return scored.split()
 
-    def _drain_all(self) -> None:
-        """Finish + buffer EVERY in-flight generation (the single-threaded quiesce).
-
-        Mandatory before a weight sync (the engine corrupts an in-flight generate
-        when weights + KV cache update mid-flight), before eval/checkpoint (shared
-        engine), and in ``finally`` (no leaked ObjectRefs).
-        """
-        self._async_scheduler.drain_all(self._score_completed)
-
     # ------------------------------------------------------------------
     # Train tail (mirrors ar.py:152-182, minus wake/sleep) — reward parity
     # ------------------------------------------------------------------
@@ -271,118 +257,3 @@ class AsyncARTrainer(ARTrainer):
         # fires; reclaim transport buffers here (no-op for colocate_store/gpu).
         self._reset_transport_buffers()
         return result, mean_reward
-
-    # ------------------------------------------------------------------
-    # Train loop
-    # ------------------------------------------------------------------
-
-    def train(
-        self,
-        *,
-        num_rollouts: int,
-        weight_sync_interval: int = 1,
-        save_interval: int = 0,
-        save_dir: Optional[str] = None,
-        load_dir: Optional[str] = None,
-        save_mode: str = "full",
-    ) -> None:
-        interval = max(1, weight_sync_interval)
-        # Staleness budget: how many weight-syncs a generation may cross before it
-        # is evicted. 0 (default) = on-policy (no generation crosses a sync).
-        stale = self._buffer_max_staleness if self._buffer_max_staleness is not None else 0
-        M = self._max_inflight
-
-        start_rollout = self.maybe_load_checkpoint(load_dir, num_rollouts=num_rollouts)
-        resumed = bool(load_dir)
-        # Single-threaded: exactly one get_samples(batch_size) per launch and
-        # launches are 1:1 with rollout_id, so replaying start_rollout times
-        # restores the exact stream position (deterministic resume).
-        for _ in range(start_rollout):
-            self.data_source.get_samples(self.batch_size)
-        self._init_wandb(
-            num_rollouts=num_rollouts,
-            extra={
-                "adv_normalization_scope": self.adv_normalization_scope,
-                "max_inflight": M,
-                "buffer_max_staleness": stale,
-                "weight_sync_interval": interval,
-            },
-        )
-
-        self._async_scheduler = AsyncRolloutScheduler(
-            RayGenerationDispatcher(self.rollout),
-            groups_per_step=self.batch_size,
-        )
-        self._async_scheduler.reset(start_rollout)
-
-        if resumed and self.weight_sync is not None:
-            self.weight_sync.sync()  # push restored weights into the fresh engine
-        if self.eval_interval > 0:
-            self.evaluate(rollout_id=-1)  # baseline; engine quiescent
-
-        try:
-            for rollout_id in range(start_rollout, num_rollouts):
-                t0 = time.perf_counter()
-                picked = self._next_step(rollout_id, interval, M, stale, num_rollouts)
-                # Reassemble the drained per-prompt group Samples into one batched
-                # Sample [input(P), gen(P*N)] — the inverse of Sample.split.
-                sample = Sample.concat([item.sample for item in picked])
-                training_progress = rollout_id / max(1, num_rollouts - 1)
-                result, mean_reward = self._advantage_and_train(
-                    sample, training_progress=training_progress, rollout_id=rollout_id, t0=t0
-                )
-                self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
-
-                step = rollout_id + 1
-                if self.eval_interval > 0 and step % self.eval_interval == 0:
-                    self._drain_all()  # eval shares the engine
-                    self.evaluate(rollout_id=rollout_id)
-                if save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts):
-                    self._drain_all()  # consistent engine + deterministic resume
-                    self.maybe_save_checkpoint(
-                        rollout_id, num_rollouts, save_interval=save_interval, save_dir=save_dir, save_mode=save_mode
-                    )
-                if step % interval == 0 and self.weight_sync is not None:
-                    self._drain_all()  # MANDATORY: weight/KV update corrupts in-flight generations
-                    self.weight_sync.sync()
-                    self._weight_version += 1
-        finally:
-            # Match BaseTrainer._finish_wandb: cleanup failures must not mask
-            # the exception that caused teardown.
-            active_exception = sys.exc_info()[0] is not None
-            try:
-                self._drain_all()
-            except Exception:
-                if not active_exception:
-                    raise
-                logger.exception("Failed to drain in-flight generations during trainer teardown")
-            finally:
-                self._finish_wandb()
-
-    def _next_step(
-        self,
-        rollout_id: int,
-        interval: int,
-        M: int,
-        stale: int,
-        num_rollouts: int,
-    ) -> List[BufferedRolloutGroup]:
-        """Top up launches, reap completed generations, and return the freshest
-        ``groups_per_step`` (``batch_size``) groups for ``rollout_id`` (blocking
-        on the oldest in-flight generation if the buffer is short).
-
-        The launch clamp is the load-bearing on-policy guarantee: a generation
-        launched now is consumed later, so bound how far ahead we launch to
-        ``stale`` weight-syncs. ``stale=0`` ⇒ never launch into a future
-        sync-window ⇒ no generation crosses a sync ⇒ ``ratio≈1`` (on-policy).
-        """
-        return self._async_scheduler.next_step(
-            rollout_id=rollout_id,
-            sync_interval=interval,
-            max_inflight=M,
-            max_staleness=stale,
-            num_rollouts=num_rollouts,
-            current_version=self._weight_version,
-            build_sample=self._build_async_sample,
-            on_complete=self._score_completed,
-        )

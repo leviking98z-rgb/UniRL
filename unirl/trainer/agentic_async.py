@@ -40,20 +40,17 @@ turns span weight versions is correct per-token because each gen ``Part`` keeps 
 from __future__ import annotations
 
 import logging
-import sys
 import time
 from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
 
-import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from unirl.config.execution import Capability, LoopKind, PlacementMode
 from unirl.distributed.group.placement import placement, remote
-from unirl.train.stack import TrainStepResult
 from unirl.trainer.agentic import AgenticTrainer
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
-from unirl.types.sample import Part, Sample, _part_with_field
+from unirl.types.sample import Part, Sample
 from unirl.types.sampling import BaseSamplingParams
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
@@ -182,6 +179,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
     LOOP_KIND: LoopKind = LoopKind.ASYNC_AGENTIC_RL
     PLACEMENT_OVERRIDE: PlacementMode = PlacementMode.SEPARATE
     REQUIRED_SYNC_CAPABILITIES = frozenset({Capability.NCCL_RENDEZVOUS})
+    DEFAULT_SAVE_MODE = "full"
 
     _POLL_INTERVAL_S = 0.02  # backoff between polls while the in-flight drive fills the buffer
     _MAX_REFILLS = 64  # underflow guard: refills of a drained-but-short buffer before we give up
@@ -442,53 +440,24 @@ class AsyncAgenticTrainer(AgenticTrainer):
     # Consumer — reward + GRPO advantage + one optimizer step over a group batch
     # ------------------------------------------------------------------
 
-    def _train_on_groups(
-        self, groups: List[List[Sample]], *, training_progress: float, rollout_id: int, t0: float
-    ) -> Tuple[TrainStepResult, float]:
+    def _train_on_groups(self, groups: List[List[Sample]], *, training_progress: float, rollout_id: int, t0: float):
         """Reward + GROUP-relative advantage + one step over ``batch_size`` complete
-        groups. Reuses :class:`AgenticTrainer`'s reward/GRPO/log helpers; the train-part
-        assembly mirrors :meth:`AgenticTrainer.train_step` (steps 5-6)."""
+        groups using :class:`AgenticTrainer`'s shared reward/GRPO/train tail."""
         trajs: List[Sample] = [t for group in groups for t in group]
-        # Reconstruct a request whose root Part carries every trajectory's root id +
-        # ground-truth answer (looked up in _gt_by_root, not the trajectory), so the
-        # inherited answer-grader (_rewards_and_groups reads gt from sample.parts[0])
-        # works unchanged. Built as ONE Part.input (no Part.concat of input Parts).
         roots = [tr.parts[0].sample_ids[0] for tr in trajs]
         request = Sample.request(Part.input(roots, metadata=[{"answer": self._gt_by_root.get(r)} for r in roots]))
         rewards, group_ids = self._rewards_and_groups(request, trajs, rollout_id)
         for root in set(roots):
             self._gt_by_root.pop(root, None)
-        finite = torch.isfinite(rewards)
-        mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
-        advantages = self._group_advantages(rewards, group_ids)
-
-        train_parts: List[Part] = []
-        for i, tr in enumerate(trajs):
-            adv_i = float(advantages[i].item())
-            for gp in tr.gen_parts():
-                gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
-                gp = _part_with_field(gp, "primitives", {})  # free decoded content before train
-                gp = _part_with_field(gp, "rewards", None)
-                train_parts.append(gp)
-
-        depths = [len(tr.gen_parts()) for tr in trajs]
-        if not train_parts:
-            logger.warning("AsyncAgenticTrainer rollout %d produced no trainable turns.", rollout_id)
-            return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
-
-        train_part = self._pad_to_dp_multiple(Part.concat(train_parts))
-        result = self.stack.train_track(train_part, training_progress=float(training_progress))
-
-        log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
         versions = [gp.weight_version for tr in trajs for gp in tr.gen_parts() if gp.weight_version is not None]
-        self.wandb_logger.log_rollout_step(
-            rollout_id,
-            result,
-            log_sample,
-            step_time_s=time.perf_counter() - t0,
+        result = self._advantage_train_and_log(
+            trajs,
+            rewards,
+            group_ids,
+            rollout_id=rollout_id,
+            training_progress=training_progress,
+            t0=t0,
             extra_metrics={
-                "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
-                "agent/max_turns": max(depths) if depths else 0,
                 "async/buffer_groups": self._buffer.size(),
                 "async/weight_version": self._weight_version,
                 "async/version_span": (max(versions) - min(versions)) if versions else 0,
@@ -499,99 +468,4 @@ class AsyncAgenticTrainer(AgenticTrainer):
                 "async/discarded_completed_trajectories": self._discarded_completed_trajectories,
             },
         )
-        self._reset_transport_buffers()
-        return result, mean_reward
-
-    # ------------------------------------------------------------------
-    # Train loop — single-threaded producer/consumer
-    # ------------------------------------------------------------------
-
-    def train(
-        self,
-        *,
-        num_rollouts: int,
-        weight_sync_interval: int = 1,
-        save_interval: int = 0,
-        save_dir: Optional[str] = None,
-        load_dir: Optional[str] = None,
-        save_mode: str = "full",
-    ) -> None:
-        interval = max(1, weight_sync_interval)
-        stale = self._buffer_max_staleness if self._buffer_max_staleness is not None else 0
-
-        start_rollout = self.maybe_load_checkpoint(load_dir, num_rollouts=num_rollouts)
-        # Single-threaded + one get_samples(oversample) per drive → replay to restore the
-        # exact stream position (deterministic resume).
-        for _ in range(start_rollout):
-            self.data_source.get_samples(self._oversample)
-        self._init_wandb(
-            num_rollouts=num_rollouts,
-            extra={
-                "adv_normalization_scope": self.adv_normalization_scope,
-                "buffer_max_staleness": stale,
-                "oversample_batch_size": self._oversample,
-                "train_fraction": self._train_fraction,
-                "tail_policy": self._tail_policy,
-                "weight_sync_interval": interval,
-            },
-        )
-
-        self._buffer = _GroupBuffer()
-        self._assembler = _GroupAssembler(self._n)
-        self._pending_carried: List[Sample] = []
-        self._gen_id = start_rollout
-
-        if start_rollout < num_rollouts and start_rollout and self.weight_sync is not None:
-            self.weight_sync.sync()  # push restored weights into the fresh engine
-        if start_rollout < num_rollouts:
-            self._submit_drive(carried=[], rollout_id=start_rollout)  # prime the first drive
-
-        try:
-            for rollout_id in range(start_rollout, num_rollouts):
-                t0 = time.perf_counter()
-                groups = self._next_batch(rollout_id)
-                training_progress = rollout_id / max(1, num_rollouts - 1)
-                result, mean_reward = self._train_on_groups(
-                    groups, training_progress=training_progress, rollout_id=rollout_id, t0=t0
-                )
-                self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
-
-                step = rollout_id + 1
-                need_save = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
-                need_sync = step % interval == 0 and self.weight_sync is not None
-                if need_save or need_sync:
-                    # ONE turn-boundary quiesce for both: checkpoint the in-flight tail so
-                    # the engine is decode-idle (safe to sync / save), then resume it.
-                    checkpointed = self.rollout.abort()[0]
-                    self._pump()  # grab trajectories that completed DURING the quiesce (before submit resets)
-                    carried = self._apply_tail_policy(checkpointed, rollout_id)
-                    if checkpointed:
-                        self._log_tail_metrics(step)
-                    if need_save:
-                        self.maybe_save_checkpoint(
-                            rollout_id,
-                            num_rollouts,
-                            save_interval=save_interval,
-                            save_dir=save_dir,
-                            save_mode=save_mode,
-                        )
-                    if need_sync:
-                        self.weight_sync.sync()
-                        self._weight_version += 1
-                    if step < num_rollouts:
-                        self._submit_drive(carried=carried, rollout_id=step)  # resume safe tails + fresh
-        finally:
-            active_error = sys.exc_info()[0] is not None
-            try:
-                checkpointed = self.rollout.abort()[0]  # stop the resident drive; leak no drives
-                self._pump()
-                self._apply_tail_policy(checkpointed, num_rollouts)
-                if checkpointed:
-                    self._log_tail_metrics(num_rollouts)
-            except BaseException:  # noqa: BLE001 — preserve an active training failure
-                if active_error:
-                    logger.warning("AsyncAgenticTrainer cleanup failed", exc_info=True)
-                else:
-                    raise
-            finally:
-                self._finish_wandb()
+        return result
