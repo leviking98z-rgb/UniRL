@@ -5,6 +5,14 @@ from unirl.models.wan.clip_vision_encode import (
     WANCLIPVisionEncodeStage,
 )
 from unirl.models.wan.conditions import WAN21Conditions, WANConditions
+from unirl.models.wan.diffusion import (
+    WAN21DiffusionStage,
+    WAN21DiffusionStep,
+    WAN22DiffusionStage,
+    WAN22DiffusionStep,
+    WANDiffusionStage,
+    WANDiffusionStep,
+)
 from unirl.models.wan.geometry import wan_latent_shape
 from unirl.models.wan.image_encode import (
     WAN21ImageLatentEncodeStage,
@@ -17,11 +25,17 @@ from unirl.models.wan.vae import WAN21VAEDecodeStage, WANVAEDecodeStage
 __all__ = [
     "WAN21CLIPVisionEncodeStage",
     "WAN21Conditions",
+    "WAN21DiffusionStage",
+    "WAN21DiffusionStep",
     "WAN21ImageLatentEncodeStage",
     "WAN21TextEmbedStage",
     "WAN21VAEDecodeStage",
     "WANCLIPVisionEncodeStage",
     "WANConditions",
+    "WAN22DiffusionStage",
+    "WAN22DiffusionStep",
+    "WANDiffusionStage",
+    "WANDiffusionStep",
     "WANImageLatentEncodeStage",
     "WANTextEmbedStage",
     "WANVAEDecodeStage",
