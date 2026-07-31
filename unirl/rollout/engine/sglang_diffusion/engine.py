@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.base import BaseSingleTurnRolloutEngine
@@ -51,6 +52,15 @@ _CPU_BACKUP_TAGS = ("vae", "text_encoder")
 class SGLangDiffusionRolloutEngine(BaseSingleTurnRolloutEngine):
     """Rollout engine backed by ``sglang.multimodal_gen.DiffGenerator`` (v2 layout)."""
 
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.DEDICATED_ROLLOUT,
+        Capability.SINGLE_TURN_GENERATION,
+        Capability.QUIESCE,
+        Capability.MULTI_GPU_COLOCATE,
+        Capability.TENSOR_WEIGHT_RECEIVER,
+        Capability.NCCL_WEIGHT_RECEIVER,
+        Capability.LORA_WEIGHT_RECEIVER,
+    )
     _component_name = "sglang_diffusion"
 
     def __init__(

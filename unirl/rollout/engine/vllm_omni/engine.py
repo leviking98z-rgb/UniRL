@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.base import BaseSingleTurnRolloutEngine
@@ -45,6 +46,15 @@ logger = logging.getLogger(__name__)
 class VLLMOmniRolloutEngine(BaseSingleTurnRolloutEngine):
     """Rollout engine backed by vllm-omni's ``Omni`` orchestrator (v2 layout)."""
 
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.DEDICATED_ROLLOUT,
+        Capability.SINGLE_TURN_GENERATION,
+        Capability.QUIESCE,
+        Capability.TENSOR_WEIGHT_RECEIVER,
+        Capability.NCCL_WEIGHT_RECEIVER,
+        Capability.IPC_WEIGHT_RECEIVER,
+        Capability.LORA_WEIGHT_RECEIVER,
+    )
     _component_name = "vllm_omni"
 
     def __init__(

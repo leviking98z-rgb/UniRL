@@ -20,6 +20,7 @@ from typing import Any
 import torch
 from omegaconf import DictConfig
 
+from unirl.config.execution import Capability, component_capabilities
 from unirl.config.require import require
 from unirl.utils.dtypes import parse_torch_dtype
 
@@ -53,28 +54,19 @@ def validate_precision_type(value: Any, *, field: str) -> str:
     return _CANONICAL_BY_DTYPE[dtype].value
 
 
-_SGLANG_ENGINE_TARGET_SUFFIX = "SGLangDiffusionRolloutEngine"
-_VLLM_OMNI_ENGINE_TARGET_SUFFIX = "VLLMOmniRolloutEngine"
-_TRAINSIDE_ENGINE_TARGET_SUFFIX = "TrainsideRolloutEngine"
-_DIRECT_SAMPLING_ENGINE_SUFFIXES: tuple = (_TRAINSIDE_ENGINE_TARGET_SUFFIX,)
-# Sync handlers that only one engine implements. Listed here so the validator
-# can fail fast on a mismatched pairing. UpdateWeightFromTensor /
-# UpdateWeightFromDistributed work on BOTH sglang and vllm-omni — they're
-# transport-shape contracts, not engine-specific (vllm-omni's receivers live
-# in unirl.rollout.engine.vllm_omni.worker.{ipc,nccl}_receive_mixin).
-_IPC_SYNC_SUFFIXES = frozenset({"UpdateWeightFromIPC"})  # vllm-omni only
+def _engine_config(cfg: DictConfig) -> Any:
+    rollout = cfg.rollout
+    return rollout.get("engine", rollout)
 
 
 def is_direct_sampling(cfg: DictConfig) -> bool:
-    """Training-actor-sampling mode is derived from the selected engine.
+    """Whether the selected engine declares direct, in-process sampling.
 
-    ``rollout/engine: trainside`` → ``TrainsideRolloutEngine`` (the
-    in-process Pipeline adapter; see ``unirl/rollout/engine/trainside``)
-    is the only direct-sampling engine. All other engines (sglang, vllm-omni)
-    run dedicated rollout actors.
+    The decision follows the engine class's typed capability declaration, so a
+    class rename or a new direct engine cannot silently change execution mode.
     """
-    target = str(cfg.rollout.engine.get("_target_") or "")
-    return target.endswith(_DIRECT_SAMPLING_ENGINE_SUFFIXES)
+    _, capabilities = component_capabilities(_engine_config(cfg), label="rollout.engine")
+    return capabilities.supports(Capability.DIRECT_ROLLOUT)
 
 
 def validate_dynamic_dotpaths(cfg: DictConfig) -> None:
@@ -114,7 +106,7 @@ def validate_training_batch_geometry(cfg: DictConfig) -> None:
 
 
 def validate_weight_sync_contract(cfg: DictConfig) -> None:
-    """Weight-sync section presence + variant must match rollout engine."""
+    """Weight-sync presence, receiver and placement must match the engine."""
     has_sync = cfg.get("sync") is not None
     is_direct = is_direct_sampling(cfg)
     require(
@@ -123,28 +115,31 @@ def validate_weight_sync_contract(cfg: DictConfig) -> None:
     )
     require(
         is_direct or has_sync,
-        "dedicated-rollout mode (rollout/engine=sglang or vllm_omni) requires a sync variant; got no sync section",
+        "dedicated-rollout mode requires a sync variant; got no sync section",
     )
     if has_sync:
-        sync_target = str(cfg.sync.get("_target_") or "")
-        sync_name = sync_target.rsplit(".", 1)[-1]
-        if sync_name in _IPC_SYNC_SUFFIXES:
-            engine_target = str(cfg.rollout.engine.get("_target_") or "")
-            require(
-                engine_target.endswith(_VLLM_OMNI_ENGINE_TARGET_SUFFIX),
-                f"sync={sync_name} (bucketed CUDA-IPC) is only implemented by the "
-                f"vllm-omni rollout engines; got rollout.engine._target_={engine_target!r}",
-            )
+        engine_target, engine_caps = component_capabilities(_engine_config(cfg), label="rollout.engine")
+        sync_target, sync_caps = component_capabilities(cfg.sync, label="sync")
+        missing = sync_caps.requires - engine_caps.provides
+        require(
+            not missing,
+            f"sync {sync_target!r} requires engine capabilities "
+            f"{sorted(capability.value for capability in missing)}; "
+            f"rollout engine {engine_target!r} does not provide them.",
+        )
 
 
 def validate_rollout_layout(cfg: DictConfig) -> None:
-    """Multi-GPU colocated rollout requires the sglang engine."""
+    """Multi-GPU colocated rollout requires an engine that declares support."""
     num_gpus_per_actor = int(cfg.placement.num_rollout_gpus_per_actor)
     if bool(cfg.placement.colocate) and num_gpus_per_actor > 1:
-        engine_target = str(cfg.rollout.engine.get("_target_") or "")
+        engine_target, capabilities = component_capabilities(_engine_config(cfg), label="rollout.engine")
         require(
-            engine_target.endswith(_SGLANG_ENGINE_TARGET_SUFFIX),
-            f"multi-GPU colocated rollout (num_rollout_gpus_per_actor={num_gpus_per_actor}, colocate=True) requires the sglang_diffusion engine; got rollout.engine._target_={engine_target!r}",
+            capabilities.supports(Capability.MULTI_GPU_COLOCATE),
+            f"multi-GPU colocated rollout "
+            f"(num_rollout_gpus_per_actor={num_gpus_per_actor}, colocate=True) "
+            f"requires capability={Capability.MULTI_GPU_COLOCATE.value}; "
+            f"got rollout.engine._target_={engine_target!r}",
         )
 
 

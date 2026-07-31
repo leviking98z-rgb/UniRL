@@ -22,12 +22,18 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.weight_sync.full.base import FullWeightSync
 
 
 class TensorWeightSync(FullWeightSync):
     """Colocate full-weight sync via serialized tensor payloads."""
+
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.COLOCATED_WEIGHT_SYNC,
+        requires=(Capability.TENSOR_WEIGHT_RECEIVER,),
+    )
 
     def __init__(
         self,

@@ -27,6 +27,7 @@ import shutil
 import time
 from typing import Any, Dict, Optional
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.weight_sync.full.base import FullWeightSync
 
@@ -55,6 +56,11 @@ def _shared_run_id(explicit: Optional[str]) -> str:
 
 class CheckpointWeightSync(FullWeightSync):
     """Colocate full-weight sync via a torch.save checkpoint file."""
+
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.COLOCATED_WEIGHT_SYNC,
+        requires=(Capability.CHECKPOINT_WEIGHT_RECEIVER,),
+    )
 
     def __init__(
         self,

@@ -48,6 +48,7 @@ from typing import Any, List, Optional, Tuple
 
 import torch
 
+from unirl.config.execution import LoopKind, PlacementMode
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.async_runtime import (
     AsyncRolloutScheduler,
@@ -64,6 +65,9 @@ logger = logging.getLogger(__name__)
 
 class AsyncDiffusionTrainer(DiffusionTrainer):
     """Disaggregated async diffusion trainer (two slabs, resident engine, cross-slab sync)."""
+
+    LOOP_KIND: LoopKind = LoopKind.ASYNC_BATCH_RL
+    PLACEMENT_OVERRIDE: PlacementMode = PlacementMode.SEPARATE
 
     def __init__(
         self,

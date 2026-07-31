@@ -32,6 +32,7 @@ import torch
 from omegaconf import OmegaConf
 
 from unirl.algorithms.normalizers import build_group_index_map
+from unirl.config.execution import LoopKind
 from unirl.distributed.tensor import hydrate
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
@@ -118,6 +119,8 @@ def _validate_agentic_cfg(kw: dict) -> None:
 
 class AgenticTrainer(ARTrainer):
     """Agentic (multi-turn tool-use) RL trainer over the ``AgenticRolloutEngine``."""
+
+    LOOP_KIND: LoopKind = LoopKind.AGENTIC_RL
 
     def __init__(self, *, stop: Optional[List[str]] = None, **kwargs) -> None:
         _validate_agentic_cfg(kwargs)

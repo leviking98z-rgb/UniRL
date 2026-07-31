@@ -1,6 +1,8 @@
 """Config surface.
 
 Public entry points:
+  - ``ExecutionPlan`` and capability/placement enums (``execution``): the
+    driver-side typed component graph validated before actor creation.
   - ``PrecisionName`` / ``validate_precision_type`` + the ``validate_*``
     cross-component checkers (``validation``): shared helpers used by config
     dataclasses' ``__post_init__`` and driver-side validation.
@@ -10,6 +12,17 @@ Public entry points:
 
 from __future__ import annotations
 
+from unirl.config.execution import (
+    Capability,
+    CapabilityGraph,
+    ComponentCapabilities,
+    EngineSelection,
+    ExecutionPlan,
+    LoopKind,
+    PlacementMode,
+    RolePlacement,
+    SyncSelection,
+)
 from unirl.config.require import require
 from unirl.config.validation import (
     PrecisionName,
@@ -24,7 +37,16 @@ from unirl.config.validation import (
 )
 
 __all__ = [
+    "Capability",
+    "CapabilityGraph",
+    "ComponentCapabilities",
+    "EngineSelection",
+    "ExecutionPlan",
+    "LoopKind",
+    "PlacementMode",
     "PrecisionName",
+    "RolePlacement",
+    "SyncSelection",
     "is_direct_sampling",
     "require",
     "validate_dynamic_dotpaths",

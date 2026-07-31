@@ -28,12 +28,18 @@ import asyncio
 import threading
 from typing import Any, Dict, Optional
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.weight_sync.full.base import FullWeightSync
 
 
 class IPCWeightSync(FullWeightSync):
     """Colocate full-weight sync via bucketed CUDA-IPC over ZMQ."""
+
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.COLOCATED_WEIGHT_SYNC,
+        requires=(Capability.IPC_WEIGHT_RECEIVER,),
+    )
 
     def __init__(
         self,

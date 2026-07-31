@@ -52,6 +52,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import ray
 import torch
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.rollout.engine.agentic.config import AgenticRolloutEngineConfig
@@ -65,6 +66,16 @@ logger = logging.getLogger(__name__)
 class AgenticRolloutEngine(BaseRolloutEngine):
     """Multi-turn rollout engine: rank-0 coordinator over per-worker pull-drain loops."""
 
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.DEDICATED_ROLLOUT,
+        Capability.MULTI_TURN_GENERATION,
+        Capability.QUIESCE,
+        Capability.PARTIAL_ROLLOUT,
+        Capability.TENSOR_WEIGHT_RECEIVER,
+        Capability.NCCL_WEIGHT_RECEIVER,
+        Capability.IPC_WEIGHT_RECEIVER,
+        Capability.LORA_WEIGHT_RECEIVER,
+    )
     _component_name = "agentic"
 
     # ------------------------------------------------------------------

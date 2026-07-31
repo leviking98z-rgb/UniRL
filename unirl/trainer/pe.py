@@ -21,7 +21,6 @@ multi-epoch replay, checkpoint / eval cadence, structured logging.
 from __future__ import annotations
 
 import dataclasses
-import inspect
 import json
 import logging
 import os
@@ -180,7 +179,7 @@ class PETrainer(BaseTrainer):
             # (``composed_pe``: sglang + sglang_diffusion) there is no shared
             # pipeline — trained weights reach the engine via the sync bridges.
             rollout_parsed = parse_hydra_cfg(rollout_cfg)
-            takes_pipeline = "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters
+            takes_pipeline = self.execution_plan.engine("rollout").is_direct
             # Trainside samples the live FSDP modules → must not FSDP-offload.
             self._rollout_is_trainside = bool(takes_pipeline)
             if takes_pipeline:
