@@ -48,10 +48,14 @@ A model package bridges three concerns through one shared bundle:
   `sample.conditioning()`, reads sampling params from a pre-forked generation
   Part, builds typed `Conditions`, runs the stage, and fills that Part. Every
   concrete pipeline owns or inherits a package-local `MODEL_PLUGIN`.
-- **Stages** (`diffusion.py` / `ar.py`) — the trainable units. `DiffusionStage`
-  exposes `diffuse` (rollout), `replay` (train), and `predict_noise_at_step` (DiffusionNFT);
-  `ARStage` exposes `autoregress` and `replay`. Each exposes `trainable_module()`,
-  returning the `nn.Module` the FSDP backend wraps and engines eval-scope.
+- **Stages** (`diffusion.py` / `ar.py`) — the trainable units. Ordinary image and
+  video stages inherit `DiffusionRunner`, which provides `diffuse` (rollout),
+  `replay` (train), trajectory/precision handling, and
+  `predict_noise_at_step` (DiffusionNFT); packages supply latent geometry and
+  narrow model hooks. BAGEL and LTX2 remain explicit transition-kernel
+  exceptions. `ARStage` exposes `autoregress` and `replay`. Each stage exposes
+  `trainable_module()`, returning the `nn.Module` the FSDP backend wraps and
+  engines eval-scope.
 - **Conditions** (`conditions.py`) — typed `Batch` subclasses with
   `from_dict`/`to_dict`, so the pipeline works in typed form internally but stores
   the generic `Dict[str, Condition]` shape on the generated Part.

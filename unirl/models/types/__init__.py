@@ -25,6 +25,7 @@ from unirl.models.types.ar import ARSamplingParams, ARStage, ARStep
 from unirl.models.types.bundle import Bundle
 from unirl.models.types.codec import DecodeStage, EncodeStage
 from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
+from unirl.models.types.diffusion_runner import DiffusionLatentSpec, DiffusionRunner, VideoDiffusionRunner
 from unirl.models.types.embedding import EmbedStage, ImageConditionedEmbedStage
 from unirl.models.types.pipeline import Pipeline
 from unirl.models.types.plugin import (
@@ -44,6 +45,9 @@ __all__ = [
     "DecodeStage",
     "DiffusionStage",
     "DiffusionStep",
+    "DiffusionLatentSpec",
+    "DiffusionRunner",
+    "VideoDiffusionRunner",
     "EmbedStage",
     "EncodeStage",
     "ImageConditionedEmbedStage",
