@@ -30,17 +30,18 @@ Math derived from ``models/wan22.py::forward_denoiser`` and
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple
+from functools import partial
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import torch
 
 from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
+from unirl.models.types.diffusion_runner import SingleStreamDiffusionRunner
 from unirl.models.types.replay_result import ReplayResult
 from unirl.models.wan.conditions import WANConditions
 from unirl.models.wan.geometry import wan_latent_shape
 from unirl.sde.kernels import StepStrategy
-from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
+from unirl.types.sampling import DiffusionSamplingParams
 from unirl.types.segments.latent import LatentSegment, make_video_segment
 from unirl.utils.dtypes import parse_torch_dtype
 
@@ -341,6 +342,13 @@ class WAN22DiffusionStage(DiffusionStage[WANConditions]):
         self.vae_scale_factor = self._SPATIAL_DOWNSAMPLE
         self.temporal_scale_factor = self._TEMPORAL_DOWNSAMPLE
         self.latent_channels = int(getattr(getattr(model.vae, "config", None), "z_dim", self._DEFAULT_LATENT_CHANNELS))
+        self.runner = SingleStreamDiffusionRunner(
+            strategy=strategy,
+            autocast_dtype=self.autocast_dtype,
+            trajectory_dtype=self.trajectory_dtype,
+            logprob_dtype=self.logprob_dtype,
+            owner=type(self).__name__,
+        )
 
     # ------------------------------------------------------------------
     # Shape helpers
@@ -374,67 +382,16 @@ class WAN22DiffusionStage(DiffusionStage[WANConditions]):
         ``Sample``'s diffusion generation Part; see
         :class:`SD3DiffusionStage.diffuse` for the contract.
         """
-        from unirl.sde.noise import generate_latents
-
         if conditions.text is None or conditions.text.embeds is None:
             raise ValueError("WAN22DiffusionStage.diffuse: conditions.text.embeds is None")
         prompt_embeds = conditions.text.embeds
         device = prompt_embeds.device
         batch_size = int(prompt_embeds.shape[0])
-        T = int(params.num_inference_steps)
-        if int(schedule.shape[0]) != T + 1:
-            raise ValueError(f"WAN22DiffusionStage.diffuse: schedule length {schedule.shape[0]} != T+1={T + 1}")
-        schedule = schedule.to(device)
-        self.strategy.init_schedule(schedule)
-
         latent_shape = self._latent_shape(
             num_frames=int(params.num_frames),
             height=int(params.height),
             width=int(params.width),
         )
-        if initial_latents is not None:
-            if int(initial_latents.shape[0]) != batch_size:
-                raise ValueError(
-                    f"WAN22DiffusionStage.diffuse: initial_latents.shape[0]="
-                    f"{int(initial_latents.shape[0])} != batch_size={batch_size}."
-                )
-            if tuple(initial_latents.shape[1:]) != tuple(latent_shape):
-                raise ValueError(
-                    f"WAN22DiffusionStage.diffuse: initial_latents.shape[1:]="
-                    f"{tuple(initial_latents.shape[1:])} != expected {tuple(latent_shape)} "
-                    f"for num_frames={int(params.num_frames)}, "
-                    f"height={int(params.height)}, width={int(params.width)}."
-                )
-            latents = initial_latents.to(device=device, dtype=self.trajectory_dtype)
-        else:
-            latents = generate_latents(
-                batch_size=batch_size,
-                latent_shape=latent_shape,
-                device=device,
-                dtype=self.trajectory_dtype,
-                init_same_noise=bool(params.init_same_noise),
-                samples_per_prompt=int(params.samples_per_prompt),
-                noise_group_ids=params.noise_group_ids,
-                base_seed=int(params.seed),
-            )
-
-        sde_set: Set[int] = set(int(i) for i in (params.sde_indices or []))
-        sde_sorted: List[int] = sorted(sde_set)
-
-        needed: Set[int] = set(compute_trajectory_positions(sde_set, T))
-        needed.add(T)
-
-        stored_pairs: List[Tuple[int, torch.Tensor]] = []
-        if 0 in needed:
-            stored_pairs.append((0, latents.detach().clone()))
-        sde_logp_list: List[torch.Tensor] = []
-
-        autocast_ctx = (
-            torch.autocast("cuda", self.autocast_dtype)
-            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
-            else nullcontext()
-        )
-        sigma_max = float(schedule[1].item()) if int(schedule.shape[0]) > 1 else 0.99
 
         # Per-stage CFG scale: prefer the request-time value if provided,
         # else fall back to the bundle-time default (which itself defaults
@@ -442,50 +399,26 @@ class WAN22DiffusionStage(DiffusionStage[WANConditions]):
         guidance_scale_2 = (
             params.guidance_scale_2 if params.guidance_scale_2 is not None else self.model.guidance_scale_2
         )
-
-        for i in range(T):
-            sigma = schedule[i].to(device)
-            sigma_next = schedule[i + 1].to(device)
-            step_eta = float(params.eta) if i in sde_set else 0.0
-
-            with torch.no_grad(), autocast_ctx:
-                new_latents, log_prob, _ = self.step.step_with_logp(
-                    self.model,
-                    conditions,
-                    strategy=self.strategy,
-                    sample=latents,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    guidance_scale=float(params.guidance_scale),
-                    guidance_scale_2=guidance_scale_2,
-                    eta=step_eta,
-                    sigma_max=sigma_max,
-                    step_index=i,
-                )
-            latents = new_latents.to(dtype=self.trajectory_dtype)
-
-            if (i + 1) in needed:
-                stored_pairs.append((i + 1, latents.detach().clone()))
-
-            if log_prob is not None:
-                sde_logp_list.append(log_prob.to(dtype=self.logprob_dtype))
-
-        positions_collected = [p for p, _ in stored_pairs]
-        latents_stacked = torch.stack([t for _, t in stored_pairs], dim=1)
-
-        sde_logp = torch.stack(sde_logp_list, dim=1) if sde_logp_list else None
-        sde_indices_tensor = torch.tensor(sde_sorted, dtype=torch.long, device=device) if sde_sorted else None
-
-        indices_tensor = torch.tensor(positions_collected, dtype=torch.long, device=device)
-
-        # Stamp ``modality=VIDEO`` via the factory helper — same reasoning
-        # as in WAN 2.1 (see ``models/wan21/diffusion.py``).
-        return make_video_segment(
-            latents=latents_stacked,
-            sigmas=schedule,
-            indices=indices_tensor,
-            sde_logp=sde_logp,
-            sde_indices=sde_indices_tensor,
+        transition = partial(
+            self.step.step_with_logp,
+            self.model,
+            conditions,
+            strategy=self.strategy,
+            guidance_scale=float(params.guidance_scale),
+            guidance_scale_2=guidance_scale_2,
+        )
+        return self.runner.sample(
+            schedule=schedule,
+            params=params,
+            batch_size=batch_size,
+            latent_shape=latent_shape,
+            device=device,
+            initial_latents=initial_latents,
+            transition=transition,
+            segment_factory=make_video_segment,
+            shape_description=(
+                f"for num_frames={int(params.num_frames)}, height={int(params.height)}, width={int(params.width)}"
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -501,71 +434,23 @@ class WAN22DiffusionStage(DiffusionStage[WANConditions]):
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Segment-based log-prob replay. Routes by sigma exactly as rollout."""
-        if segment.sde_indices is None or segment.latents is None:
-            raise ValueError("WAN22DiffusionStage.replay: segment.sde_indices / latents missing")
-        if segment.sigmas is None:
-            raise ValueError("WAN22DiffusionStage.replay: segment.sigmas missing")
-
-        sde_set = set(int(i) for i in segment.sde_indices.tolist())
-        target = (
-            [int(i) for i in step_indices]
-            if step_indices is not None
-            else [int(i) for i in segment.sde_indices.tolist()]
-        )
-        bad = [i for i in target if i not in sde_set]
-        if bad:
-            raise ValueError(
-                f"WAN22DiffusionStage.replay: step_indices {bad} not in segment.sde_indices={sorted(sde_set)}"
-            )
-
-        device = segment.latents.device
-        sigmas = segment.sigmas.to(device)
-        sigma_max = float(sigmas[1].item()) if int(sigmas.shape[0]) > 1 else 0.99
-
-        autocast_ctx = (
-            torch.autocast("cuda", self.autocast_dtype)
-            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
-            else nullcontext()
-        )
         guidance_scale_2 = (
             params.guidance_scale_2 if params.guidance_scale_2 is not None else self.model.guidance_scale_2
         )
-
-        log_probs: List[torch.Tensor] = []
-        prev_sample_means: List[torch.Tensor] = []
-        with autocast_ctx:
-            for step_idx in target:
-                sigma = sigmas[step_idx].to(dtype=torch.float32)
-                sigma_next = sigmas[step_idx + 1].to(dtype=torch.float32)
-                sample = segment.latents_at(step_idx)
-                prev_sample = segment.latents_at(step_idx + 1)
-                _, log_prob, prev_mean = self.step.step_with_logp(
-                    self.model,
-                    conditions,
-                    strategy=self.strategy,
-                    sample=sample,
-                    prev_sample=prev_sample,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    guidance_scale=float(params.guidance_scale),
-                    guidance_scale_2=guidance_scale_2,
-                    eta=float(params.eta),
-                    sigma_max=sigma_max,
-                    step_index=step_idx,
-                )
-                if log_prob is None:
-                    raise RuntimeError(
-                        f"WAN22DiffusionStage.replay: strategy returned None log-prob "
-                        f"at step_index={step_idx} (deterministic mode); replay "
-                        f"requires a stochastic SDE strategy."
-                    )
-                log_probs.append(log_prob)
-                if prev_mean is not None:
-                    prev_sample_means.append(prev_mean)
-
-        log_probs_t = torch.stack(log_probs, dim=1).to(dtype=self.logprob_dtype)
-        means_t = torch.stack(prev_sample_means, dim=1).to(dtype=self.trajectory_dtype) if prev_sample_means else None
-        return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
+        transition = partial(
+            self.step.step_with_logp,
+            self.model,
+            conditions,
+            strategy=self.strategy,
+            guidance_scale=float(params.guidance_scale),
+            guidance_scale_2=guidance_scale_2,
+        )
+        return self.runner.replay(
+            segment=segment,
+            params=params,
+            transition=transition,
+            step_indices=step_indices,
+        )
 
     # ------------------------------------------------------------------
     # Single-step noise prediction (forward-process algorithms: DiffusionNFT et al.)
