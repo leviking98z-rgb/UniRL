@@ -12,6 +12,7 @@ from omegaconf import DictConfig
 from unirl.algorithms.advantage import AdvantageEstimator
 from unirl.config.execution import ExecutionPlan, LoopKind, PlacementMode
 from unirl.distributed.group.device_pool import DevicePool
+from unirl.models.types.plugin import ModelPluginPlan
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import ARSamplingParams, BaseSamplingParams, total_samples_per_prompt
@@ -171,6 +172,11 @@ class BaseTrainer:
         cfg: DictConfig,
         logging_cfg: Optional[DictConfig] = None,
     ) -> None:
+        # Validate bundle/pipeline/config/stage/conditions coherence before
+        # DevicePool creates workers or claims accelerators. Model packages own
+        # this metadata through package-local manifests; there is no registry.
+        self.model_plan = ModelPluginPlan.from_config(cfg)
+
         # Resolve and validate the recipe's component graph before creating Ray
         # actors or claiming GPUs. Subclasses select only the outer-loop and
         # fixed-placement policy; engine/sync capabilities live on components.

@@ -27,6 +27,13 @@ from unirl.models.types.codec import DecodeStage, EncodeStage
 from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
 from unirl.models.types.embedding import EmbedStage, ImageConditionedEmbedStage
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import (
+    ModelPluginPlan,
+    ModelPluginSelection,
+    ModelPluginSpec,
+    ModelStageKind,
+    ModelStageSpec,
+)
 from unirl.models.types.replay_result import ReplayResult
 
 __all__ = [
@@ -40,6 +47,11 @@ __all__ = [
     "EmbedStage",
     "EncodeStage",
     "ImageConditionedEmbedStage",
+    "ModelPluginPlan",
+    "ModelPluginSelection",
+    "ModelPluginSpec",
+    "ModelStageKind",
+    "ModelStageSpec",
     "Pipeline",
     "ReplayResult",
 ]

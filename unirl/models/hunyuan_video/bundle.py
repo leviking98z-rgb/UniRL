@@ -43,6 +43,8 @@ class HunyuanVideoBundle(Bundle):
     """HunyuanVideo-1.0 bundle: transformer + 3D VAE + dual text encoders +
     scheduler."""
 
+    MODEL_FAMILY: str = "hunyuan_video"
+
     def __init__(
         self,
         *,

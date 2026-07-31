@@ -40,6 +40,7 @@ import dataclasses as _dc
 from typing import Any, Optional, Tuple
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import DanceSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Images, Texts
@@ -74,6 +75,13 @@ class Flux2KleinPipeline(Pipeline):
     deferred; the canonical Klein recipe runs at ``guidance_scale=1.0`` with no
     negative branch, so CFG synthesizes an empty negative only when guidance > 1.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="flux2_klein",
+        bundle_targets=("unirl.models.flux2_klein.bundle.Flux2KleinBundle.from_config",),
+        config_types=("unirl.models.flux2_klein.config.Flux2KleinPipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.flux2_klein.conditions.Flux2KleinConditions"),),
+    )
 
     def __init__(
         self,

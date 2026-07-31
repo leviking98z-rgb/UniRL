@@ -143,6 +143,8 @@ def _stamp_zero_checkpoint_absent_params(transformer: nn.Module, weights_dir: st
 class Flux2KleinBundle(Bundle):
     """FLUX.2-klein-9B bundle: transformer + VAE + Qwen3 text encoder + scheduler."""
 
+    MODEL_FAMILY: str = "flux2_klein"
+
     def __init__(
         self,
         *,

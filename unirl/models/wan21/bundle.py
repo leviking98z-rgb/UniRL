@@ -39,6 +39,8 @@ class WAN21Bundle(Bundle):
     (+ optional CLIP vision tower for I2V).
     """
 
+    MODEL_FAMILY: str = "wan21"
+
     def __init__(
         self,
         *,

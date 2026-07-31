@@ -42,6 +42,8 @@ from .config import ZImagePipelineConfig
 class ZImageBundle(Bundle):
     """Z-Image bundle: S3-DiT transformer + AutoencoderKL + Qwen3 text encoder + scheduler."""
 
+    MODEL_FAMILY: str = "z_image"
+
     def __init__(
         self,
         *,

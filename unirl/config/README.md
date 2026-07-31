@@ -36,6 +36,9 @@ where invariants get enforced instead:
   `CapabilityGraph`, normalizes single- and multi-track engine/sync selections,
   computes role placement, and validates engine ↔ sync, loop, layout and offload
   compatibility before any GPU actor is created.
+- `ModelPluginPlan.from_config` resolves package-local model manifests and
+  validates bundle ↔ pipeline ↔ config ↔ backend ↔ algorithm ↔ rollout stage
+  compatibility without importing heavyweight bundle modules.
 
 ## How it works
 
@@ -57,10 +60,10 @@ Validation runs in three layers:
 - **Per-dataclass `__post_init__`** — local field invariants via `require(...)`
   and `validate_precision_type(...)` (at actor-build time).
 - **Typed execution planning** — `BaseTrainer.__init__` creates
-  `self.execution_plan` before `DevicePool`. Trainer subclasses declare only
-  their `LOOP_KIND` and an optional fixed `PLACEMENT_OVERRIDE`; component
-  compatibility comes from the graph, not constructor reflection or `_target_`
-  string matching.
+  `self.model_plan` and `self.execution_plan` before `DevicePool`. The model plan
+  uses package-local `ModelPluginSpec` declarations; the execution plan uses the
+  capability graph. Trainer subclasses declare only their `LOOP_KIND` and an
+  optional fixed `PLACEMENT_OVERRIDE`.
 - **Cross-component validators** (`validate_weight_sync_contract`,
   `validate_rollout_layout`, `validate_offload_contract`, …) remain available to
   older config assembly paths and consult the same class-owned capabilities.
@@ -75,8 +78,8 @@ table.
 
 ## Gotchas
 
-- `ExecutionPlan` resolves only top-level component classes. It does not
-  instantiate nested model/runtime configs; those still materialize on workers.
+- Driver-side plans validate composition but do not instantiate nested model or
+  runtime configs; those still materialize on workers.
 - Multi-track composition accepts either `rollout` or `ar_rollout` +
   `dit_rollout`, and either one shared `sync` or track-keyed `sync.ar` /
   `sync.diffusion`. A dedicated engine must have a compatible sync path.

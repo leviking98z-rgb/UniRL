@@ -51,6 +51,8 @@ BAGEL_FSDP_BLOCK_CLASS = "Qwen2MoTDecoderLayer"
 class BagelBundle(Bundle):
     """BAGEL-7B-MoT bundle: MoT transformer + FLUX VAE + tokenizer + inferencer."""
 
+    MODEL_FAMILY: str = "bagel"
+
     def __init__(
         self,
         *,

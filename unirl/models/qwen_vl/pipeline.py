@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from unirl.models.types.ar import ARSamplingParams
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample, Turn
 
@@ -30,6 +31,13 @@ class QwenVLPipeline(Pipeline):
     teacher-forces over those *stored* ids (re-typed via ``conditions_cls.from_dict``),
     so the encode here is the single source of truth for the importance ratio.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="qwen_vl",
+        bundle_targets=("unirl.models.qwen_vl.bundle.QwenVLBundle.from_config",),
+        config_types=("unirl.models.qwen_vl.config.QwenVLPipelineConfig",),
+        stages=(ModelStageSpec.ar("unirl.models.qwen_vl.conditions.QwenVLARConditions"),),
+    )
 
     def __init__(
         self,

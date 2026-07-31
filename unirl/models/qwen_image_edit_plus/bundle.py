@@ -28,5 +28,7 @@ class QwenImageEditPlusBundle(QwenImageBundle):
     classmethod already constructs ``cls`` (the subclass) instances.
     """
 
+    MODEL_FAMILY: str = "qwen_image_edit_plus"
+
 
 __all__ = ["QwenImageEditPlusBundle"]

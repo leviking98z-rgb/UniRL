@@ -27,6 +27,7 @@ import dataclasses
 from typing import Any, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import DanceSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Images, Texts
@@ -57,6 +58,13 @@ class WAN21Pipeline(Pipeline):
     ``Part.conditions`` carries the encoded conditions for trainer-side replay (the train stack re-types them via ``conditions_cls.from_dict``). User-supplied text negatives are
     deferred; CFG uses a synthesized empty negative.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="wan21",
+        bundle_targets=("unirl.models.wan21.bundle.WAN21Bundle.from_config",),
+        config_types=("unirl.models.wan21.config.WAN21PipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.wan21.conditions.WAN21Conditions"),),
+    )
 
     def __init__(
         self,

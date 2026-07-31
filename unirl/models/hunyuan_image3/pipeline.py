@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import CPSSDEStrategy, StepStrategy
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
@@ -75,6 +76,19 @@ class HunyuanImage3Pipeline(Pipeline):
     - the diffusion gen Part's ``segment: LatentSegment`` + ``primitive: Images``
       (diffusion modes).
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="hunyuan_image3",
+        bundle_targets=(
+            "unirl.models.hunyuan_image3.bundle.HunyuanImage3Bundle.from_config",
+            "unirl.models.hunyuan_image3.bundle.HunyuanImage3Bundle.from_meta_config",
+        ),
+        config_types=("unirl.models.hunyuan_image3.config.HunyuanImage3PipelineConfig",),
+        stages=(
+            ModelStageSpec.ar("unirl.models.hunyuan_image3.conditions.HunyuanImage3ARConditions"),
+            ModelStageSpec.diffusion("unirl.models.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions"),
+        ),
+    )
 
     def __init__(
         self,

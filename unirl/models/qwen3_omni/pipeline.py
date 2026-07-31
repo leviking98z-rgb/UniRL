@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample, Turn
 from unirl.types.sampling import ARSamplingParams
@@ -24,6 +25,13 @@ class Qwen3OmniPipeline(Pipeline):
     ancestor chain. The generated text, behavior log-probs, and exact processor
     conditions are written back to that frontier for per-turn replay.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="qwen3_omni",
+        bundle_targets=("unirl.models.qwen3_omni.bundle.Qwen3OmniBundle.from_config",),
+        config_types=("unirl.models.qwen3_omni.config.Qwen3OmniPipelineConfig",),
+        stages=(ModelStageSpec.ar("unirl.models.qwen3_omni.conditions.Qwen3OmniARConditions"),),
+    )
 
     def __init__(
         self,

@@ -79,6 +79,8 @@ class WanDualTransformer(nn.Module):
 class WAN22Bundle(Bundle):
     """WAN 2.2 T2V bundle: dual transformer + VAE + UMT5 text encoder."""
 
+    MODEL_FAMILY: str = "wan22"
+
     def __init__(
         self,
         *,

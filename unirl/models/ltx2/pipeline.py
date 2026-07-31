@@ -15,6 +15,7 @@ from typing import Any, Optional, Tuple
 import torch
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import StepStrategy
 from unirl.sde.runtime import get_sigma_schedule
 from unirl.types.noise_recipe import NoiseRecipe
@@ -45,6 +46,13 @@ _LTX2_LATENT_CHANNELS = LTX2_LATENT_CHANNELS
 
 class LTX2Pipeline(Pipeline):
     """LTX-2/2.3 T2V / I2V / T2AV pipeline."""
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="ltx2",
+        bundle_targets=("unirl.models.ltx2.bundle.LTX2Bundle.from_config",),
+        config_types=("unirl.models.ltx2.config.LTX2PipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.ltx2.conditions.LTX2Conditions"),),
+    )
 
     def __init__(
         self,

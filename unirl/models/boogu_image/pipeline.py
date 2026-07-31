@@ -47,6 +47,7 @@ import dataclasses
 from typing import Any, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Texts
@@ -77,6 +78,13 @@ class BooguImagePipeline(Pipeline):
     User-supplied negatives are deferred; CFG (``guidance_scale > 1.0``) uses a
     synthesized empty negative routed to the DROP system prompt.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="boogu_image",
+        bundle_targets=("unirl.models.boogu_image.bundle.BooguImageBundle.from_config",),
+        config_types=("unirl.models.boogu_image.config.BooguImagePipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.boogu_image.conditions.BooguImageConditions"),),
+    )
 
     def __init__(
         self,

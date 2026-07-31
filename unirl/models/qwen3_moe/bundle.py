@@ -34,6 +34,8 @@ from unirl.utils.dtypes import canonical_torch_dtype_name, parse_torch_dtype
 class Qwen3MoeBundle(Bundle):
     """VeOmni Qwen3-MoE transformer + tokenizer (meta-init, EP-capable)."""
 
+    MODEL_FAMILY: str = "qwen3"
+
     def __init__(
         self,
         *,

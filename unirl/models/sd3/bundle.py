@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 class SD3Bundle(Bundle):
     """SD3-family bundle: transformer + VAE + 3 text encoders + scheduler."""
 
+    MODEL_FAMILY: str = "sd3"
+
     def __init__(
         self,
         *,

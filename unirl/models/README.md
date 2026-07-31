@@ -41,11 +41,13 @@ A model package bridges three concerns through one shared bundle:
 - **Bundle** (`bundle.py`) — a pure container of weights + tokenizer/scheduler,
   loaded by `from_config`. No lifecycle logic. The biggest models (HunyuanImage3,
   Bagel) add a `from_meta_config` + `materialize()` path so each rank loads only its
-  shard of the large transformer; SD3 / Qwen3 load eagerly.
+  shard of the large transformer; SD3 / Qwen3 load eagerly. Every concrete bundle
+  declares a typed class attribute such as `MODEL_FAMILY: str = "sd3"`.
 - **Pipeline** (`pipeline.py`) — the endomorphic generate entrypoint
   (`generate(sample) -> sample`): it reads ancestor primitives through
   `sample.conditioning()`, reads sampling params from a pre-forked generation
-  Part, builds typed `Conditions`, runs the stage, and fills that Part.
+  Part, builds typed `Conditions`, runs the stage, and fills that Part. Every
+  concrete pipeline owns or inherits a package-local `MODEL_PLUGIN`.
 - **Stages** (`diffusion.py` / `ar.py`) — the trainable units. `DiffusionStage`
   exposes `diffuse` (rollout), `replay` (train), and `predict_noise_at_step` (DiffusionNFT);
   `ARStage` exposes `autoregress` and `replay`. Each exposes `trainable_module()`,
@@ -63,6 +65,27 @@ and raises if it's `None` — it doesn't compute σ at generate time. Diffusion
 pipelines also implement `latent_shape()` so the trainer can author the
 byte-identical `x_T` recipe.
 
+### Package-local model plugin manifest
+
+Hydra still selects bundles and pipelines directly by `_target_`; there is no
+central model registry. The package-local `MODEL_PLUGIN: ModelPluginSpec`
+connects the independently selected dotpaths:
+
+- `bundle_targets`: bundle factories this pipeline accepts;
+- `config_types`: config dataclasses it accepts;
+- `stages`: algorithm-facing `stage_attr` names and their serialized conditions
+  types;
+- `trainable_attrs`: bundle attributes a train backend may wrap.
+
+`BaseTrainer` resolves a `ModelPluginPlan` before creating `DevicePool`. It
+rejects mixed model families, incompatible config/conditions classes, unknown
+algorithm or rollout stages, and invalid backend trainable attributes before any
+worker or accelerator is allocated. Bundle targets are compared as strings, so
+compatibility validation does not resolve the bundle factory merely to identify
+its family. Composite recipes such as PE resolve one
+selection per `ar` / `diffusion` track; unified models expose both stages from one
+plugin.
+
 **Extending it:** a new model is a new `unirl/models/<model>/` with
 `config.py` / `bundle.py` / `diffusion.py`|`ar.py` / `conditions.py` / `pipeline.py`
 mirroring an existing one — there is no registry, models are selected purely by
@@ -77,6 +100,9 @@ it is the authoritative bundle / pipeline / stage / conditions contract.
   module.
 - **Bundles must stay pure containers** — no LoRA, FSDP, autocast, or weight-sync
   logic; those are train-side lifecycle concerns.
+- **Keep the manifest complete.** Add the bundle factory to `bundle_targets`,
+  config class to `config_types`, and every trainable stage/conditions pair to
+  `stages`; otherwise recipe composition fails before placement.
 - **Share one bundle.** For colocate/trainside runs the pipeline must be built from
   the *injected* bundle (not `from_config`), or replay reads a stale second copy of
   the weights.
