@@ -10,6 +10,12 @@ from unirl.models.qwen3_omni.chat_template import Qwen3OmniChatTemplateStage
 from unirl.models.qwen3_omni.conditions import Qwen3OmniARConditions
 from unirl.models.qwen3_omni.config import Qwen3OmniPipelineConfig
 from unirl.models.qwen3_omni.pipeline import Qwen3OmniPipeline
+from unirl.models.qwen3_omni.processor import (
+    Qwen3OmniProcessedRow,
+    Qwen3OmniProcessorCodec,
+    Qwen3OmniProcessorResult,
+    Qwen3OmniPromptBoundary,
+)
 
 __all__ = [
     "Qwen3OmniARConditions",
@@ -20,4 +26,8 @@ __all__ = [
     "Qwen3OmniChatTemplateStage",
     "Qwen3OmniPipeline",
     "Qwen3OmniPipelineConfig",
+    "Qwen3OmniProcessedRow",
+    "Qwen3OmniProcessorCodec",
+    "Qwen3OmniProcessorResult",
+    "Qwen3OmniPromptBoundary",
 ]
