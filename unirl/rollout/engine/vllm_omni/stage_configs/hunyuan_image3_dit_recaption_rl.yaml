@@ -9,8 +9,9 @@
 #
 # Base = upstream hunyuan_image3_t2i.yaml, the ONLY HI3 DiT config verified
 # standalone (single diffusion stage, 4x H20): enable_expert_parallel:true,
-# need_recv_cache:true (no upstream edge feeds it, so it self-prefills — same
-# as the verified standalone). Plus our RL bits from t2i_rl.yaml's DiT stage:
+# need_recv_cache:false because this standalone stage has no upstream KV
+# sender and self-prefills from prompt + cot_text. Plus our RL bits from
+# t2i_rl.yaml's DiT stage:
 #   - custom_pipeline_args → RLHunyuanImage3Pipeline (SDE scheduler swap +
 #     dense trajectory capture + fused_mm_capture for DiffusionGRPO replay).
 #   - worker_extension_cls → DiTWeightSyncExtension (LoRA receive target).
@@ -39,12 +40,11 @@ stage_args:
       cache_backend: null
       cache_config: null
       enable_cache_dit_summary: false
-      # No upstream sender; the recv side is set up but no transfer arrives,
-      # so the pipeline prefills its own text context (matches the verified
-      # standalone upstream t2i.yaml, which is also need_recv_cache:true with
-      # no edge feeding it).
+      # No upstream sender exists for this standalone stage, so receiving KV
+      # is not part of its contract. The pipeline self-prefills its text
+      # context from prompt + cot_text instead.
       omni_kv_config:
-        need_recv_cache: true
+        need_recv_cache: false
       parallel_config:
         tensor_parallel_size: 4
         enable_expert_parallel: true
