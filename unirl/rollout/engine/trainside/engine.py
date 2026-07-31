@@ -54,6 +54,7 @@ class TrainsideRolloutEngine(BaseSingleTurnRolloutEngine):
     CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
         Capability.DIRECT_ROLLOUT,
         Capability.SINGLE_TURN_GENERATION,
+        Capability.MEMORY_LIFECYCLE,
     )
     _component_name = "trainside"
 
@@ -181,7 +182,7 @@ class TrainsideRolloutEngine(BaseSingleTurnRolloutEngine):
                 self._shutdown_requested = True
             self._shutdown_complete = True
 
-    # sleep / wake_up inherit BaseRolloutEngine's @distributed no-op default.
+    # sleep / wake_up use the composed default memory lifecycle.
 
     def health_check(self) -> bool:
         return self.pipeline is not None and all(m is not None for m in self._models)

@@ -40,6 +40,7 @@ class ClassInfo:
     bases: tuple[str, ...]
     methods: frozenset[str]
     fields: frozenset[str]
+    capabilities: frozenset[str] = frozenset()
 
     @property
     def qualified_name(self) -> str:
@@ -60,6 +61,43 @@ def _base_name(node: ast.expr) -> str:
     if isinstance(node, ast.Subscript):
         return _base_name(node.value)
     return ast.unparse(node).rsplit(".", 1)[-1]
+
+
+def _capability_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "Capability":
+        return node.attr
+    return None
+
+
+def _declared_capabilities(node: ast.ClassDef) -> frozenset[str]:
+    """Read literal ``ComponentCapabilities.of(Capability.X, ...)`` provides."""
+
+    value: ast.expr | None = None
+    for child in node.body:
+        if (
+            isinstance(child, ast.AnnAssign)
+            and isinstance(child.target, ast.Name)
+            and child.target.id == "CAPABILITIES"
+        ):
+            value = child.value
+            break
+        if isinstance(child, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "CAPABILITIES" for target in child.targets
+        ):
+            value = child.value
+            break
+    if not isinstance(value, ast.Call):
+        return frozenset()
+
+    provided: list[ast.expr] = list(value.args)
+    for keyword in value.keywords:
+        if keyword.arg != "provides":
+            continue
+        if isinstance(keyword.value, (ast.List, ast.Set, ast.Tuple)):
+            provided.extend(keyword.value.elts)
+        else:
+            provided.append(keyword.value)
+    return frozenset(name for item in provided if (name := _capability_name(item)) is not None)
 
 
 def _classes(path: Path) -> list[ClassInfo]:
@@ -85,6 +123,7 @@ def _classes(path: Path) -> list[ClassInfo]:
                 bases=tuple(_base_name(base) for base in node.bases),
                 methods=methods,
                 fields=fields,
+                capabilities=_declared_capabilities(node),
             )
         )
     return out
@@ -170,6 +209,34 @@ def _require_members(
         errors.append(f"{info.path.relative_to(ROOT)}: {kind} {info.name} lacks fields {missing_fields}")
 
 
+ROLLOUT_CAPABILITY_METHODS = {
+    "SINGLE_TURN_GENERATION": frozenset({"generate"}),
+    "MULTI_TURN_GENERATION": frozenset({"generate"}),
+    "PARTIAL_ROLLOUT": frozenset({"submit", "poll", "finalize_if_drained", "abort"}),
+    "MEMORY_LIFECYCLE": frozenset(
+        {
+            "sleep",
+            "wake_up",
+            "onload_weights",
+            "is_offloaded",
+            "health_check",
+            "get_memory_info",
+        }
+    ),
+    "TENSOR_WEIGHT_RECEIVER": frozenset({"update_weights_from_tensor"}),
+    "NCCL_WEIGHT_RECEIVER": frozenset(
+        {
+            "init_weights_update_group",
+            "update_weights_from_distributed",
+            "destroy_weights_update_group",
+        }
+    ),
+    "IPC_WEIGHT_RECEIVER": frozenset({"update_weights_from_ipc"}),
+    "LORA_WEIGHT_RECEIVER": frozenset({"set_lora_from_tensors"}),
+    "CHECKPOINT_WEIGHT_RECEIVER": frozenset({"update_weights_from_path"}),
+}
+
+
 def check_rollout_engines(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
     engines = [
         info
@@ -192,6 +259,23 @@ def check_rollout_engines(errors: list[str], simple: dict[str, list[ClassInfo]])
             errors.append(
                 f"{info.path.relative_to(ROOT)}: rollout engine {info.name} must declare CAPABILITIES directly"
             )
+            continue
+        if not info.capabilities:
+            errors.append(
+                f"{info.path.relative_to(ROOT)}: rollout engine {info.name} must use literal Capability members"
+            )
+            continue
+        if "MEMORY_LIFECYCLE" not in info.capabilities:
+            errors.append(f"{info.path.relative_to(ROOT)}: rollout engine {info.name} must declare MEMORY_LIFECYCLE")
+        effective_methods = _effective_members(info, "methods", simple)
+        for capability in sorted(info.capabilities):
+            required = ROLLOUT_CAPABILITY_METHODS.get(capability, frozenset())
+            missing = sorted(required - effective_methods)
+            if missing:
+                errors.append(
+                    f"{info.path.relative_to(ROOT)}: rollout engine {info.name} declares {capability} "
+                    f"but lacks methods {missing}"
+                )
     return len(engines)
 
 

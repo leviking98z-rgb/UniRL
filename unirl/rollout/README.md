@@ -6,10 +6,11 @@
 > agentic coordinator. Full map: [`../README.md`](../README.md).
 
 <div align="center">
-  <img src="../../assets/rollout-engines-new.png" alt="UniRL rollout: five single-turn Sample engines plus the agentic trajectory coordinator, selected by _target_, across direct, separate, and colocated deployment modes" width="100%">
+  <img src="../../assets/rollout-engines-new.png" alt="UniRL rollout: six single-turn Sample engines plus the agentic trajectory coordinator, selected by _target_, across direct, separate, and colocated deployment modes" width="100%">
 </div>
 
-*Six engines share one broad ABC: five single-turn engines dispatch
+*Seven engines compose a thin generation/control ABC with explicit memory and
+weight-receiver capabilities: six single-turn engines dispatch
 `generate(sample) → Sample` with `DP_SCATTER`; the agentic coordinator dispatches
 `generate(sample) → list[Sample]` with rank-zero broadcast.*
 
@@ -35,25 +36,29 @@ wrong objective.
 
 ## How it works
 
-- **One synchronous generation interface.** `BaseRolloutEngine` (`engine/base.py`)
-  is a `Remote` whose concrete engines implement synchronous `generate(sample)`;
-  each keeps its native batching/runtime path. Single-turn engines return one
-  `Sample` and dispatch `generate` with `DP_SCATTER`; the agentic coordinator
-  returns a trajectory list with rank-zero broadcast dispatch. Concurrency is
-  threads, not asyncio: the agentic engine drives one trajectory per drain
-  thread, so an engine meant to serve as its inner must make `generate` safe for
-  concurrent callers (the SGLang backends keep concurrent in-flight requests
-  batching together on the runtime; an event loop survives only inside the
-  native backend, where the in-process SRT runtime requires one).
+- **Small composable interfaces.** `BaseRolloutEngine` (`engine/base.py`) is a
+  `Remote` that owns only generation/control. Memory lifecycle and each weight
+  receiver transport are structural protocols in `../config/rollout.py`; engines
+  declare the exact surfaces they provide through `CAPABILITIES`. Unsupported
+  transports are absent instead of inherited `NotImplementedError` stubs.
+  Concrete engines keep their native batching/runtime path. Single-turn engines
+  return one `Sample` and dispatch `generate` with `DP_SCATTER`; the agentic
+  coordinator returns a trajectory list with rank-zero broadcast dispatch.
+  Concurrency is threads, not asyncio: the agentic engine drives one trajectory
+  per drain thread, so an engine meant to serve as its inner must make `generate`
+  safe for concurrent callers (the SGLang backends keep concurrent in-flight
+  requests batching together on the runtime; an event loop survives only inside
+  the native backend, where the in-process SRT runtime requires one).
 - **The typed boundary** (`../types/`). A `Sample` is an ordered chain of `Part`s.
   Each Part carries lineage ids, a raw `primitive`, an encoded `segment`, replay
   conditions, sampling params (including the σ schedule), and optional decoded
   media. Single-stage flows fill one generated Part; composed PE fills its chained
   AR and diffusion Parts.
 - **The engines.** `trainside` (in-process — the train actor's pipeline *is* the
-  sampler), `sglang_diffusion` (dedicated diffusion), `sglang` (dedicated AR), `vllm_omni`
-  (dedicated; HI3 / SD3 / HunyuanVideo), and `composed` (chains an AR child + a
-  diffusion child for prompt enhancement) are the five single-turn engines.
+  sampler), `fastvideo` (dedicated video), `sglang_diffusion` (dedicated
+  diffusion), `sglang` (dedicated AR), `vllm_omni` (dedicated; HI3 / SD3 /
+  HunyuanVideo), and `composed` (chains an AR child + a diffusion child for
+  prompt enhancement) are the six single-turn engines.
   `agentic` wraps one of them with an environment to produce multi-turn
   trajectories. Each diffusion engine consumes the Part's pinned sigmas verbatim,
   and dedicated engines regenerate `x_T` from the recipe, so two engines start a
@@ -69,9 +74,9 @@ wrong objective.
 `engine/<name>/engine.py` (subclass `BaseSingleTurnRolloutEngine`, implement
 synchronous generation over the whole-`Sample` contract — thread-safe for
 concurrent callers if it should serve as an agentic inner, else serialized
-internally — and dispatch `generate` with `DP_SCATTER`). A dedicated engine also
-implements its weight-receive method and a matching `sync:` handler in
-`../distributed/weight_sync`.
+internally — and dispatch `generate` with `DP_SCATTER`). Declare
+`MEMORY_LIFECYCLE` plus only the receiver capabilities the class structurally
+implements, and add a matching `sync:` handler in `../distributed/weight_sync`.
 
 ## Gotchas
 

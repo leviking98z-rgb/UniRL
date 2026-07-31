@@ -71,6 +71,7 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         Capability.MULTI_TURN_GENERATION,
         Capability.QUIESCE,
         Capability.PARTIAL_ROLLOUT,
+        Capability.MEMORY_LIFECYCLE,
         Capability.TENSOR_WEIGHT_RECEIVER,
         Capability.NCCL_WEIGHT_RECEIVER,
         Capability.IPC_WEIGHT_RECEIVER,

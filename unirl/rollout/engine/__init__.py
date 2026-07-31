@@ -1,7 +1,8 @@
 """Rollout engines over the canonical ``Sample`` request type.
 
-The broad ABC includes coordinator engines; single-turn engines refine it with
-the ``Sample`` → ``Sample`` contract.
+The thin generation/control ABC includes coordinator engines; single-turn
+engines refine it with the ``Sample`` → ``Sample`` contract. Memory and
+weight-receiver surfaces are composed separately.
 """
 
 from typing import List, Optional

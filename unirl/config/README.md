@@ -27,6 +27,11 @@ where invariants get enforced instead:
   `CAPABILITIES: ComponentCapabilities` on their own classes. The declaration
   describes direct/dedicated ownership, generation shape, lifecycle and
   weight-receiver/transport support.
+- `rollout.py` defines dependency-light structural protocols for memory
+  lifecycle and tensor/NCCL/IPC/LoRA/checkpoint receivers. Capability resolution
+  verifies that every declared rollout capability has its required method
+  surface; the stdlib framework guard performs the same check without importing
+  GPU dependencies.
 - `ExecutionPlan.from_config` resolves those declarations into a
   `CapabilityGraph`, normalizes single- and multi-track engine/sync selections,
   computes role placement, and validates engine ↔ sync, loop, layout and offload
@@ -63,9 +68,10 @@ Validation runs in three layers:
 **Extending it:** a new component config is a plain `@dataclass` next to the
 component (not here), with `require(...)` checks in `__post_init__`. A new rollout
 engine or sync implementation must declare `CAPABILITIES` on the concrete class;
-the CPU framework-contract guard enforces that declaration. Add a capability only
-when it represents a peer-composition decision, then validate it in
-`ExecutionPlan` rather than adding an engine-name table.
+the CPU framework-contract guard enforces both the declaration and its structural
+method surface. Add a capability only when it represents a peer-composition
+decision, then validate it in `ExecutionPlan` rather than adding an engine-name
+table.
 
 ## Gotchas
 

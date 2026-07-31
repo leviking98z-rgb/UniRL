@@ -23,6 +23,7 @@ class Capability(str, Enum):
     MULTI_TURN_GENERATION = "multi_turn_generation"
     QUIESCE = "quiesce"
     PARTIAL_ROLLOUT = "partial_rollout"
+    MEMORY_LIFECYCLE = "memory_lifecycle"
     MULTI_GPU_COLOCATE = "multi_gpu_colocate"
 
     # Engine-side weight receivers.
@@ -283,6 +284,8 @@ class ExecutionPlan:
                 raise ValueError(
                     f"{engine.node.target} must provide exactly one of single_turn_generation or multi_turn_generation."
                 )
+            if not engine.supports(Capability.MEMORY_LIFECYCLE):
+                raise ValueError(f"{engine.node.target} must provide memory_lifecycle.")
 
         if self.loop_kind.is_agentic:
             missing = [
@@ -293,6 +296,14 @@ class ExecutionPlan:
 
         if self.loop_kind.is_async and self.placement.mode is not PlacementMode.SEPARATE:
             raise ValueError(f"{self.loop_kind.value} execution requires separate train/rollout slabs.")
+        if self.loop_kind.is_async:
+            missing = [engine.node.target for engine in self.engines if not engine.supports(Capability.QUIESCE)]
+            if missing:
+                raise ValueError(f"async execution requires quiesce-capable rollout engines; got {missing}.")
+        if self.loop_kind is LoopKind.PARTIAL_AGENTIC_RL:
+            missing = [engine.node.target for engine in self.engines if not engine.supports(Capability.PARTIAL_ROLLOUT)]
+            if missing:
+                raise ValueError(f"partial agentic execution requires partial_rollout; got {missing}.")
 
         if self.placement.mode is PlacementMode.SEPARATE:
             direct = [engine.node.target for engine in self.engines if engine.is_direct]
@@ -379,6 +390,9 @@ def component_capabilities(config: Any, *, label: str) -> tuple[str, ComponentCa
     declared = getattr(component, "CAPABILITIES", None)
     if not isinstance(declared, ComponentCapabilities):
         raise ValueError(f"{label} target {target!r} must declare CAPABILITIES: ComponentCapabilities.")
+    from unirl.config.rollout import validate_rollout_capability_surface
+
+    validate_rollout_capability_surface(component, declared, label=label)
     return target, declared
 
 

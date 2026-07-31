@@ -6,11 +6,8 @@ picked from the registry by ``config.modality``, owns the ``Sample`` →
 and no concrete backend (the seam owns the runtime — boot, ports, env quirks,
 the per-stage ``collective_rpc`` fan-out). Weight sync is a :class:`WeightSync`
 component constructed over the seam; the offload lifecycle (a single flag)
-lives directly on the engine. The frozen ``base.py`` surface is implemented as
-thin forwards here — they must be real class attributes anyway (``Worker.call``
-dispatches by name; ``@distributed`` binds the most-derived attribute) — which
-also absorbs the surface quirks (``track_prefix``) so the component keeps
-clean signatures.
+lives directly on the engine. Common tensor/NCCL/LoRA receiver calls use the
+shared delegating receiver; this class owns only its IPC and checksum extensions.
 
 One-shot construction: after ``__init__`` returns, the ``Omni`` orchestrator
 is spawned and the engine is usable. ``generate`` / ``sleep`` / ``wake_up``
@@ -37,19 +34,21 @@ from unirl.rollout.engine.vllm_omni.adapters import get_adapter
 from unirl.rollout.engine.vllm_omni.backends import VLLMOmniBackend
 from unirl.rollout.engine.vllm_omni.config import VLLMOmniEngineConfig, VLLMOmniPorts
 from unirl.rollout.engine.vllm_omni.weight_sync import WeightSync
+from unirl.rollout.engine.weight_receiver import DelegatingTensorNCCLLoraReceiver
 from unirl.sde.runtime import ensure_sample_sigmas
 from unirl.types.sample import Sample
 
 logger = logging.getLogger(__name__)
 
 
-class VLLMOmniRolloutEngine(BaseSingleTurnRolloutEngine):
+class VLLMOmniRolloutEngine(DelegatingTensorNCCLLoraReceiver, BaseSingleTurnRolloutEngine):
     """Rollout engine backed by vllm-omni's ``Omni`` orchestrator (v2 layout)."""
 
     CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
         Capability.DEDICATED_ROLLOUT,
         Capability.SINGLE_TURN_GENERATION,
         Capability.QUIESCE,
+        Capability.MEMORY_LIFECYCLE,
         Capability.TENSOR_WEIGHT_RECEIVER,
         Capability.NCCL_WEIGHT_RECEIVER,
         Capability.IPC_WEIGHT_RECEIVER,
@@ -266,10 +265,8 @@ class VLLMOmniRolloutEngine(BaseSingleTurnRolloutEngine):
         return self._backend.tp_per_stage()
 
     # ------------------------------------------------------------------ #
-    # Weight sync — frozen base.py surface; thin forwards to the component.
-    # Un-decorated (except the documented copy-variant): reached per worker
-    # via the raw ``Worker.call`` RPC, not through ``@distributed``.
-    # ``track_prefix`` is absorbed here.
+    # Weight sync — common tensor/NCCL/LoRA calls come from the delegating
+    # receiver. IPC and the copy/checksum extensions remain engine-specific.
     # ------------------------------------------------------------------ #
 
     def update_weights_from_ipc(
@@ -289,85 +286,6 @@ class VLLMOmniRolloutEngine(BaseSingleTurnRolloutEngine):
             replica_rank=replica_rank,
         )
         self._weight_version += 1  # weights changed → bump the version stamped onto gens
-
-    def init_weights_update_group(
-        self,
-        *,
-        master_address: str,
-        master_port: int,
-        rank_offset: int,
-        world_size: int,
-        group_name: str,
-        backend: str = "nccl",
-        track_prefix: str = "",
-    ) -> None:
-        del track_prefix
-        self._weight_sync.init_weights_update_group(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=rank_offset,
-            world_size=world_size,
-            group_name=group_name,
-            backend=backend,
-        )
-
-    def update_weights_from_distributed(
-        self,
-        *,
-        names: List[str],
-        dtypes: List[str],
-        shapes: List[List[int]],
-        group_name: str,
-        target_modules: Optional[List[str]] = None,
-        flush_cache: bool = True,
-        track_prefix: str = "",
-    ) -> None:
-        del track_prefix
-        self._weight_sync.update_weights_from_distributed(
-            names=names,
-            dtypes=dtypes,
-            shapes=shapes,
-            group_name=group_name,
-            target_modules=target_modules,
-            flush_cache=flush_cache,
-        )
-        self._weight_version += 1  # weights changed → bump the version stamped onto gens
-
-    def destroy_weights_update_group(
-        self,
-        *,
-        group_name: str,
-        track_prefix: str = "",
-    ) -> None:
-        del track_prefix
-        self._weight_sync.destroy_weights_update_group(group_name=group_name)
-
-    def update_weights_from_tensor(
-        self,
-        *,
-        serialized_named_tensors: List[str],
-        target_modules: Optional[List[str]] = None,
-        load_format: Optional[str] = None,
-        flush_cache: bool = True,
-        track_prefix: str = "",
-    ) -> None:
-        del track_prefix
-        self._weight_sync.update_weights_from_tensor(
-            serialized_named_tensors=serialized_named_tensors,
-            target_modules=target_modules,
-            load_format=load_format,
-            flush_cache=flush_cache,
-        )
-        self._weight_version += 1  # weights changed → bump the version stamped onto gens
-
-    def set_lora_from_tensors(
-        self,
-        adapter_name: str,
-        lora_tensors: Dict[str, torch.Tensor],
-        *,
-        peft_config: Optional[dict] = None,
-    ) -> None:
-        self._weight_sync.set_lora_from_tensors(adapter_name, lora_tensors, peft_config=peft_config)
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def set_lora_from_tensors_copy(
@@ -390,11 +308,6 @@ class VLLMOmniRolloutEngine(BaseSingleTurnRolloutEngine):
 
     def loaded_lora_checksums(self, *, adapter_id: int, names: Optional[List[str]] = None) -> dict:
         return self._weight_sync.loaded_lora_checksums(adapter_id=adapter_id, names=names)
-
-    @property
-    def lora_dirty(self) -> bool:
-        """True when LoRA is in use but the adapter must be (re)pushed."""
-        return self._weight_sync.lora_dirty
 
 
 __all__ = ["VLLMOmniRolloutEngine"]

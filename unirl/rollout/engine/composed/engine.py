@@ -58,6 +58,7 @@ class ComposedRolloutEngine(BaseSingleTurnRolloutEngine):
         Capability.DEDICATED_ROLLOUT,
         Capability.SINGLE_TURN_GENERATION,
         Capability.QUIESCE,
+        Capability.MEMORY_LIFECYCLE,
         Capability.TENSOR_WEIGHT_RECEIVER,
         Capability.NCCL_WEIGHT_RECEIVER,
         Capability.IPC_WEIGHT_RECEIVER,
