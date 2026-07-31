@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 class HunyuanImage3Bundle(Bundle):
     """HunyuanImage 3.0 bundle: shared MoE transformer + ViT + 3D-VAE + tokenizer + scheduler."""
 
+    MODEL_FAMILY: str = "hunyuan_image3"
+
     def __init__(
         self,
         *,

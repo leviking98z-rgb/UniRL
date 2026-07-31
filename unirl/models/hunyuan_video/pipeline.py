@@ -35,6 +35,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import DanceSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Texts
@@ -65,6 +66,13 @@ class HunyuanVideoPipeline(Pipeline):
 
     ``Part.conditions`` carries the encoded conditions for trainer-side replay (the train stack re-types them via ``conditions_cls.from_dict``). No CFG negative branch (T2V).
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="hunyuan_video",
+        bundle_targets=("unirl.models.hunyuan_video.bundle.HunyuanVideoBundle.from_config",),
+        config_types=("unirl.models.hunyuan_video.config.HunyuanVideoPipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.hunyuan_video.conditions.HunyuanVideoConditions"),),
+    )
 
     def __init__(
         self,

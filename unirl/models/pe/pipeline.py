@@ -60,6 +60,8 @@ class PEPipeline(Pipeline):
     empty (the AR child's trainside path re-tokenizes on replay).
     """
 
+    COMPOSITE_MODEL_PIPELINE: bool = True
+
     def __init__(
         self,
         *,

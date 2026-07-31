@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import torch
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.sde.runtime import FlowMatchSchedulePolicy
 from unirl.types.noise_recipe import NoiseRecipe
@@ -89,6 +90,16 @@ def _cfg_get(cfg: Any, key: str, default: Any) -> Any:
 
 class BagelPipeline(Pipeline):
     """BAGEL-7B-MoT T2I generate pipeline (trainside A1)."""
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="bagel",
+        bundle_targets=("unirl.models.bagel.bundle.BagelBundle.from_config",),
+        config_types=("unirl.models.bagel.config.BagelPipelineConfig",),
+        stages=(
+            ModelStageSpec.ar("unirl.models.bagel.conditions.BagelARConditions"),
+            ModelStageSpec.diffusion("unirl.models.bagel.conditions.BagelDiffusionConditions"),
+        ),
+    )
 
     def __init__(
         self,

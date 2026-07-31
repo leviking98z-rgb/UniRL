@@ -88,6 +88,8 @@ def _swap_attention_processors_to_flash(transformer: nn.Module) -> int:
 class BooguImageBundle(Bundle):
     """Boogu-Image bundle: vendored DiT + FLUX VAE + Qwen3-VL encoder + processor."""
 
+    MODEL_FAMILY: str = "boogu_image"
+
     def __init__(
         self,
         *,

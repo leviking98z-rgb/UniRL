@@ -40,6 +40,7 @@ import dataclasses
 from typing import Any, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Texts
@@ -68,6 +69,13 @@ class ZImagePipeline(Pipeline):
     ``Part.conditions`` carries the encoded conditions for trainer-side replay (the train stack re-types them via ``conditions_cls.from_dict``). User-supplied negatives are
     deferred; CFG uses a synthesized empty negative.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="z_image",
+        bundle_targets=("unirl.models.z_image.bundle.ZImageBundle.from_config",),
+        config_types=("unirl.models.z_image.config.ZImagePipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.z_image.conditions.ZImageConditions"),),
+    )
 
     def __init__(
         self,

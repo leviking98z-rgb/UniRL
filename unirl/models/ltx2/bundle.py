@@ -25,6 +25,8 @@ class LTX2Bundle(Bundle):
     (+ optional audio VAE + vocoder for T2AV).
     """
 
+    MODEL_FAMILY: str = "ltx2"
+
     def __init__(
         self,
         *,

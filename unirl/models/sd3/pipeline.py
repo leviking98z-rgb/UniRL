@@ -25,6 +25,7 @@ import dataclasses
 from typing import Any, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import CPSSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Texts
@@ -54,6 +55,13 @@ class SD3Pipeline(Pipeline):
     Sample generation uses the model's default CFG negative; direct callers can
     pass explicit negatives through :meth:`build_conditions`.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="sd3",
+        bundle_targets=("unirl.models.sd3.bundle.SD3Bundle.from_config",),
+        config_types=("unirl.models.sd3.config.SD3PipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.sd3.conditions.SD3Conditions"),),
+    )
 
     def __init__(
         self,

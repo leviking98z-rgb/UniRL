@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 class Qwen3Bundle(Bundle):
     """Qwen3 bundle: causal-LM transformer + matching tokenizer."""
 
+    MODEL_FAMILY: str = "qwen3"
+
     def __init__(
         self,
         *,

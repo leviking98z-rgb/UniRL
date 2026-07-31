@@ -26,6 +26,8 @@ from unirl.models.types.bundle import Bundle
 class PEBundle(Bundle):
     """PE bundle: a diffusion ``Bundle`` + an AR LLM ``Bundle``."""
 
+    COMPOSITE_MODEL_BUNDLE: bool = True
+
     def __init__(
         self,
         *,

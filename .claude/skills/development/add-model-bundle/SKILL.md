@@ -29,14 +29,14 @@ The current architecture is a typed pipeline:
 1. Create `unirl/models/<model_name>/` rather than a single file. Typical files are `__init__.py`, `config.py`, `bundle.py`, `pipeline.py`, `conditions.py`, `diffusion.py` or `ar.py`, plus `text_embed.py`, `vae.py`, and vision helpers as needed.
 2. In `config.py`, define `<Model>PipelineConfig` as a plain `@dataclass`. Recipes reference it by `_target_: unirl.models.<model_name>.<Model>PipelineConfig` (nested under the bundle/pipeline `config:` block) — no registration.
 3. Include config fields that match the package's real needs: checkpoint paths, `model_precision`, auxiliary dtype fields, runtime `device`, `autocast_precision`, `trajectory_precision`, `logprob_precision`, schedule knobs such as `shift` for FlowMatch diffusion, `weight_sync_param_name_prefix`, `use_lora`, and `lora_target_modules`.
-4. In `bundle.py`, implement `<Model>Bundle` as a plain class with `from_config(config)`. Load transformer, VAE, text encoders, vision encoders, tokenizers, processors, and schedulers as needed. Use `parse_torch_dtype(..., field_name=...)` for dtype fields, place the trainable module on the requested device and dtype, and freeze auxiliary modules with `requires_grad_(False)`.
+4. In `bundle.py`, implement `<Model>Bundle` as a plain class with `from_config(config)` and declare `MODEL_FAMILY: str = "<model_name>"`. Load transformer, VAE, text encoders, vision encoders, tokenizers, processors, and schedulers as needed. Use `parse_torch_dtype(..., field_name=...)` for dtype fields, place the trainable module on the requested device and dtype, and freeze auxiliary modules with `requires_grad_(False)`.
 5. In `conditions.py`, implement `<Model>Conditions(Batch)` with typed condition slots and `from_dict(d)` / `to_dict()`. Validate required slots, reject wrong types with actionable errors, and omit `None` optional slots from the outgoing dict.
 6. Add embed/encode stages for inputs: `EmbedStage[Texts, TextEmbedCondition]`, `EncodeStage[Images, ImageLatentCondition]`, or model-specific variants. Keep tokenization, chat templates, text encoder fusion, image preprocessing, and upstream-compatible negative prompt defaults in these stages or in the pipeline that calls them.
 7. For diffusion models, add `<Model>DiffusionStep(DiffusionStep[<Model>Bundle, <Model>Conditions])`. By local convention, it should expose `predict_noise(...)` for per-step transformer invocation, CFG batching, timestep scaling, condition concat, masks, and private third-party kwargs. Delegate SDE math to the supplied `StepStrategy`.
 8. Add `<Model>DiffusionStage(DiffusionStage[<Model>Conditions])`. It owns latent initialization when supported by the package, the diffusion loop, trajectory storage, replay, precision policy, and `trainable_module()` when training-side injection needs the trainable root. Declare `_no_split_modules` on the stage when diffusers modules need FSDP wrapping hints.
 9. For AR models, add `<Model>ARStep` and `<Model>ARStage(ARStage[<Model>Conditions])` instead of diffusion step/stage classes. Follow `unirl/models/qwen3/ar.py` for packed `TextSegment` generation and replay.
 10. In `vae.py` or equivalent, implement `DecodeStage[LatentSegment, Images | Videos]` and any required `EncodeStage[Images | Videos, ImageLatentCondition]`. Apply the model's VAE scale, shift, dtype, layout, frame, and clamp conventions.
-11. In `pipeline.py`, implement `<Model>Pipeline(Pipeline)` with `from_config(...)` and `generate(sample)`. Read raw inputs through `sample.conditioning()`, read sampling params from the typed generation Part, require `params.sigmas` for diffusion, call stages in order, and fill that Part with `segment`, modality-keyed `primitives`, and `conditions`.
+11. In `pipeline.py`, implement `<Model>Pipeline(Pipeline)` with `from_config(...)` and `generate(sample)`. Declare a package-local `MODEL_PLUGIN: ModelPluginSpec` listing compatible `bundle_targets`, `config_types`, trainable `stages` with their conditions dotpaths, and any non-default `trainable_attrs`. Read raw inputs through `sample.conditioning()`, read sampling params from the typed generation Part, require `params.sigmas` for diffusion, call stages in order, and fill that Part with `segment`, modality-keyed `primitives`, and `conditions`.
 12. Add `latent_shape(cls, *, model_config, sampling_spec)` when the driver should author a deterministic initial-noise recipe on the generation Part for group noise or resume behavior.
 13. Update the package `__init__.py` to import and export public symbols from `config.py`, `bundle.py`, `pipeline.py`, and condition classes so importing `unirl.models.<model_name>` re-exports them.
 14. Add at least one recipe YAML under `examples/<domain>/` (the v2 config dir, grouped by trainer domain) and document external checkpoint requirements there or in launcher environment docs.
@@ -47,6 +47,11 @@ Model packages are wired into recipes by `_target_` dotpath (no ConfigStore):
 
 - Define `<Model>PipelineConfig` as a plain `@dataclass` in `config.py`.
 - Recipes set `bundle._target_: ...<Model>Bundle.from_config` with a nested `config._target_: ...<Model>PipelineConfig`; the worker walker constructs them.
+- Declare `MODEL_FAMILY` on the bundle and `MODEL_PLUGIN` on the pipeline. `BaseTrainer`
+  builds a `ModelPluginPlan` before GPU placement and rejects a recipe when its
+  bundle factory, config type, backend `trainable_attr`, algorithm `stage_attr` /
+  `conditions_cls`, or trainside rollout `stage_attrs` do not match the manifest.
+  Keep model selection Hydra-native; do not add a central registry.
 - Add new shared condition types under `unirl/types/conditions/` only when existing slots cannot express the semantics; export them from `unirl/types/conditions/__init__.py`.
 - Add or update rollout-engine model-family enums only when the model is served through an engine that explicitly enumerates families, such as SGLang or vLLM-Omni configs.
 
@@ -166,6 +171,9 @@ Adjust the command to real files before running. If the model is AR-only or pipe
 ## Review Before Finishing
 
 - `<Model>PipelineConfig` is a plain `@dataclass`; recipes reference it (and `<Model>Pipeline.from_config`) by `_target_`.
+- `<Model>Bundle` declares `MODEL_FAMILY`; `<Model>Pipeline` declares a complete
+  `MODEL_PLUGIN` whose bundle/config/stage/conditions/trainable declarations
+  accept every intended recipe and reject cross-family composition.
 - The package `__init__.py` re-exports the config / pipeline classes.
 - `Pipeline.generate(sample)` validates required conditioning primitives, typed generation params, negative prompt batch sizes, and pinned sigmas for diffusion.
 - Filled generation Parts use canonical primitive keys such as `"image"`, `"video"`, `"audio"`, or `"text"`, and include conditions and a segment when available.

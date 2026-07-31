@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 class QwenImageBundle(Bundle):
     """Qwen-Image bundle: transformer + VAE + Qwen-VL text encoder + scheduler."""
 
+    MODEL_FAMILY: str = "qwen_image"
+
     def __init__(
         self,
         *,

@@ -8,6 +8,7 @@ from typing import Any, Optional
 import torch
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.models.wan21.conditions import WAN21Conditions
 from unirl.models.wan21.text_embed import WAN21TextEmbedStage
 from unirl.models.wan21.vae import WAN21VAEDecodeStage
@@ -26,6 +27,13 @@ from .video_encode import WAN22VideoLatentEncodeStage
 
 class WAN22V2VPipeline(Pipeline):
     """WAN 2.2 video-to-video generate pipeline."""
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="wan22",
+        bundle_targets=("unirl.models.wan22.bundle.WAN22Bundle.from_config",),
+        config_types=("unirl.models.wan22_v2v.config.WAN22V2VPipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.wan21.conditions.WAN21Conditions"),),
+    )
 
     def __init__(
         self,

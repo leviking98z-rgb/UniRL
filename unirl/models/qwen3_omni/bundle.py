@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 class Qwen3OmniBundle(Bundle):
     """Qwen3-Omni thinker bundle: thinker transformer + processor + tokenizer."""
 
+    MODEL_FAMILY: str = "qwen3_omni"
+
     def __init__(
         self,
         *,

@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 class QwenVLBundle(Bundle):
+    """Qwen-VL trainable language/vision model plus processor and tokenizer."""
+
+    MODEL_FAMILY: str = "qwen_vl"
+
     def __init__(
         self,
         *,

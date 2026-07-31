@@ -12,6 +12,8 @@ torch/Ray/engine packages:
 * the FSDP and VeOmni backend leaves implement the shared backend hook surface;
 * ``Sample``/``Part`` retain the request/fork/fill and batch-algebra seam used by
   rollout, reward, and train;
+* model bundles and pipelines declare package-local plugin ownership so recipes
+  cannot silently compose different model families;
 * advantage estimators own reward normalization/value-target policy instead of
   growing methods on the ``Part`` wire type;
 * trainer variants select explicit loop programs instead of copying ``train``;
@@ -307,6 +309,13 @@ def check_model_pipelines(errors: list[str], simple: dict[str, list[ClassInfo]])
         and info.path.name == "pipeline.py"
     ]
     for info in pipelines:
+        effective_fields = _effective_members(info, "fields", simple)
+        manifest_fields = {"MODEL_PLUGIN", "COMPOSITE_MODEL_PIPELINE"} & effective_fields
+        if len(manifest_fields) != 1:
+            errors.append(
+                f"{info.path.relative_to(ROOT)}: model pipeline {info.name} must declare exactly one of "
+                "MODEL_PLUGIN or COMPOSITE_MODEL_PIPELINE"
+            )
         _require_members(
             errors,
             info,
@@ -315,6 +324,61 @@ def check_model_pipelines(errors: list[str], simple: dict[str, list[ClassInfo]])
             simple=simple,
         )
     return len(pipelines)
+
+
+def check_model_bundles(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
+    bundles = [
+        info
+        for infos in simple.values()
+        for info in infos
+        if info.name != "Bundle"
+        and _descends_from(info, "Bundle", simple)
+        and "/models/" in info.path.as_posix()
+        and info.path.name == "bundle.py"
+    ]
+    for info in bundles:
+        effective_fields = _effective_members(info, "fields", simple)
+        manifest_fields = {"MODEL_FAMILY", "COMPOSITE_MODEL_BUNDLE"} & effective_fields
+        if len(manifest_fields) != 1:
+            errors.append(
+                f"{info.path.relative_to(ROOT)}: model bundle {info.name} must declare exactly one of "
+                "MODEL_FAMILY or COMPOSITE_MODEL_BUNDLE"
+            )
+    return len(bundles)
+
+
+def check_model_plugin_contracts(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
+    expected = {
+        "ModelStageSpec": {
+            "methods": ("ar", "diffusion"),
+            "fields": ("name", "kind", "conditions_type"),
+        },
+        "ModelPluginSpec": {
+            "methods": ("stage",),
+            "fields": ("name", "bundle_targets", "config_types", "stages", "trainable_attrs"),
+        },
+        "ModelPluginSelection": {
+            "fields": ("track", "plugin", "bundle_target", "pipeline_target", "config_target"),
+        },
+        "ModelPluginPlan": {
+            "methods": ("from_config", "selection", "stage_names"),
+            "fields": ("selections",),
+        },
+    }
+    for name, contract in expected.items():
+        matches = [info for info in simple.get(name, ()) if info.module == "unirl.models.types.plugin"]
+        if len(matches) != 1:
+            errors.append(f"unirl/models/types/plugin.py: expected one {name} class, found {len(matches)}")
+            continue
+        _require_members(
+            errors,
+            matches[0],
+            kind="model plugin contract",
+            methods=contract.get("methods", ()),
+            fields=contract.get("fields", ()),
+            simple=simple,
+        )
+    return len(expected)
 
 
 def check_train_backends(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
@@ -512,7 +576,9 @@ def main() -> int:
     counts = {
         "rollout engines": check_rollout_engines(errors, simple),
         "weight syncs": check_weight_syncs(errors, simple),
+        "model bundles": check_model_bundles(errors, simple),
         "model pipelines": check_model_pipelines(errors, simple),
+        "model plugin contracts": check_model_plugin_contracts(errors, simple),
         "train backends": check_train_backends(errors, simple),
         "wire types": check_sample_contract(errors, simple),
         "advantage contracts": check_advantage_estimators(errors, simple),

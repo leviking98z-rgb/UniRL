@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 
 from unirl.models.types.ar import ARSamplingParams
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample, Turn
 
@@ -54,6 +55,16 @@ class Qwen3Pipeline(Pipeline):
     ``conditions_cls.from_dict``), so the encode here is the single source of truth
     and the importance ratio stays consistent.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="qwen3",
+        bundle_targets=(
+            "unirl.models.qwen3.bundle.Qwen3Bundle.from_config",
+            "unirl.models.qwen3_moe.bundle.Qwen3MoeBundle.from_config",
+        ),
+        config_types=("unirl.models.qwen3.config.Qwen3PipelineConfig",),
+        stages=(ModelStageSpec.ar("unirl.models.qwen3.conditions.Qwen3ARConditions"),),
+    )
 
     def __init__(
         self,

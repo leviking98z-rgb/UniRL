@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from unirl.models.qwen_image.vae import QwenImageVAEDecodeStage
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Images, Texts
@@ -72,6 +73,13 @@ class QwenImageEditPlusPipeline(Pipeline):
     - ``segment: LatentSegment``.
     - ``primitives["image"]: Images``.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="qwen_image_edit_plus",
+        bundle_targets=("unirl.models.qwen_image_edit_plus.bundle.QwenImageEditPlusBundle.from_config",),
+        config_types=("unirl.models.qwen_image_edit_plus.config.QwenImageEditPlusPipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.qwen_image_edit_plus.conditions.QwenImageEditPlusConditions"),),
+    )
 
     def __init__(
         self,

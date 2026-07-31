@@ -23,6 +23,7 @@ import dataclasses
 from typing import Any, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.models.wan21.clip_vision_encode import WAN21CLIPVisionEncodeStage
 from unirl.models.wan21.conditions import WAN21Conditions
 from unirl.models.wan21.image_encode import WAN21ImageLatentEncodeStage
@@ -54,6 +55,13 @@ class WAN22Pipeline(Pipeline):
     deferred; CFG uses a synthesized empty negative. ``DiffusionSamplingParams``
     carries the optional ``guidance_scale_2`` WAN22 routes CFG by.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="wan22",
+        bundle_targets=("unirl.models.wan22.bundle.WAN22Bundle.from_config",),
+        config_types=("unirl.models.wan22.config.WAN22PipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.wan21.conditions.WAN21Conditions"),),
+    )
 
     def __init__(
         self,

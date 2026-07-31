@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from unirl.models.types.pipeline import Pipeline
+from unirl.models.types.plugin import ModelPluginSpec, ModelStageSpec
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Texts
@@ -65,6 +66,13 @@ class QwenImagePipeline(Pipeline):
     Sample generation uses the model's default CFG negative; direct callers can
     pass explicit negatives through :meth:`build_conditions`.
     """
+
+    MODEL_PLUGIN: ModelPluginSpec = ModelPluginSpec(
+        name="qwen_image",
+        bundle_targets=("unirl.models.qwen_image.bundle.QwenImageBundle.from_config",),
+        config_types=("unirl.models.qwen_image.config.QwenImagePipelineConfig",),
+        stages=(ModelStageSpec.diffusion("unirl.models.qwen_image.conditions.QwenImageConditions"),),
+    )
 
     def __init__(
         self,
