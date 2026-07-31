@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, List, Union
 import torch
 
 from unirl.reward.base import BaseRewardComponentSpec
+from unirl.reward.video import first_video_frame_to_pil, video_frame_to_pil
 from unirl.types.primitives import Video
 from unirl.types.reward import RewardRequest
-from unirl.utils.media import tensor_frame_to_pil
 
 from .pickscore import PickScoreRewardScorer
 
@@ -48,7 +48,7 @@ class VideoPickScoreScorer(PickScoreRewardScorer):
         frame). No axis-size heuristic is used.
         """
         if isinstance(video, Video):
-            frame = video.first_frame()
+            return first_video_frame_to_pil(video)
         elif isinstance(video, torch.Tensor):
             v = video
             if v.dim() == 5:
@@ -72,15 +72,7 @@ class VideoPickScoreScorer(PickScoreRewardScorer):
         else:
             raise TypeError(f"Expected Video or torch.Tensor, got {type(video).__name__}")
 
-        frame = frame.detach().cpu()
-        if not frame.is_floating_point():
-            frame = frame.float() / 255.0
-        elif frame.numel() > 0 and frame.max() > 1.0:
-            frame = (frame / 255.0).clamp(0.0, 1.0)
-        else:
-            frame = frame.clamp(0.0, 1.0)
-
-        return tensor_frame_to_pil(frame)
+        return video_frame_to_pil(frame)
 
     # ------------------------------------------------------------------
     # Override: extract first frame then delegate to PickScore scoring

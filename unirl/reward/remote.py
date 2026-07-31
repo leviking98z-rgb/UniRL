@@ -35,6 +35,8 @@ from PIL import Image
 
 from unirl.config.require import require
 from unirl.reward.base import BaseRewardComponentSpec, RewardBackend
+from unirl.reward.video import video_frame_to_pil
+from unirl.types.primitives import Video
 from unirl.types.reward import RewardRequest, RewardResponse
 
 logger = logging.getLogger(__name__)
@@ -80,10 +82,10 @@ def _encode_image_b64(
 
 
 def _encode_video_b64(
-    video: torch.Tensor,
+    video: Video,
     fps: int = 8,
 ) -> str:
-    """Encode a video tensor ``(C, T, H, W)`` to a base64 mp4 string.
+    """Encode a canonical ``Video[T, C, H, W]`` to a base64 mp4 string.
 
     Uses ``diffusers.utils.export_to_video`` for frame encoding, then reads
     the bytes and base64-encodes them for HTTP transmission.
@@ -91,24 +93,8 @@ def _encode_video_b64(
     import tempfile
 
     from diffusers.utils import export_to_video
-    from PIL import Image as _PIL_Image
 
-    v = video.detach().cpu()
-    if v.dim() == 5:
-        v = v.squeeze(0)
-    if v.dim() != 4:
-        raise ValueError(f"Expected 4D (C, T, H, W) video tensor, got shape {tuple(v.shape)}.")
-
-    # Channel-first to list of PIL frames
-    if v.is_floating_point():
-        v = v.clamp(0.0, 1.0)
-    frames = []
-    for t in range(v.shape[1]):
-        frame = v[:, t, :, :]  # (C, H, W)
-        if frame.is_floating_point():
-            frame = (frame * 255).byte()
-        frame_np = frame.permute(1, 2, 0).numpy()
-        frames.append(_PIL_Image.fromarray(frame_np))
+    frames = [video_frame_to_pil(frame) for frame in video.as_tchw()]
 
     tmp = tempfile.NamedTemporaryFile(prefix="reward_svc_", suffix=".mp4", delete=False)
     tmp.close()
@@ -399,7 +385,7 @@ class RemoteRewardBackend(RewardBackend):
 
         Per-sample metadata from ``request.metadata`` is forwarded when present.
         """
-        videos = request.videos or []
+        videos = request.video_items or []
         prompts = request.prompts
         metadata_list = request.metadata
         wire_requests: List[Dict[str, Any]] = []

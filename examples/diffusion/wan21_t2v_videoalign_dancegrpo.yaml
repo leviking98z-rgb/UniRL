@@ -9,8 +9,8 @@
 # Full-parameter FSDP fine-tune (NO LoRA), FlowSDE kernel, 480p/9-frame.
 # Batch geometry: 32 prompts x 24 samples = 768 / 32 GPUs = 24 per device.
 #
-# Requires VideoAlign checkpoint; set VIDEOALIGN_CKPT (+ VIDEOALIGN_QWEN_CKPT
-# for the Qwen2-VL base).
+# Requires a ``videoalign`` deployment from ``unirl-reward-service``. Set
+# REWARD_SERVICE_URL when it is not running on localhost:8080.
 
 num_devices: 32               # 4 nodes x 8 GPUs
 batch_size: 32                # prompts_per_rollout (x samples_per_prompt=24 -> 768 total)
@@ -72,18 +72,18 @@ rollout:
 reward:
   _target_: unirl.reward.service.RewardService
   backend:
-    _target_: unirl.reward.local.videoalign.VideoAlignRewardScorer
-    base_device: cuda
+    _target_: unirl.reward.remote.RemoteRewardBackend
+    base_device: cpu
     config:
-      _target_: unirl.reward.local.videoalign.VideoAlignSpec
-      weight: 1.0
+      _target_: unirl.reward.remote.RemoteRewardSpec
+      base_url: ${oc.env:REWARD_SERVICE_URL,http://localhost:8080}
+      required_rewards: [videoalign]
+      reward_weights: {videoalign: 1.0}
       batch_size: 1
-      device: auto
-      checkpoint_path: ${oc.env:VIDEOALIGN_CKPT,./videoalign_ckpt}
-      dtype: bf16
-      vq_coef: 1.0
-      mq_coef: 1.0
-      ta_coef: 1.0
+      timeout: 1800
+      sub_metric_reduce: first
+      input_kind: video
+      video_fps: 24
 
 algorithm:
   _target_: unirl.algorithms.flowgrpo.FlowGRPO

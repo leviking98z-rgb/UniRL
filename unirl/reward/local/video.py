@@ -5,13 +5,11 @@ from __future__ import annotations
 import dataclasses
 import time
 from dataclasses import dataclass
-from typing import List
 
 import torch
-from PIL import Image
 
 from unirl.reward.base import BaseRewardComponentSpec, RewardBackend
-from unirl.types.primitives import Video
+from unirl.reward.video import mean_frame_scores, sample_video_frames_to_pils, temporal_consistency_score
 from unirl.types.reward import RewardRequest, RewardResponse
 
 from .registry import (
@@ -65,7 +63,7 @@ class VideoRewardScorer(RewardBackend):
             }
 
             for video, prompt in zip(videos, prompts):
-                frames = self._sample_frames(video)
+                frames = sample_video_frames_to_pils(video, self.sample_frames, rounding="floor")
                 from torchvision.transforms.functional import to_tensor
 
                 from unirl.types.primitives import Images, Texts
@@ -76,8 +74,8 @@ class VideoRewardScorer(RewardBackend):
                     generated={"image": Images(pixels=frame_pixels)},
                 )
                 frame_response = self.frame_scorer.compute_rewards(frame_request)
-                alignment_reward = sum(frame_response.rewards) / len(frame_response.rewards)
-                temporal_reward = self._compute_temporal_consistency(video)
+                alignment_reward = mean_frame_scores(frame_response.rewards, self.sample_frames)[0]
+                temporal_reward = temporal_consistency_score(video)
                 total_reward = self.alignment_weight * alignment_reward + self.temporal_weight * temporal_reward
 
                 rewards.append(total_reward)
@@ -98,19 +96,6 @@ class VideoRewardScorer(RewardBackend):
                 errors=[str(e)] * len(videos),
                 compute_time=time.time() - start,
             )
-
-    def _sample_frames(self, video: Video) -> List[Image.Image]:
-        sampled = Video(frames=video.sample_uniform(self.sample_frames))
-        return sampled.to_pils()
-
-    def _compute_temporal_consistency(self, video: Video) -> float:
-        frames = video.as_tchw()
-        frame_diffs = []
-        for i in range(len(frames) - 1):
-            diff = (frames[i] - frames[i + 1]).abs().mean()
-            frame_diffs.append(diff.item())
-        avg_diff = sum(frame_diffs) / len(frame_diffs) if frame_diffs else 0
-        return max(0.0, 1 - avg_diff)
 
     @property
     def preferred_input_kind(self) -> str:

@@ -29,8 +29,8 @@ from typing import TYPE_CHECKING, List
 import torch
 
 from unirl.reward.base import BaseRewardComponentSpec
+from unirl.reward.video import mean_frame_scores, sample_video_frames_to_pils
 from unirl.types.reward import RewardRequest
-from unirl.utils.media import tensor_frame_to_pil
 
 from .pickscore import PickScoreRewardScorer
 
@@ -76,25 +76,7 @@ class VideoCLIPDeltaScorer(PickScoreRewardScorer):
         Always returns exactly ``k`` frames (indices repeat when ``T < k``) so the
         batch flattens to a fixed ``n * k`` layout for the per-video mean.
         """
-        frames = video.frames
-        if frames is None or frames.ndim != 4:
-            raise ValueError(
-                "VideoCLIPDeltaScorer: expected per-sample frames [T, C, H, W], got "
-                f"{None if frames is None else tuple(frames.shape)}"
-            )
-        total = int(frames.shape[0])
-        idx = torch.linspace(0, total - 1, steps=int(k)).round().long().clamp_(0, total - 1).tolist()
-        pils: list["Image.Image"] = []
-        for j in idx:
-            frame = frames[j].detach().cpu()
-            if not frame.is_floating_point():
-                frame = frame.float() / 255.0
-            elif frame.numel() > 0 and frame.max() > 1.0:
-                frame = (frame / 255.0).clamp(0.0, 1.0)
-            else:
-                frame = frame.clamp(0.0, 1.0)
-            pils.append(tensor_frame_to_pil(frame))
-        return pils
+        return sample_video_frames_to_pils(video, k, rounding="nearest")
 
     def _embed_images(self, pil_images: List["Image.Image"]) -> torch.Tensor:
         inputs = self.processor(images=pil_images, padding=True, truncation=True, max_length=77, return_tensors="pt")
@@ -148,7 +130,6 @@ class VideoCLIPDeltaScorer(PickScoreRewardScorer):
             scale = self.model.logit_scale.exp() / 26.0
             for v_lo in range(0, n, self.batch_size):
                 v_hi = min(v_lo + self.batch_size, n)
-                nb = v_hi - v_lo
                 e = edited_frames[v_lo * k : v_hi * k]
                 s = source_frames[v_lo * k : v_hi * k]
                 p = prompts[v_lo:v_hi]
@@ -162,8 +143,8 @@ class VideoCLIPDeltaScorer(PickScoreRewardScorer):
                 # Cap the source-divergence reward: clamp the cosine from below so
                 # diverging past the floor earns nothing more (and gets no gradient).
                 source_cos = (edited_emb * source_emb).sum(dim=-1).clamp(min=self.source_sim_floor)
-                text_align = (scale * text_cos).view(nb, k).mean(dim=1)
-                source_sim = (scale * source_cos).view(nb, k).mean(dim=1)
+                text_align = mean_frame_scores(scale * text_cos, k)
+                source_sim = mean_frame_scores(scale * source_cos, k)
 
                 reward = text_align - self.lambda_source * source_sim
                 rewards.extend(reward.float().cpu().tolist())
