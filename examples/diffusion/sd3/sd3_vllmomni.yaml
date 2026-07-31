@@ -37,6 +37,10 @@ pipeline:
   autocast_precision: bf16
   trajectory_precision: bf16
   logprob_precision: fp32
+  # Replay the selected SDE steps in one step-major transformer batch. This
+  # removes two of three serial forwards for the default num_sde_steps=3
+  # while preserving per-sample loss/log-prob alignment.
+  batch_replay_steps: true
   strategy:
     _target_: unirl.sde.kernels.FlowSDEStrategy
 
