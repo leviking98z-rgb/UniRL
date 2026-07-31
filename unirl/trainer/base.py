@@ -224,6 +224,8 @@ class BaseTrainer:
             enabled=report,
             run_id=self._resume_state.get("wandb_run_id"),
             optimizer_step=int(self._resume_state.get("optimizer_step") or 0),
+            experiment_output=(cfg.get("experiment_output") or os.environ.get("UNIRL_EXPERIMENT_OUTPUT") or None),
+            experiment_append=bool(cfg.get("experiment_append", False)),
         )
         if self.wandb_logger.initialized:
             logger.info("WandB initialized: project=%s run=%s", project, cfg.get("run_name"))

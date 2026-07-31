@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
 
 import torch
 
+from unirl.utils.experiment_record import ExperimentRecorder
+
 try:
     import wandb
 
@@ -288,6 +290,8 @@ class UniRLWandBLogger:
         entity: Optional[str] = None,
         run_id: Optional[str] = None,
         optimizer_step: int = 0,
+        experiment_output: Optional[str] = None,
+        experiment_append: bool = False,
     ):
         """Initialize WandB logger.
 
@@ -311,6 +315,8 @@ class UniRLWandBLogger:
             run_id: Resume this wandb run id (from a checkpoint's
                 trainer_state.json) instead of starting a fresh run.
             optimizer_step: Seed for the ``train/`` step axis on resume.
+            experiment_output: Optional JSONL path for framework-neutral metrics.
+            experiment_append: Append to an existing JSONL when resuming.
         """
         self.project = project
         self.run_name = run_name
@@ -329,6 +335,13 @@ class UniRLWandBLogger:
         # Set by MemoryMonitor.install(); when present, log_rollout_step folds
         # its per-step summary (perf/max_memory_* etc.) into the perf dict.
         self.memory_monitor = None
+        self.experiment_recorder = ExperimentRecorder(
+            experiment_output,
+            run_name=run_name,
+            metadata=config if isinstance(config, dict) else None,
+            rank=rank,
+            append=experiment_append,
+        )
 
         # Only enable on rank 0
         self.enabled = enabled and rank == 0
@@ -773,7 +786,9 @@ class UniRLWandBLogger:
         # into perf on the enabled path below. Covers async_ar (no train_step to
         # wrap), and this is the step window boundary for the peak counters.
         mem_summary = self.memory_monitor.step_summary(step=rollout_id + 1) if self.memory_monitor is not None else None
-        if not self.enabled or not self._initialized:
+        record_locally = self.experiment_recorder.enabled
+        log_to_wandb = self.enabled and self._initialized
+        if not record_locally and not log_to_wandb:
             return
         # Lazy import keeps wandb_logger importable without the training stack.
         from unirl.utils.wandb_metrics import compute_rollout_resp_metrics
@@ -782,9 +797,6 @@ class UniRLWandBLogger:
         rollout_metrics = compute_rollout_resp_metrics(resp=resp, trunc_len=trunc_len)
         if extra_metrics:
             rollout_metrics.update(extra_metrics)
-        self.log_rollout(step, rollout_metrics)
-
-        self._log_train(results)
 
         perf: Dict[str, float] = {}
         if step_time_s is not None:
@@ -793,8 +805,39 @@ class UniRLWandBLogger:
             perf.update({f"{name}_time_s": float(v) for name, v in phase_times.items()})
         if mem_summary:
             perf.update(mem_summary)
-        if perf:
-            self.log_perf(step, perf)
+
+        if record_locally:
+            record_metrics = {f"rollout/{key}": value for key, value in rollout_metrics.items()}
+            record_metrics.update({f"perf/{key}": value for key, value in perf.items()})
+            record_metrics.update(self._record_train_metrics(results))
+            self.experiment_recorder.log_step(step, record_metrics)
+
+        if log_to_wandb:
+            self.log_rollout(step, rollout_metrics)
+            self._log_train(results)
+            if perf:
+                self.log_perf(step, perf)
+
+    @staticmethod
+    def _record_train_metrics(
+        results: Union["TrainStepResult", Dict[str, "TrainStepResult"]],
+    ) -> Dict[str, float]:
+        """Flatten aggregate train metrics for the per-rollout JSONL record."""
+        if isinstance(results, dict):
+            output: Dict[str, float] = {}
+            for name, result in results.items():
+                for key, value in aggregate_stage_results([result]).items():
+                    scalar = UniRLWandBLogger._coerce_metric_value(value)
+                    if scalar is not None:
+                        output[f"train/{name}/{key}"] = scalar
+            return output
+
+        output = {}
+        for key, value in aggregate_stage_results([results]).items():
+            scalar = UniRLWandBLogger._coerce_metric_value(value)
+            if scalar is not None:
+                output[f"train/{key}"] = scalar
+        return output
 
     def _log_train(
         self,
@@ -926,6 +969,7 @@ class UniRLWandBLogger:
 
     def finish(self):
         """Finish wandb run."""
+        self.experiment_recorder.finish()
         if self.enabled and self._initialized:
             try:
                 wandb.finish()

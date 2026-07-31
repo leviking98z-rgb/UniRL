@@ -19,6 +19,11 @@ python benchmarks/speed_benchmarks/parse_perf.py train.log --samples-per-step <b
 prints steps, median/mean/p90 s/step, samples/s and samples/GPU-hour (first `--skip 2`
 steps dropped as warmup).
 
+For automated baseline/candidate gates across diffusion, AR, and unified-model
+trainers, use [`../framework/`](../framework/). It records the same common
+telemetry to JSONL without requiring WandB and checks speed, memory, and reward
+thresholds with a machine-readable exit status.
+
 ## Fair-comparison protocol
 
 Pin on both sides, and publish the full configs next to any number you report:

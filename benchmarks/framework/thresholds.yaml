@@ -1,0 +1,24 @@
+{
+  "warmup_steps": 2,
+  "minimum_steps": 5,
+  "metrics": {
+    "perf/step_time_s": {
+      "reducer": "median",
+      "direction": "lower",
+      "max_regression_pct": 3.0,
+      "required": true
+    },
+    "perf/max_memory_allocated_gb": {
+      "reducer": "max",
+      "direction": "lower",
+      "max_regression_pct": 3.0,
+      "required": false
+    },
+    "rollout/reward_mean": {
+      "reducer": "mean",
+      "direction": "higher",
+      "max_regression_abs": 0.02,
+      "required": true
+    }
+  }
+}

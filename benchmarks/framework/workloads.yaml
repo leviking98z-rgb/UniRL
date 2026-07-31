@@ -1,0 +1,26 @@
+{
+  "workloads": {
+    "sd3_flowgrpo_vllmomni_1x8": {
+      "entrypoint": "unirl.train_diffusion",
+      "config_name": "diffusion/sd3/sd3_vllmomni",
+      "tags": ["diffusion", "flowgrpo", "vllm-omni", "single-node"],
+      "gpus": 8,
+      "samples_per_step": 768,
+      "overrides": ["num_devices=8"]
+    },
+    "qwen3_grpo_sglang_1x8": {
+      "entrypoint": "unirl.train_ar",
+      "config_name": "ar/qwen3_grpo_4b_base_dapo_sglang",
+      "tags": ["ar", "grpo", "sglang", "single-node"],
+      "gpus": 8,
+      "overrides": ["num_devices=8"]
+    },
+    "hi3_unified_vllmomni_1x8": {
+      "entrypoint": "unirl.train_unified_model",
+      "config_name": "unified_model/hi3_vllmomni",
+      "tags": ["unified-model", "vllm-omni", "single-node"],
+      "gpus": 8,
+      "overrides": ["num_devices=8"]
+    }
+  }
+}
