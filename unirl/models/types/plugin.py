@@ -71,8 +71,7 @@ class ModelPluginSpec:
             raise ValueError(f"ModelPluginSpec({self.name!r}) must declare at least one bundle target.")
         if any(not target.startswith("unirl.models.") for target in self.bundle_targets):
             raise ValueError(
-                f"ModelPluginSpec({self.name!r}) bundle targets must be model dotpaths; "
-                f"got {self.bundle_targets!r}."
+                f"ModelPluginSpec({self.name!r}) bundle targets must be model dotpaths; got {self.bundle_targets!r}."
             )
         if not self.config_types:
             raise ValueError(f"ModelPluginSpec({self.name!r}) must declare at least one config type.")
