@@ -92,9 +92,7 @@ def mean_frame_scores(
 
     values = list(scores)
     if len(values) % frames_per_video:
-        raise ValueError(
-            f"Frame score count {len(values)} is not divisible by frames_per_video={frames_per_video}"
-        )
+        raise ValueError(f"Frame score count {len(values)} is not divisible by frames_per_video={frames_per_video}")
     return [
         sum(values[start : start + frames_per_video]) / frames_per_video
         for start in range(0, len(values), frames_per_video)
