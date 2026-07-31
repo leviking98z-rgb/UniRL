@@ -6,17 +6,20 @@
 
 ## What it is
 
-`unirl.config` is the shared toolkit behind UniRL's flat-recipe config flow.
+`unirl.config` is the shared toolkit behind UniRL's bounded-composition recipe
+flow.
 Component-specific dataclasses still live next to the components that consume
 them. This package owns shared field validators and the typed driver-side
 execution plan that composes those components.
 
 ## Why it exists
 
-A recipe is one flat YAML wired entirely by `_target_` dotpaths — there are **no**
-Hydra config groups and no `defaults:` lists. That keeps every run reproducible
-from a single file, but it also means Hydra type-checks nothing. This module is
-where invariants get enforced instead:
+A public recipe is one stable entry YAML wired entirely by `_target_` dotpaths.
+It may inherit common fields from exactly one private `examples/_base/` file;
+the public file then overlays the choices that identify that experiment. Bases
+cannot inherit from other bases, so resolving a run never requires following a
+deep config-group graph. Hydra still type-checks none of these plain mappings.
+This module is where invariants get enforced instead:
 
 - Each dataclass fails fast in `__post_init__` via `require(...)`, with a clear
   `ValueError`.
@@ -42,9 +45,11 @@ where invariants get enforced instead:
 
 ## How it works
 
-A recipe is one flat YAML marked `# @package _global_`. Components are `_target_`
-dotpaths, sub-configs are nested `_target_` blocks, shared values are `${...}`
-interpolations. There is no ConfigStore and no registration step.
+A recipe and its optional one-layer base are marked `# @package _global_`.
+Components are `_target_` dotpaths, sub-configs are nested `_target_` blocks,
+and shared runtime values are `${...}` interpolations. There is no ConfigStore
+and no registration step. `lint/check_recipe_composition.py` keeps composition
+bounded, checks references and cycles, and composes every public entry.
 
 Instantiation is a **driver-routes / worker-materializes** split:
 
@@ -85,6 +90,9 @@ table.
   `sync.diffusion`. A dedicated engine must have a compatible sync path.
 - **`# @package _global_` on line 1 is mandatory** — omit it and Hydra nests the
   whole recipe under a bucket key, so `cfg.batch_size` won't resolve.
+- Public entries may reference one private base and must merge `_self_` last;
+  bases cannot contain `defaults:`. This is an intentional reuse boundary, not a
+  general Hydra inheritance system.
 - **`validate_precision_type` validates but does not normalize** — it *returns* the
   canonical alias (`bf16`), but every call site invokes it as a bare statement and
   discards the result. So `model_precision: bfloat16` stays the raw string in `cfg`;

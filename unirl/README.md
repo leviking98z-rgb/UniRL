@@ -119,7 +119,7 @@ before applying the same reward, advantage, and train-stack contracts.
 
 - `trainer/README.md`: the orchestration hub — how a `<Domain>Trainer` places workers and drives the loop.
 - `types/README.md`: the `Sample` / `Part` contract and migration from the retired request/response API.
-- `config/README.md`: flat-recipe config — `require`/precision validators, `_target_` instantiation, cross-component contracts.
+- `config/README.md`: bounded-composition recipes — `require`/precision validators, `_target_` instantiation, cross-component contracts.
 - `rollout/README.md`: rollout modes, engines, and the `Sample` / `Part` generation flow.
 - `rollout/loop/README.md`: agent-loop environments, tools, trajectories, and partial-resume behavior.
 - `train/readme.md`: train stack, FSDP backend, injection, EMA shadow.

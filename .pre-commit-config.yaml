@@ -53,6 +53,15 @@ repos:
         language: python
         pass_filenames: false
         files: \.(ya?ml|py)$
+      # Public recipes may reuse one private canonical base; bases cannot inherit
+      # again. Compose every supported entry so a broken defaults path fails in CI.
+      - id: check-recipe-composition
+        name: recipe composition stays bounded
+        entry: python lint/check_recipe_composition.py
+        language: python
+        additional_dependencies: [hydra-core==1.3.2]
+        pass_filenames: false
+        files: ^examples/.*\.ya?ml$
       # Experimental-tier boundaries: core never imports experimental,
       # packages never import each other, requirements stay additive-only.
       - id: check-experimental-boundaries

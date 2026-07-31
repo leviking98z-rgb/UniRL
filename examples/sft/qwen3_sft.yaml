@@ -19,20 +19,14 @@
 #   ENTRY=train_sft SFT_DATA=data/sft_alpaca/train.jsonl SFT_EVAL_DATA=data/sft_alpaca/val.jsonl \
 #   bash examples/run_experiment_single_node.sh sft/qwen3_sft
 
-num_devices: 8
+defaults:
+  - /_base/sft/train
+  - _self_
 batch_size: 64            # samples per optimizer step (global; must divide dp)
 num_steps: 200            # total optimizer steps (~epochs = num_steps*batch/len(data))
-eval_interval: 20
 eval_batch_size: 16
-eval_num_samples: -1        # -1 = full eval set
-save_interval: 0          # append +save_interval=N +save_dir=... to checkpoint
-save_mode: auto
-
 logging:
-  report_to_wandb: false
-  project_name: unirl-sft
   run_name: qwen3_sft_alpaca
-  entity: null
   tags: [sft, qwen3, llm]
 
 bundle:
@@ -54,50 +48,25 @@ pipeline:
   logprob_precision: fp32
 
 backend:
-  _target_: unirl.train.backend.fsdp.FSDPBackend
   block_class_names: ["Qwen3DecoderLayer"]
-  trainable_attr: transformer
   fsdp_cfg:
-    _target_: unirl.train.configs.FSDPConfig
-    param_dtype: bf16
-    cpu_offload: false
-    mixed_precision: true
-    fsdp_mode: full
     reshard_after_forward: true
     activation_checkpointing: true
-    use_torch_compile: false
   optimizer_cfg:
-    _target_: unirl.train.backend.base.OptimizerConfig
     learning_rate: 1.0e-5
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
     weight_decay: 0.01
   scheduler_cfg:
-    _target_: unirl.train.backend.base.LrSchedulerConfig
     type: cosine
     warmup_steps: 10
-    total_steps: ${num_steps}
-
 algorithm:
   _target_: unirl.algorithms.sft.SFT
   stage_attr: ar
   loss_agg_mode: token-mean      # global token-mean via the stack's token weighting
   conditions_cls:
-    _target_: hydra.utils.get_class
     path: unirl.models.qwen3.conditions.Qwen3ARConditions
 
 stack:
-  _target_: unirl.train.stack.TrainStack
   micro_batch_size: 2
-  max_grad_norm: 1.0
-
 track_builder:
   _target_: unirl.train.sft.track_builder.ARSupervisedTrackBuilder
   max_response_length: 2048
-
-data_source:
-  _target_: unirl.data.sft.SupervisedDataSource
-  manifest_path: ${oc.env:SFT_DATA}
-  eval_manifest_path: ${oc.env:SFT_EVAL_DATA,${oc.env:SFT_DATA}}
-  seed: 42

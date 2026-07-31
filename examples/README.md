@@ -1,10 +1,12 @@
 # Examples
 
-Self-contained Hydra recipes — one YAML per experiment. A recipe is the single
-source of truth for a run: model, algorithm, rollout engine, placement, reward,
-weight sync, and batch geometry, each instantiated directly by `_target_` (no
-Hydra config-group overrides). Recipes are grouped by trainer domain or agentic
-workflow; select one with `--config-name=<group>/<recipe>` (drop the `.yaml`).
+Public Hydra entry recipes — one stable YAML path per experiment. The composed
+entry is the single source of truth for a run: model, algorithm, rollout engine,
+placement, reward, weight sync, and batch geometry, each instantiated directly
+by `_target_`. Repeated family defaults live in one private
+[`_base/`](_base/) layer; public entries contain only their experiment-specific
+overrides. Recipes are grouped by trainer domain or agentic workflow; select one
+with `--config-name=<group>/<recipe>` (drop the `.yaml`).
 
 > This directory replaces the old top-level `recipes/` tree.
 
@@ -109,18 +111,31 @@ Domain-specific trailing qualifiers extend the chain:
 
 ## Adding or editing a recipe
 
-Every recipe **must start with `# @package _global_`** on line 1. Recipes live in
-a domain subdirectory, so without it Hydra would nest the whole config under the
-domain key (e.g. `diffusion.num_devices`) and the entrypoint's top-level fields
-would be missing. Cluster-local paths, model mounts, output dirs, and W&B identity
-stay out of the YAML — pass them as env vars / CLI overrides; recipes read them
-with `${oc.env:...}`.
+Every YAML **must start with `# @package _global_`** on line 1. Recipes live in a
+domain subdirectory, so without it Hydra would nest the config under that path
+(for example `diffusion.num_devices`) and the entrypoint's top-level fields would
+be missing. Cluster-local paths, model mounts, output dirs, and W&B identity stay
+out of the YAML — pass them as env vars / CLI overrides; recipes read them with
+`${oc.env:...}`.
 
-1. Copy the closest existing recipe in the right domain directory.
+Composition is deliberately shallow:
+
+- A public entry may select at most one matching `/_base/...` file, followed by
+  `_self_`, so local values visibly win.
+- A private base never has its own `defaults:` list. Do not build inheritance
+  chains or algorithm × engine × topology config-group matrices.
+- Put a value in a base only when every entry in that family or workflow shares
+  it. Keep choices that distinguish an experiment in its public entry.
+- `_base/` files are implementation details, not supported `--config-name`
+  entrypoints. Existing public paths and CLI overrides remain stable.
+
+1. Copy the closest public entry in the right domain directory.
 2. Keep line 1 as `# @package _global_`; name the file per the schema above.
-3. Keep every choice in YAML, instantiated by `_target_`; use `${oc.env:...}` only
-   for deployment-specific paths and logging identity.
-4. Before opening a PR, run the checks that match the files you touched:
+3. Reuse its canonical base and retain only experiment-specific overrides. Create
+   a new base only when multiple public entries have a meaningful common owner.
+4. Keep every composed choice in YAML, instantiated by `_target_`; use
+   `${oc.env:...}` only for deployment-specific paths and logging identity.
+5. Before opening a PR, run the checks that match the files you touched:
 
 ```bash
 # Compose the recipe and print the resolved config

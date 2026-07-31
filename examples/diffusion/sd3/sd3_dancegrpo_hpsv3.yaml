@@ -16,13 +16,14 @@
 # pins a newer transformers) — host HPSv3 out-of-process via the remote
 # RewardService instead (see sd3_nft_reward_service.yaml, which multiplexes hpsv3).
 
+defaults:
+  - /_base/diffusion/sd3
+  - _self_
 num_devices: 16               # 2 nodes x 8 GPUs (v1 actor_count 16)
 batch_size: 48                # prompts_per_rollout
-adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 num_rollouts: 10000
 
 bundle:
-  _target_: unirl.models.sd3.bundle.SD3Bundle.from_config
   config:
     _target_: unirl.models.sd3.config.SD3PipelineConfig
     pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
@@ -30,40 +31,12 @@ bundle:
     shift: 3.0
 
 pipeline:
-  _target_: unirl.models.sd3.pipeline.SD3Pipeline
-  shift: 3.0
-  autocast_precision: bf16
-  trajectory_precision: bf16
-  logprob_precision: fp32
-  # DanceGRPO: Dance SDE kernel (the one algorithmic difference from FlowGRPO).
   strategy:
     _target_: unirl.sde.kernels.DanceSDEStrategy
 
 backend:
-  _target_: unirl.train.backend.fsdp.FSDPBackend
-  block_class_names: ["JointTransformerBlock"]
-  trainable_attr: transformer
-  fsdp_cfg:
-    _target_: unirl.train.configs.FSDPConfig
-    param_dtype: bf16
-    cpu_offload: false
-    mixed_precision: true
-    fsdp_mode: full
-    reshard_after_forward: false  # SD3.5-medium is small (~5 GB bf16 full); keep params gathered, skip bwd re-gather
-    activation_checkpointing: false  # v1 base flowgrpo_fast_sd3_trainside = bf16_full_noac
-    use_torch_compile: false
   optimizer_cfg:
-    _target_: unirl.train.backend.base.OptimizerConfig
-    learning_rate: 3.0e-4
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
     weight_decay: 0.0
-  scheduler_cfg:
-    _target_: unirl.train.backend.base.LrSchedulerConfig
-    type: constant
-    warmup_steps: 0
-    total_steps: 10000
   lora_cfg:
     _target_: unirl.train.configs.LoraConfig
     rank: 32
@@ -87,55 +60,27 @@ rollout:
   forward_batch_size: 8            # v1 flowgrpo_fast_sd3_trainside
 
 reward:
-  _target_: unirl.reward.service.RewardService
   backend:
     _target_: unirl.reward.local.hpsv3.HPSv3RewardScorer
     base_device: cuda
     config:
       _target_: unirl.reward.local.hpsv3.HPSv3Spec
-      batch_size: 8
       device: auto
 
 algorithm:
   _target_: unirl.algorithms.flowgrpo.FlowGRPO
-  stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant
   old_logp_source: replay
-  conditions_cls:
-    _target_: hydra.utils.get_class
-    path: unirl.models.sd3.conditions.SD3Conditions
-  params: ${sampling}
-
 stack:
-  _target_: unirl.train.stack.TrainStack
   micro_batch_size: 8
-  max_grad_norm: 1.0
   num_updates_per_batch: 2      # PPO mini-batches per rollout (π_old frozen once); v1 parity
 
-data_source:
-  _target_: unirl.data.data_source.MultimodalRLDataSource
-  args:
-    run:
-      data_path: datasets/pickscore/train.txt
-      eval_data_path: datasets/pickscore/test.txt
-      seed: 42
-    algorithm:
-      prompts_per_rollout: ${batch_size}
-
 sampling:
-  _target_: unirl.types.sampling.DiffusionSamplingParams
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
   eta: 0.7
-  samples_per_prompt: 16
-  seed: 42
   init_same_noise: false
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler
-    num_timesteps: ${..num_inference_steps}
     timestep_fraction: [0.0, 0.5]   # SDE steps drawn from the first half (v1)
     num_sde_steps: 3
 
