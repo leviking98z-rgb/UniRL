@@ -11,6 +11,7 @@ import torch
 from PIL import Image
 
 from unirl.reward.base import BaseRewardComponentSpec, RewardBackend
+from unirl.types.primitives import Video
 from unirl.types.reward import RewardRequest, RewardResponse
 
 from .registry import (
@@ -53,7 +54,7 @@ class VideoRewardScorer(RewardBackend):
             return self.frame_scorer.compute_rewards(request)
 
         start = time.time()
-        videos = request.videos
+        videos = request.video_items or []
         prompts = request.prompts
 
         try:
@@ -98,37 +99,16 @@ class VideoRewardScorer(RewardBackend):
                 compute_time=time.time() - start,
             )
 
-    def _sample_frames(self, video: torch.Tensor) -> List[Image.Image]:
-        from torchvision.transforms.functional import to_pil_image
+    def _sample_frames(self, video: Video) -> List[Image.Image]:
+        sampled = Video(frames=video.sample_uniform(self.sample_frames))
+        return sampled.to_pils()
 
-        if video.dim() == 4:
-            video = video.permute(1, 0, 2, 3)
-        elif video.dim() == 5:
-            video = video.squeeze(0).permute(1, 0, 2, 3)
-
-        num_frames = video.shape[0]
-        indices = torch.linspace(0, num_frames - 1, self.sample_frames).long()
-
-        frames = []
-        for idx in indices:
-            frame = video[idx]
-            if frame.max() <= 1.0:
-                frame = (frame * 255).byte()
-            frames.append(to_pil_image(frame))
-
-        return frames
-
-    def _compute_temporal_consistency(self, video: torch.Tensor) -> float:
-        if video.dim() == 4:
-            video = video.permute(1, 0, 2, 3)
-        elif video.dim() == 5:
-            video = video.squeeze(0).permute(1, 0, 2, 3)
-
+    def _compute_temporal_consistency(self, video: Video) -> float:
+        frames = video.as_tchw()
         frame_diffs = []
-        for i in range(len(video) - 1):
-            diff = (video[i] - video[i + 1]).abs().mean()
+        for i in range(len(frames) - 1):
+            diff = (frames[i] - frames[i + 1]).abs().mean()
             frame_diffs.append(diff.item())
-
         avg_diff = sum(frame_diffs) / len(frame_diffs) if frame_diffs else 0
         return max(0.0, 1 - avg_diff)
 

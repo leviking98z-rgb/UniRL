@@ -157,8 +157,8 @@ def build_media_preview_for_part(
       alpha / model-specific 4th channel so wandb gets RGB.
     - **Video path** (``isinstance(part.primitives["video"], Videos)``): reads
       per-sample 4D ``[C, T, H, W]`` CPU ``float32`` tensors via
-      ``Videos.to_list()`` + ``permute(1, 0, 2, 3)``; keeps them raw,
-      NOT pre-built ``wandb.Video`` (encoding is owned by
+      each canonical ``Video`` object's explicit compatibility adapter; keeps
+      them raw, NOT pre-built ``wandb.Video`` (encoding is owned by
       ``UniRLWandBLogger.log_generated_media``).
 
     Returns ``None`` when the Part's primitive map contains neither ``Images``
@@ -223,10 +223,11 @@ def build_media_preview_for_part(
         for idx, video in enumerate(per_sample):
             if len(selected_indices) >= limit:
                 break
-            frames = video.frames
-            if frames.dim() != 4:
+            try:
+                frames = video.to_cthw()
+            except (TypeError, ValueError):
                 continue
-            videos.append(frames.permute(1, 0, 2, 3).contiguous().detach().cpu().to(dtype=torch.float32))
+            videos.append(frames.detach().cpu().to(dtype=torch.float32))
             selected_indices.append(idx)
 
     if not selected_indices:
