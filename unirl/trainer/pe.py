@@ -10,7 +10,7 @@ One ``train_step``::
     rollout.generate(sample)         → 3-part Sample [input, ar, diffusion]
     reward.score_and_attach(sample)  → score the frontier (image) Part only
     sample.propagate_rewards("mean") → credit-assign image reward up to "ar"
-    part.compute_advantages()        → per-Part GRPO (ar by prompt, diff by rewrite)
+    AdvantageEstimator per Part      → GRPO (ar by prompt, diff by rewrite)
     {name}.stack.train_track(part)   → route each Part to its own model
 
 Mirrors :class:`~unirl.trainer.diffusion.DiffusionTrainer` but wires two
@@ -32,11 +32,12 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.models.pe.pipeline import PEPipeline
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
+from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict, prepare_input_sample
 from unirl.trainer.eval_suites import build_eval_suites
 from unirl.types.sample import Sample
 from unirl.types.sampling import ARSamplingParams, BaseSamplingParams, DiffusionSamplingParams
@@ -97,6 +98,7 @@ class PETrainer(BaseTrainer):
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
         logging_cfg: Optional[DictConfig] = None,
+        advantage_cfg: Optional[DictConfig] = None,
         enable_fsdp_offload: bool = False,
         pe_cfg: Optional[DictConfig] = None,
         freeze_llm: bool = False,
@@ -136,6 +138,10 @@ class PETrainer(BaseTrainer):
             raise ValueError(
                 f"PETrainer.diffusion_group_scope must be 'rewrite' or 'prompt'; got {diffusion_group_scope!r}."
             )
+        self.advantage_estimator = build_advantage_estimator(
+            advantage_cfg,
+            default=GroupedAdvantageEstimator(),
+        )
 
         # Periodic eval on the eval set (run.eval_data_path), logged under eval/*;
         # eval_interval=0 disables it. Scores only the image ("diffusion") track,
@@ -367,7 +373,11 @@ class PETrainer(BaseTrainer):
         for name in self._train_tracks:
             idx = parts_by_name[name]
             layer = 0 if (name == "diffusion" and self._diffusion_group_scope == "prompt") else None
-            new_parts[idx] = new_parts[idx].compute_advantages(normalize=True, group_layer=layer)
+            new_parts[idx] = estimate_part_advantages(
+                new_parts[idx],
+                self.advantage_estimator,
+                group_layer=layer,
+            )
         sample = sample.with_parts(new_parts)
 
         # Captions for the image previews fall back to the frontier-aligned prompt

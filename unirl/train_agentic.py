@@ -45,6 +45,7 @@ def main(cfg: DictConfig) -> None:
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
         logging_cfg=cfg.get("logging"),
+        advantage_cfg=cfg.get("advantage"),
         adv_normalization_scope=cfg.get("adv_normalization_scope", "group"),
         normalize_adv_by_std=cfg.get("normalize_adv_by_std", True),
         balance_shards=cfg.get("balance_shards", False),

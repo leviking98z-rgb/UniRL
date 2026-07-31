@@ -10,7 +10,7 @@ path (``sample_ids``; see ``unirl/types/README.md`` and
 only input Part(s); ``fork``
 appends a generation shell and the fill step populates it. Conditioning is collected
 from the ancestor prefix as primitives (:meth:`Sample.conditioning`), not stored.
-Reward/advantage/split machinery is ported from ``rollout_resp.py``.
+Reward propagation and split machinery is ported from ``rollout_resp.py``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from unirl.distributed.tensor.batch import (
     max_field,
     shared_field,
 )
-from unirl.distributed.tensor.ref import hydrate
 from unirl.types.conditions import Condition
 from unirl.types.media_preview import MediaPreview
 from unirl.types.primitives import Audios, Images, Texts, Videos, primitive_modality_key
@@ -348,76 +347,6 @@ class Part(Batch):
                 kwargs[name] = value
         return type(self)(**kwargs)
 
-    def compute_advantages(
-        self,
-        normalize: bool = True,
-        eps: float = 1e-8,
-        scope: str = "group",
-        use_global_std: bool = False,
-        group_layer: Optional[int] = None,
-    ) -> "Part":
-        """GRPO per-group advantage ``(reward - group_mean) / (group_std + eps)``.
-
-        ``scope`` picks the normalization mode: ``"group"`` (default) normalizes
-        per group; ``"global"`` z-scores the whole batch (unbiased std — the
-        historical convention) and ignores the grouping knobs. Under
-        ``scope="group"``, ``group_layer`` picks the lineage layer whose ancestor
-        id labels the groups (the id's first ``layer + 1`` segments): ``None``
-        (default) groups by the immediate parent (:attr:`group_ids`; a root part
-        degenerates to per-sample groups → advantage 0), ``0`` by the root prompt.
-        Labels must be group-by-parent contiguous with uniform branching (``fork``
-        guarantees this at every layer), so the reduce is one ``view``.
-        ``use_global_std`` keeps per-group means but one batch-wide std. Population
-        std (``unbiased=False``) makes ``branch=1`` degenerate to advantage 0.
-        """
-        if self.rewards is None:
-            raise ValueError("Part.compute_advantages: part has no rewards")
-        n = len(self.sample_ids)
-        if n == 0:
-            return self
-
-        # rewards may arrive as a TensorRef proxy from the reward workers; hydrate.
-        rewards_local = hydrate(self.rewards)
-
-        if scope == "global":
-            rewards_g = rewards_local.to(torch.float32)
-            if normalize:
-                adv_g = (rewards_g - rewards_g.mean()) / (rewards_g.std() + eps)
-            else:
-                adv_g = rewards_g - rewards_g.mean()
-            return _part_with_field(self, "advantages", adv_g)
-
-        layer = group_layer if group_layer is not None else max(self.sample_ids[0].count("/") - 1, 0)
-        group_labels = [ancestor_id(sid, layer) for sid in self.sample_ids]
-
-        unique_pids = list(dict.fromkeys(group_labels))
-        n_groups = len(unique_pids)
-        if n % n_groups != 0:
-            raise ValueError(
-                f"compute_advantages: non-uniform group sizes (n={n}, n_groups={n_groups}). "
-                f"Expected uniform branching with group-by-parent ordering — use fork to build the Part."
-            )
-        branch = n // n_groups
-        expected = [pid for pid in unique_pids for _ in range(branch)]
-        if list(group_labels) != expected:
-            raise ValueError(
-                "compute_advantages: grouping labels not in group-by-parent contiguous order. "
-                "Siblings must be consecutive (use fork), got interleaved ordering."
-            )
-
-        rewards = rewards_local.to(torch.float32)
-        reshaped = rewards.view(n_groups, branch)
-        mean = reshaped.mean(dim=1, keepdim=True)
-        if normalize:
-            if use_global_std:
-                std = rewards.std() + eps
-            else:
-                std = (reshaped.var(dim=1, unbiased=False, keepdim=True) + eps).sqrt()
-            adv = (reshaped - mean) / std
-        else:
-            adv = reshaped - mean
-        return _part_with_field(self, "advantages", adv.flatten())
-
 
 def _part_with_field(part: Part, field_name: str, value: Any) -> Part:
     """Copy of ``part`` with one field replaced."""
@@ -535,9 +464,10 @@ class Sample(Batch):
         the lineage, so no walk is needed).
 
         Groups a descendant Part by the prompt it descends from (coarser than its
-        immediate parent) for GRPO — what ``compute_advantages(group_layer=0)``
-        uses. The labels stay group-by-parent contiguous (the lineage keeps a
-        prompt's samples consecutive)."""
+        immediate parent) for GRPO — what
+        ``estimate_part_advantages(..., group_layer=0)`` uses. The labels stay
+        group-by-parent contiguous (the lineage keeps a prompt's samples
+        consecutive)."""
         if not self.parts:
             return []
         return [ancestor_id(sid, 0) for sid in self.parts[part_index].sample_ids]

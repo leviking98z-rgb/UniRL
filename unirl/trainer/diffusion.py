@@ -8,11 +8,12 @@ import torch
 from hydra.utils import get_class, get_object, instantiate
 from omegaconf import DictConfig
 
+from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.config.execution import Capability
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
+from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict, prepare_input_sample
 from unirl.trainer.eval_suites import EvalRewardSuite, build_eval_suites
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
@@ -46,6 +47,7 @@ class DiffusionTrainer(BaseTrainer):
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
         logging_cfg: Optional[DictConfig] = None,
+        advantage_cfg: Optional[DictConfig] = None,
         layout: str = "colocate",
         train_fraction: float = 0.5,
         reward_fraction: float = 0.0,
@@ -70,11 +72,15 @@ class DiffusionTrainer(BaseTrainer):
         # default; only safe (and only set true) for layout=="colocate" with a
         # SEPARATE engine rollout under GRPO — gated again in train_step.
         self._enable_fsdp_offload = bool(enable_fsdp_offload)
-        # FlowDPPO advantage parity: when True, Part.compute_advantages
-        # keeps the per-group mean but divides by ONE batch-wide std (the v1
+        # FlowDPPO advantage parity: when True, grouped estimation keeps the
+        # per-group mean but divides by ONE batch-wide std (the v1
         # ``use_global_std=True`` scale) instead of each prompt's own std. Off by
         # default → unchanged per-group GRPO normalization for every other recipe.
         self._adv_use_global_std = bool(adv_use_global_std)
+        self.advantage_estimator = build_advantage_estimator(
+            advantage_cfg,
+            default=GroupedAdvantageEstimator(use_global_std=self._adv_use_global_std),
+        )
         # Periodic eval on the eval set (run.eval_data_path), logged under eval/*.
         # eval_interval=0 disables it (zero-impact for runs that don't set it).
         # Diffusion eval generates at the deterministic best-quality setting
@@ -515,7 +521,7 @@ class DiffusionTrainer(BaseTrainer):
             if isinstance(part.component_rewards, dict):
                 part.component_rewards = {name: hydrate(value) for name, value in part.component_rewards.items()}
             mean_reward = float(part.rewards.to(torch.float32).mean().item())
-            part = part.compute_advantages(normalize=True, use_global_std=self._adv_use_global_std)
+            part = estimate_part_advantages(part, self.advantage_estimator)
             sample = sample.with_parts([*sample.parts[:-1], part])
 
         self._drop_decoded(sample, rollout_id=rollout_id)

@@ -19,8 +19,9 @@ exactly **one** `RewardBackend`: either a local in-process scorer (PickScore, HP
 CLIP, OCR, GenEval2, math, multiple-choice, video, …) or `RemoteRewardBackend`, a
 thin HTTP client for the standalone server in `unirl-reward-service/`.
 
-Turning rewards into advantages is the trainer's job
-(`Part.compute_advantages`); generating the media is the rollout engine's.
+Turning rewards into advantages belongs to the selected
+`unirl.algorithms.advantage.AdvantageEstimator`; generating the media is the
+rollout engine's.
 
 ## Why it exists
 

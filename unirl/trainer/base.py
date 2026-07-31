@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.algorithms.advantage import AdvantageEstimator
 from unirl.config.execution import ExecutionPlan, LoopKind, PlacementMode
 from unirl.distributed.group.device_pool import DevicePool
 from unirl.types.primitives import Texts
@@ -29,6 +30,19 @@ _TEARDOWN_FLUSH_TIMEOUT_S = float(os.environ.get("UNIRL_TEARDOWN_FLUSH_TIMEOUT_S
 # contexts. Keep engine shutdown bounded so DevicePool teardown still gets a
 # chance to kill actors and release GPUs if one engine is wedged mid-generate.
 _ROLLOUT_SHUTDOWN_TIMEOUT_S = 60.0
+
+
+def build_advantage_estimator(
+    config: Optional[DictConfig],
+    *,
+    default: AdvantageEstimator,
+) -> AdvantageEstimator:
+    """Materialize an optional driver-side estimator component."""
+
+    estimator = default if config is None else instantiate(config)
+    if not isinstance(estimator, AdvantageEstimator):
+        raise TypeError(f"advantage config must build an AdvantageEstimator; got {type(estimator).__name__}.")
+    return estimator
 
 
 def prepare_input_sample(

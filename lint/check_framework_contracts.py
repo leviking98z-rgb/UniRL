@@ -12,6 +12,8 @@ torch/Ray/engine packages:
 * the FSDP and VeOmni backend leaves implement the shared backend hook surface;
 * ``Sample``/``Part`` retain the request/fork/fill and batch-algebra seam used by
   rollout, reward, and train;
+* advantage estimators own reward normalization/value-target policy instead of
+  growing methods on the ``Part`` wire type;
 * trainer variants select explicit loop programs instead of copying ``train``;
 * every ``train_*.py`` entrypoint exposes ``main`` and selects exactly one trainer
   module.
@@ -370,6 +372,46 @@ def check_sample_contract(errors: list[str], simple: dict[str, list[ClassInfo]])
     return len(expected)
 
 
+def check_advantage_estimators(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
+    expected = {
+        "AdvantageBatch": {
+            "fields": ("rewards", "group_ids", "component_rewards", "values", "mask"),
+        },
+        "AdvantageEstimate": {
+            "fields": ("advantages", "returns"),
+        },
+        "AdvantageEstimator": {
+            "methods": ("estimate", "requires_group_ids"),
+        },
+        "GroupedAdvantageEstimator": {
+            "methods": ("estimate", "requires_group_ids"),
+        },
+        "GeneralizedAdvantageEstimator": {
+            "methods": ("estimate", "requires_group_ids"),
+        },
+    }
+    for name, contract in expected.items():
+        matches = [info for info in simple.get(name, ()) if info.module == "unirl.algorithms.advantage"]
+        if len(matches) != 1:
+            errors.append(f"unirl/algorithms/advantage.py: expected one {name} class, found {len(matches)}")
+            continue
+        _require_members(
+            errors,
+            matches[0],
+            kind="advantage contract",
+            methods=contract.get("methods", ()),
+            fields=contract.get("fields", ()),
+            simple=simple,
+        )
+
+    parts = [info for info in simple.get("Part", ()) if info.module == "unirl.types.sample"]
+    if len(parts) == 1 and "compute_advantages" in parts[0].methods:
+        errors.append(
+            "unirl/types/sample.py: Part must remain a wire type; advantage policy belongs in unirl.algorithms"
+        )
+    return len(expected)
+
+
 def check_loop_programs(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
     expected = {
         "TrainerLifecycle": ("start", "__enter__", "__exit__"),
@@ -473,6 +515,7 @@ def main() -> int:
         "model pipelines": check_model_pipelines(errors, simple),
         "train backends": check_train_backends(errors, simple),
         "wire types": check_sample_contract(errors, simple),
+        "advantage contracts": check_advantage_estimators(errors, simple),
         "loop programs": check_loop_programs(errors, simple),
         "entrypoints": check_entrypoints(errors),
     }

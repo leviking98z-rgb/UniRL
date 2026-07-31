@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from omegaconf import OmegaConf
 
-from unirl.algorithms.normalizers import build_group_index_map
+from unirl.algorithms.advantage import AdvantageBatch, GroupedAdvantageEstimator
 from unirl.config.execution import LoopKind
 from unirl.distributed.tensor import hydrate
 from unirl.train.stack import TrainStepResult
@@ -124,7 +124,16 @@ class AgenticTrainer(ARTrainer):
 
     def __init__(self, *, stop: Optional[List[str]] = None, **kwargs) -> None:
         _validate_agentic_cfg(kwargs)
+        custom_advantage = kwargs.get("advantage_cfg") is not None
         super().__init__(**kwargs)
+        if not custom_advantage:
+            self.advantage_estimator = GroupedAdvantageEstimator(
+                scope=self.adv_normalization_scope,
+                normalize=self.normalize_adv_by_std,
+                global_std_unbiased=False,
+                exclude_non_finite=True,
+                variance_epsilon=False,
+            )
         # Per-turn stop: a tool-call turn ends at ``</tool_call>`` and yields to the
         # tool; a final-answer turn runs to EOS. Rides the request root's control bag
         # (``resolve_sampling`` reads ``control["ar"]``).
@@ -204,12 +213,17 @@ class AgenticTrainer(ARTrainer):
         ``extra_metrics`` are merged into the logged ``agent/*`` metrics (e.g. the partial
         trainer's committed/carried/dropped counts)."""
         # A NaN reward marks a crashed trajectory (env bug, not a policy outcome) —
-        # excluded from the reported mean and from GRPO (see _group_advantages).
+        # excluded from the reported mean and from grouped estimation.
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
 
         # GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
-        advantages = self._group_advantages(rewards, group_ids)
+        advantages = self.advantage_estimator.estimate(AdvantageBatch(rewards=rewards, group_ids=group_ids)).advantages
+        if advantages.ndim != 1 or int(advantages.shape[0]) != len(trajs):
+            raise ValueError(
+                f"{type(self.advantage_estimator).__name__} returned shape={tuple(advantages.shape)} "
+                f"for {len(trajs)} agentic trajectories."
+            )
 
         # Assign each trajectory's scalar advantage to ALL its assistant turns; gather.
         train_parts: List[Part] = []
@@ -316,7 +330,7 @@ class AgenticTrainer(ARTrainer):
         scoring = self.reward.score_and_attach(scoring)
         rewards = hydrate(scoring.parts[-1].rewards).to(torch.float32)
         # A failed trajectory was still graded above (its empty answer scores as a
-        # miss); overwrite with NaN so _group_advantages excludes it from the group's
+        # miss); overwrite with NaN so the estimator excludes it from the group's
         # mean/std and gives it zero advantage instead of a real negative signal.
         failed = torch.tensor([_is_failed(tr) for tr in trajs], dtype=torch.bool)
         if bool(failed.any()):
@@ -347,39 +361,6 @@ class AgenticTrainer(ARTrainer):
         frontier = _part_with_field(log_sample.parts[-1], "rewards", rewards.to(torch.float32))
         frontier = _part_with_field(frontier, "advantages", advantages.to(torch.float32))
         return log_sample.with_parts([*log_sample.parts[:-1], frontier])
-
-    def _group_advantages(self, rewards: torch.Tensor, group_ids: List[str]) -> torch.Tensor:
-        """Group-relative GRPO advantages, ``ARTrainer.compute_advantages`` parity
-        (population std), over the ``n`` siblings of each prompt (grouped by root id;
-        completion order is fine). ``adv_normalization_scope='global'`` z-scores the
-        whole batch; ``normalize_adv_by_std=False`` mean-centers only."""
-        r = rewards.to(torch.float32)
-        # NaN reward = crashed trajectory: excluded from the group's mean/std and given
-        # ZERO advantage (neutral), so an env crash neither rewards nor penalizes its
-        # actions. All-finite (the answer-graded path) is byte-identical to before.
-        finite = torch.isfinite(r)
-        if self.adv_normalization_scope == "global":
-            rf = r[finite]
-            mean = rf.mean() if rf.numel() else r.new_zeros(())
-            centered = torch.where(finite, r - mean, torch.zeros_like(r))
-            if self.normalize_adv_by_std:
-                std = rf.std(unbiased=False) if rf.numel() > 1 else r.new_ones(())
-                centered = centered / (std + 1e-8)
-            return torch.where(finite, centered, torch.zeros_like(centered))
-        adv = torch.zeros_like(r)
-        for idxs in build_group_index_map(group_ids).values():
-            idx = torch.tensor(idxs, dtype=torch.long)
-            fin = finite[idx]
-            g = r[idx]
-            gf = g[fin]
-            if gf.numel() == 0:
-                continue  # whole group crashed -> zero advantage
-            centered = g - gf.mean()
-            if self.normalize_adv_by_std:
-                std = gf.std(unbiased=False) if gf.numel() > 1 else g.new_ones(())
-                centered = centered / (std + 1e-8)
-            adv[idx] = torch.where(fin, centered, torch.zeros_like(centered))
-        return adv
 
     def _pad_to_dp_multiple(self, part: Part) -> Part:
         """Pad ``part`` up to a multiple of the train DP size by replicating the

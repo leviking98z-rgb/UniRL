@@ -47,6 +47,7 @@ from typing import Any, List, Optional, Tuple
 
 import torch
 
+from unirl.algorithms.advantage import estimate_part_advantages
 from unirl.config.execution import LoopKind, PlacementMode
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.async_runtime import InflightGeneration
@@ -145,7 +146,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
             if isinstance(part.component_rewards, dict):
                 part.component_rewards = {name: hydrate(value) for name, value in part.component_rewards.items()}
             mean_reward = float(part.rewards.to(torch.float32).mean().item())
-        part = part.compute_advantages(normalize=True, use_global_std=self._adv_use_global_std)
+        part = estimate_part_advantages(part, self.advantage_estimator)
         sample = sample.replace_frontier(part)
         result = self.stack.train_track(sample.parts[-1], training_progress=float(training_progress))
         self.wandb_logger.log_rollout_step(rollout_id, result, sample, step_time_s=time.perf_counter() - t0)
