@@ -14,6 +14,7 @@ methods don't thread them.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from importlib import import_module
 from typing import Any, Dict, List, Optional, Tuple
 
 from unirl.config.require import require
@@ -26,12 +27,33 @@ from unirl.types.rollout_resp import RolloutResp
 # --------------------------------------------------------------------------- #
 
 _REGISTRY: Dict[str, type["ModelAdapter"]] = {}
+_BUILTIN_ADAPTERS = {
+    "flux": "unirl.rollout.engine.sglang_diffusion.adapters.flux:FluxAdapter",
+    "flux2_klein": "unirl.rollout.engine.sglang_diffusion.adapters.flux:Flux2KleinAdapter",
+    "hunyuan_video": "unirl.rollout.engine.sglang_diffusion.adapters.video:HunyuanVideoAdapter",
+    "mochi": "unirl.rollout.engine.sglang_diffusion.adapters.video:MochiAdapter",
+    "qwen_image": "unirl.rollout.engine.sglang_diffusion.adapters.qwen_image:QwenImageAdapter",
+    "qwen_image_edit_plus": (
+        "unirl.rollout.engine.sglang_diffusion.adapters.qwen_image_edit_plus:QwenImageEditPlusAdapter"
+    ),
+    "sd3": "unirl.rollout.engine.sglang_diffusion.adapters.sd3:SD3Adapter",
+    "wan21": "unirl.rollout.engine.sglang_diffusion.adapters.video:Wan21T2VAdapter",
+    "wan22": "unirl.rollout.engine.sglang_diffusion.adapters.video:Wan22T2VAdapter",
+    "z_image": "unirl.rollout.engine.sglang_diffusion.adapters.z_image:ZImageAdapter",
+}
 
 
 def register_adapter(key: str):
     """Class decorator: register an adapter under its ``model_family`` key."""
 
     def deco(cls: type["ModelAdapter"]) -> type["ModelAdapter"]:
+        builtin = _BUILTIN_ADAPTERS.get(key)
+        if builtin is not None:
+            expected_module, expected_name = builtin.split(":", 1)
+            require(
+                (cls.__module__, cls.__name__) == (expected_module, expected_name),
+                f"adapter key {key!r} is reserved for {builtin}",
+            )
         require(
             key not in _REGISTRY,
             f"adapter key {key!r} already registered by {_REGISTRY.get(key)!r}",
@@ -44,16 +66,26 @@ def register_adapter(key: str):
 
 
 def get_adapter(key: str) -> type["ModelAdapter"]:
-    """Look up the adapter class for a ``model_family`` key."""
+    """Look up an adapter class, importing its module only on first use."""
+    if key in _REGISTRY:
+        return _REGISTRY[key]
+
     require(
-        key in _REGISTRY,
-        f"unknown model_family {key!r}; registered: {sorted(_REGISTRY)}",
+        key in _BUILTIN_ADAPTERS,
+        f"unknown model_family {key!r}; registered: {list(registered_adapters())}",
     )
-    return _REGISTRY[key]
+    module_name, class_name = _BUILTIN_ADAPTERS[key].split(":", 1)
+    module = import_module(module_name)
+    adapter_cls = getattr(module, class_name)
+    require(
+        _REGISTRY.get(key) is adapter_cls,
+        f"built-in adapter {key!r} did not register {_BUILTIN_ADAPTERS[key]}",
+    )
+    return adapter_cls
 
 
 def registered_adapters() -> Tuple[str, ...]:
-    return tuple(sorted(_REGISTRY))
+    return tuple(sorted(_BUILTIN_ADAPTERS.keys() | _REGISTRY.keys()))
 
 
 # --------------------------------------------------------------------------- #

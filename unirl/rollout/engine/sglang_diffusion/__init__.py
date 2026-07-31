@@ -9,12 +9,10 @@ ServerArgs intent. Coexists with the legacy ``sglang`` engine; recipes opt in by
 pointing the rollout ``_target_``s at this engine + config (wired by ``_target_``
 only; the actor constructs the engine via ``config.make_engine``).
 
-Importing this package populates the adapter registry (the ``adapters`` import
-fires the ``@register_adapter`` side-effects).
+Adapter modules are loaded lazily when the configured ``model_family`` is
+selected, so importing this package does not initialize unrelated model paths.
 """
 
-# Import adapters first so the registry is populated before config validation.
-from unirl.rollout.engine.sglang_diffusion import adapters  # noqa: F401
 from unirl.rollout.engine.sglang_diffusion.config import (
     SGLangDiffusionEngineConfig,
     SGLangDiffusionPorts,
