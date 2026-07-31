@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List, Sequence, Tuple
 
 import torch
 
@@ -12,6 +12,33 @@ from unirl.reward.local.device import resolve_device
 from unirl.types.reward import RewardRequest
 
 from .base import LocalRewardBackend
+
+
+def _extract_tensor(output: Any) -> torch.Tensor:
+    if isinstance(output, torch.Tensor):
+        return output
+    if hasattr(output, "pooler_output") and output.pooler_output is not None:
+        return output.pooler_output
+    if hasattr(output, "last_hidden_state") and output.last_hidden_state is not None:
+        return output.last_hidden_state[:, 0]
+    if isinstance(output, (tuple, list)):
+        return output[0]
+    raise TypeError(f"Unexpected output format: {type(output)}")
+
+
+def _deduplicate_prompts(prompts: Sequence[str]) -> Tuple[List[str], List[int]]:
+    """Return first-seen prompts and an index that restores the original order."""
+    unique: List[str] = []
+    positions: dict[str, int] = {}
+    inverse: List[int] = []
+    for prompt in prompts:
+        position = positions.get(prompt)
+        if position is None:
+            position = len(unique)
+            positions[prompt] = position
+            unique.append(prompt)
+        inverse.append(position)
+    return unique, inverse
 
 
 class PickScoreRewardScorer(LocalRewardBackend):
@@ -71,20 +98,28 @@ class PickScoreRewardScorer(LocalRewardBackend):
         prompts = request.prompts
         all_rewards: List[float] = []
 
-        def _extract_tensor(output):
-            if isinstance(output, torch.Tensor):
-                return output
-            if hasattr(output, "pooler_output") and output.pooler_output is not None:
-                return output.pooler_output
-            if hasattr(output, "last_hidden_state") and output.last_hidden_state is not None:
-                return output.last_hidden_state[:, 0]
-            if isinstance(output, (tuple, list)):
-                return output[0]
-            raise TypeError(f"Unexpected output format: {type(output)}")
+        # GRPO repeats every prompt for the whole sample group (typically
+        # 16 candidates). Encode each distinct prompt once per reward request,
+        # then gather the embeddings back to sample order. The previous
+        # batch-local path redundantly ran the text tower once per image.
+        unique_prompts, prompt_inverse = _deduplicate_prompts(prompts)
+        text_inputs = self.processor(
+            text=unique_prompts,
+            padding=True,
+            truncation=True,
+            max_length=77,
+            return_tensors="pt",
+        )
+        text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
+        with torch.no_grad():
+            unique_text_embs = _extract_tensor(self.model.get_text_features(**text_inputs))
+            unique_text_embs = unique_text_embs / unique_text_embs.norm(p=2, dim=-1, keepdim=True)
+            prompt_inverse_tensor = torch.tensor(prompt_inverse, device=unique_text_embs.device)
+            text_embs = unique_text_embs.index_select(0, prompt_inverse_tensor)
+            logit_scale = self.model.logit_scale.exp()
 
         for i in range(0, len(images), self.batch_size):
             batch_images = images[i : i + self.batch_size]
-            batch_prompts = prompts[i : i + self.batch_size]
 
             image_inputs = self.processor(
                 images=batch_images,
@@ -95,27 +130,13 @@ class PickScoreRewardScorer(LocalRewardBackend):
             )
             image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
 
-            text_inputs = self.processor(
-                text=batch_prompts,
-                padding=True,
-                truncation=True,
-                max_length=77,
-                return_tensors="pt",
-            )
-            text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
-
             with torch.no_grad():
                 image_embs = self.model.get_image_features(**image_inputs)
                 image_embs = _extract_tensor(image_embs)
                 image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True)
 
-                text_embs = self.model.get_text_features(**text_inputs)
-                text_embs = _extract_tensor(text_embs)
-                text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True)
-
-                logit_scale = self.model.logit_scale.exp()
-                scores = logit_scale * (text_embs @ image_embs.T)
-                scores = scores.diag() / 26
+                batch_text_embs = text_embs[i : i + len(batch_images)]
+                scores = logit_scale * (batch_text_embs * image_embs).sum(dim=-1) / 26
                 all_rewards.extend(scores.cpu().tolist())
 
         return all_rewards
@@ -130,17 +151,6 @@ class PickScoreRewardScorer(LocalRewardBackend):
         → ``[B]`` reward with ``grad_fn``. Reuses the frozen CLIP module; only the
         image path keeps grad (text + logit_scale are constants)."""
 
-        def _extract_tensor(output):
-            if isinstance(output, torch.Tensor):
-                return output
-            if hasattr(output, "pooler_output") and output.pooler_output is not None:
-                return output.pooler_output
-            if hasattr(output, "last_hidden_state") and output.last_hidden_state is not None:
-                return output.last_hidden_state[:, 0]
-            if isinstance(output, (tuple, list)):
-                return output[0]
-            raise TypeError(f"Unexpected output format: {type(output)}")
-
         if images_tensor.ndim != 4:
             raise ValueError(
                 f"PickScore.compute_rewards_differentiable: expected [B, C, H, W], got {tuple(images_tensor.shape)}"
@@ -148,30 +158,33 @@ class PickScoreRewardScorer(LocalRewardBackend):
         images_tensor = images_tensor.to(device=self.device, dtype=torch.float32)
         pixel_values = self._clip_tform(images_tensor)
 
+        unique_prompts, prompt_inverse = _deduplicate_prompts(prompts)
+        text_inputs = self.processor(
+            text=unique_prompts,
+            padding=True,
+            truncation=True,
+            max_length=77,
+            return_tensors="pt",
+        )
+        text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
+        with torch.no_grad():
+            unique_text_embs = _extract_tensor(self.model.get_text_features(**text_inputs))
+            unique_text_embs = unique_text_embs / unique_text_embs.norm(p=2, dim=-1, keepdim=True)
+            prompt_inverse_tensor = torch.tensor(prompt_inverse, device=unique_text_embs.device)
+            text_embs = unique_text_embs.index_select(0, prompt_inverse_tensor)
+            logit_scale = self.model.logit_scale.exp()
+
         scores: List[torch.Tensor] = []
         for i in range(0, len(prompts), self.batch_size):
             px = pixel_values[i : i + self.batch_size]
-            batch_prompts = prompts[i : i + self.batch_size]
-
-            text_inputs = self.processor(
-                text=batch_prompts,
-                padding=True,
-                truncation=True,
-                max_length=77,
-                return_tensors="pt",
-            )
-            text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
 
             # Image path keeps grad; text/logit_scale are constants.
             image_embs = _extract_tensor(self.model.get_image_features(pixel_values=px))
             image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True)
-            with torch.no_grad():
-                text_embs = _extract_tensor(self.model.get_text_features(**text_inputs))
-                text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True)
-                logit_scale = self.model.logit_scale.exp()
 
             # Per-pair alignment = diag(text @ image.T); avoid the BxB matmul.
-            batch_scores = logit_scale * (text_embs * image_embs).sum(dim=-1) / 26
+            batch_text_embs = text_embs[i : i + len(px)]
+            batch_scores = logit_scale * (batch_text_embs * image_embs).sum(dim=-1) / 26
             scores.append(batch_scores)
 
         return torch.cat(scores, dim=0)
