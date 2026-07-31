@@ -34,10 +34,10 @@ trainer's ``data_source_cfg`` with ``args.run.data_path`` /
 format the trainer's data source reads (txt / JSONL / JSON manifests with
 metadata) works per suite.
 
-Scoring uses the trainer's own reward interface: composed/rollout trainers call
-``suite.reward.score_and_attach``, ReFL calls ``score_differentiable`` — a
-suite's backend must support whichever its trainer uses (the same contract as
-the training reward).
+Scoring uses the shared reward operations: composed/rollout trainers call
+``reward.ops.score_frontier`` with each suite reward; ReFL calls
+``score_differentiable`` — a suite's backend must support whichever its trainer
+uses (the same contract as the training reward).
 """
 
 from __future__ import annotations

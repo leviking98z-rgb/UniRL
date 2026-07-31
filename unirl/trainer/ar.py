@@ -10,7 +10,7 @@ from omegaconf import DictConfig
 
 from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.distributed.group.placement import placement, remote
-from unirl.distributed.tensor import hydrate
+from unirl.reward.ops import score_frontier
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict, prepare_input_sample
 from unirl.types.sample import Sample
@@ -323,17 +323,11 @@ class ARTrainer(BaseTrainer):
 
         # Score the frontier gen Part (Sample -> Sample; the reward service is
         # migrated alongside on its own branch — see the LIN-480 plan).
-        sample = self.reward.score_and_attach(sample)
-
-        part = sample.parts[-1]
-        mean_reward = 0.0
+        outcome = score_frontier(self.reward, sample)
+        sample = outcome.sample
+        part = outcome.part
+        mean_reward = outcome.mean
         if part.rewards is not None:
-            # Hydrate in place so the wandb reward/advantage stats reuse this
-            # fetch instead of re-pulling the TensorRef from the worker.
-            part.rewards = hydrate(part.rewards)
-            if isinstance(part.component_rewards, dict):
-                part.component_rewards = {name: hydrate(value) for name, value in part.component_rewards.items()}
-            mean_reward = float(part.rewards.to(torch.float32).mean().item())
             part = estimate_part_advantages(part, self.advantage_estimator)
             sample = sample.with_parts([*sample.parts[:-1], part])
 
@@ -437,10 +431,10 @@ class ARTrainer(BaseTrainer):
                         generated = deep_hydrate(generated)
                     else:
                         generated = self.rollout.generate(sample)
-                    scored = self.reward.score_and_attach(generated)
-                    rewards = scored.parts[-1].rewards
+                    outcome = score_frontier(self.reward, generated)
+                    rewards = outcome.rewards
                     if rewards is not None:
-                        rewards = hydrate(rewards).to(torch.float32)
+                        rewards = rewards.to(torch.float32)
                         fanout = total_samples_per_prompt(eval_sp)
                         expected_total = dispatch_inputs.batch_size * fanout
                         if int(rewards.numel()) != expected_total:

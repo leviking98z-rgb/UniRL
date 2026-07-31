@@ -39,8 +39,8 @@ One ``train_step``::
 
     wake ar+dit; [sync → both]; sample = run_rollout(sample)  # → [input, ar, image]
     sleep ar+dit
-    reward.score_and_attach(sample)              # only the frontier image Part is scorable
-    sample.propagate_rewards("mean")             # image reward → ar Part
+    score_frontier(reward, sample)                # score/materialize the image Part
+    propagate_rewards(sample, "mean")             # image reward → ar Part
     AdvantageEstimator per Part                  # ar groups by prompt, image by recaption
     unified_model_stack.train_track(sample)      # tree-shard lineage → 2 backward → 1 step
 
@@ -66,6 +66,7 @@ from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import TensorRef, hydrate
 from unirl.distributed.tensor.batch import Batch
+from unirl.reward.ops import propagate_rewards, score_frontier
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict, prepare_input_sample
 from unirl.trainer.eval_suites import build_eval_suites
@@ -604,23 +605,14 @@ class UnifiedModelTrainer(BaseTrainer):
         #    directly scorable; its reward is credit-assigned below. The reward
         #    derives each image's prompt context from the lineage (conditioning),
         #    so no manual req expansion is needed.
-        sample = self.reward.score_and_attach(sample)
-        # propagate_rewards reshapes child rewards directly (no hydration), so
-        # realize the worker-returned TensorRef first.
-        img_part = sample.parts[img_idx]
-        if img_part.rewards is not None:
-            img_part.rewards = hydrate(img_part.rewards)
-        if isinstance(img_part.component_rewards, dict):
-            img_part.component_rewards = {name: hydrate(value) for name, value in img_part.component_rewards.items()}
+        outcome = score_frontier(self.reward, sample)
+        sample = outcome.sample
 
         # 2. Credit-assign image reward up the lineage → fills the "ar" Part.
-        sample = sample.propagate_rewards(op="mean")
+        sample = propagate_rewards(sample, op="mean")
 
         # 3. Mean image reward for the log line.
-        mean_reward = 0.0
-        di_rewards = sample.parts[img_idx].rewards
-        if di_rewards is not None:
-            mean_reward = float(hydrate(di_rewards).to(torch.float32).mean().item())
+        mean_reward = outcome.mean
 
         # 3b. Intrusive debug dump (best-effort) — observe what AR generated and
         #     what DiT rendered before advantages/training mutate the Parts.
@@ -848,12 +840,9 @@ class UnifiedModelTrainer(BaseTrainer):
                     for eng in self.ar_rollouts + self.dit_rollouts:
                         eng.sleep()
             for name, reward in scorers:
-                scored = reward.score_and_attach(generated)
-                rewards = scored.parts[-1].rewards
-                if rewards is not None:
-                    r = hydrate(rewards).to(torch.float32)
-                    sums[name] += float(r.sum().item())
-                    counts[name] += int(r.numel())
+                outcome = score_frontier(reward, generated)
+                sums[name] += outcome.total
+                counts[name] += outcome.count
         return {name: sums[name] / max(1, counts[name]) for name, _ in scorers}
 
     def _loop_before_step(self, state) -> None:

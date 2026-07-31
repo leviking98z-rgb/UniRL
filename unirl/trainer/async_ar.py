@@ -35,14 +35,13 @@ import logging
 import time
 from typing import Dict, List, Optional, Tuple
 
-import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.config.execution import Capability, LoopKind, PlacementMode
 from unirl.distributed.group.placement import placement, remote
-from unirl.distributed.tensor import hydrate
+from unirl.reward.ops import attach_frontier, materialize_reward
 from unirl.rollout.async_runtime import InflightGeneration
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
@@ -225,7 +224,7 @@ class AsyncARTrainer(ARTrainer):
         The filled ``Sample`` is self-contained (it carries its input Parts), so
         no request handle is kept on the in-flight record.
         """
-        scored = self.reward.score_and_attach(completed)
+        scored = attach_frontier(self.reward, completed)
         self._drop_decoded(scored, rollout_id=job.gen_id)
         return scored.split()
 
@@ -244,11 +243,10 @@ class AsyncARTrainer(ARTrainer):
         """Advantage + optimizer step for a SCORED ``Sample`` (rewards already attached)."""
         if t0 is None:
             t0 = time.perf_counter()
-        part = sample.parts[-1]
-        mean_reward = 0.0
-        if part.rewards is not None:
-            part.rewards = hydrate(part.rewards)
-            mean_reward = float(part.rewards.to(torch.float32).mean().item())
+        outcome = materialize_reward(sample)
+        sample = outcome.sample
+        part = outcome.part
+        mean_reward = outcome.mean
         part = estimate_part_advantages(part, self.advantage_estimator)
         sample = sample.with_parts([*sample.parts[:-1], part])
         train_part = part

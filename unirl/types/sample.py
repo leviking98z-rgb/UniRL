@@ -10,7 +10,8 @@ path (``sample_ids``; see ``unirl/types/README.md`` and
 only input Part(s); ``fork``
 appends a generation shell and the fill step populates it. Conditioning is collected
 from the ancestor prefix as primitives (:meth:`Sample.conditioning`), not stored.
-Reward propagation and split machinery is ported from ``rollout_resp.py``.
+Tree split machinery is ported from ``rollout_resp.py``. Reward materialization
+and lineage credit assignment live in :mod:`unirl.reward.ops`.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from dataclasses import fields as dc_fields
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 import torch
 
@@ -647,47 +648,6 @@ class Sample(Batch):
             raise ValueError("Sample.observe: no parts to observe from (empty Sample)")
         obs_part = self.parts[-1].input_child({primitive_modality_key(observation): observation}, role=role)
         return type(self)(parts=[*self.parts, obs_part], reward_compute_s=self.reward_compute_s)
-
-    def propagate_rewards(self, op: Literal["mean", "max", "sum"] = "mean") -> "Sample":
-        """Aggregate child rewards up the chain (leaf → root) into unscored parents.
-        Walks ``parts`` in reverse; per parent, reduces the successor's rewards
-        ``view(n_parent, branch).reduce(dim=1)``. Direct rewards win. Single-child
-        only (the chain guarantees it; §7)."""
-        new_parts = list(self.parts)
-        for i in range(len(new_parts) - 1, -1, -1):
-            part = self.parts[i]
-            if part.rewards is not None:
-                continue
-            if i + 1 >= len(new_parts):
-                continue
-            child = new_parts[i + 1]
-            if child.is_root:  # successor isn't a child of this part
-                continue
-            if child.rewards is None:
-                raise ValueError(
-                    f"propagate_rewards: cannot aggregate from part {i + 1} to {i} — child.rewards is None. "
-                    f"Score the leaf parts first."
-                )
-            n_parent = len(part.sample_ids)
-            n_child = len(child.sample_ids)
-            if n_parent == 0 or n_child % n_parent != 0:
-                raise ValueError(
-                    f"propagate_rewards: non-uniform branching from part {i + 1} ({n_child} samples) "
-                    f"to {i} ({n_parent} samples). Group-by-parent ordering requires n_child % n_parent == 0."
-                )
-            branch = n_child // n_parent
-            reshaped = child.rewards.view(n_parent, branch)
-            if op == "mean":
-                aggregated = reshaped.mean(dim=1)
-            elif op == "max":
-                aggregated = reshaped.amax(dim=1)
-            elif op == "sum":
-                aggregated = reshaped.sum(dim=1)
-            else:
-                raise ValueError(f"propagate_rewards: unknown op {op!r}; expected 'mean', 'max', or 'sum'.")
-            new_parts[i] = _part_with_field(part, "rewards", aggregated)
-
-        return type(self)(parts=new_parts, reward_compute_s=self.reward_compute_s)
 
     def turns(self) -> List[Turn]:
         """Role-tagged, turn-ordered, frontier-aligned conditioning — the agent

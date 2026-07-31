@@ -45,11 +45,9 @@ import logging
 import time
 from typing import Any, List, Optional, Tuple
 
-import torch
-
 from unirl.algorithms.advantage import estimate_part_advantages
 from unirl.config.execution import LoopKind, PlacementMode
-from unirl.distributed.tensor import hydrate
+from unirl.reward.ops import attach_frontier, materialize_reward
 from unirl.rollout.async_runtime import InflightGeneration
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.diffusion import DiffusionTrainer
@@ -117,7 +115,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         (it carries its input Parts), so no request handle is kept on the
         in-flight record.
         """
-        scored = self.reward.score_and_attach(completed)
+        scored = attach_frontier(self.reward, completed)
         self._drop_decoded(scored, rollout_id=job.gen_id)
         return scored.split()
 
@@ -137,15 +135,10 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         """Advantage + optimizer step for a SCORED ``Sample`` (rewards already attached)."""
         if t0 is None:
             t0 = time.perf_counter()
-        part = sample.parts[-1]
-        mean_reward = 0.0
-        if part.rewards is not None:
-            # Hydrate in place so the wandb reward/advantage stats reuse this fetch
-            # instead of re-pulling the TensorRef from the worker.
-            part.rewards = hydrate(part.rewards)
-            if isinstance(part.component_rewards, dict):
-                part.component_rewards = {name: hydrate(value) for name, value in part.component_rewards.items()}
-            mean_reward = float(part.rewards.to(torch.float32).mean().item())
+        outcome = materialize_reward(sample)
+        sample = outcome.sample
+        part = outcome.part
+        mean_reward = outcome.mean
         part = estimate_part_advantages(part, self.advantage_estimator)
         sample = sample.replace_frontier(part)
         result = self.stack.train_track(sample.parts[-1], training_progress=float(training_progress))
