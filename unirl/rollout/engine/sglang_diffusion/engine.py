@@ -4,11 +4,8 @@ A thin core over the backend seam: it names no concrete model (the adapter, pick
 from the registry by ``config.model_family``, owns the ``Sample`` → ``Sample``
 conversion) and no concrete backend (the seam owns the runtime). Weight sync is a
 :class:`WeightSync` component constructed over the seam; the offload lifecycle (a
-single flag) lives directly on the engine. The frozen ``base.py`` surface is
-implemented as thin forwards here — they must be real class attributes anyway
-(``Worker.call`` dispatches by name; ``@distributed`` binds the most-derived
-attribute) — which also absorbs the surface quirks (``track_prefix``) so the
-component keeps clean signatures.
+single flag) lives directly on the engine. Common tensor/NCCL/LoRA receiver
+calls use the shared delegating receiver; this class owns its checksum extension.
 
 One-shot construction: after ``__init__`` returns, the generator is spawned and the
 engine is usable. ``generate`` / ``sleep`` / ``wake_up`` re-apply ``@distributed``
@@ -34,6 +31,7 @@ from unirl.rollout.engine.sglang_diffusion.config import (
     SGLangDiffusionPorts,
 )
 from unirl.rollout.engine.sglang_diffusion.weight_sync import WeightSync
+from unirl.rollout.engine.weight_receiver import DelegatingTensorNCCLLoraReceiver
 from unirl.sde.noise import generate_latents
 from unirl.sde.runtime import ensure_sample_sigmas
 from unirl.types.noise_recipe import NoiseRecipe
@@ -49,13 +47,14 @@ _OFFLOAD_TAGS = ("transformer", "vae", "text_encoder")
 _CPU_BACKUP_TAGS = ("vae", "text_encoder")
 
 
-class SGLangDiffusionRolloutEngine(BaseSingleTurnRolloutEngine):
+class SGLangDiffusionRolloutEngine(DelegatingTensorNCCLLoraReceiver, BaseSingleTurnRolloutEngine):
     """Rollout engine backed by ``sglang.multimodal_gen.DiffGenerator`` (v2 layout)."""
 
     CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
         Capability.DEDICATED_ROLLOUT,
         Capability.SINGLE_TURN_GENERATION,
         Capability.QUIESCE,
+        Capability.MEMORY_LIFECYCLE,
         Capability.MULTI_GPU_COLOCATE,
         Capability.TENSOR_WEIGHT_RECEIVER,
         Capability.NCCL_WEIGHT_RECEIVER,
@@ -284,100 +283,15 @@ class SGLangDiffusionRolloutEngine(BaseSingleTurnRolloutEngine):
             self._shutdown_complete = True
 
     # ------------------------------------------------------------------ #
-    # Weight sync — frozen base.py surface; thin forwards to the component.
-    # Un-decorated: reached per worker via the raw ``Worker.call`` RPC, not
-    # through ``@distributed``. ``track_prefix`` is absorbed here.
+    # Weight sync — common tensor/NCCL/LoRA calls come from the delegating
+    # receiver. Only the diffusion checksum extension remains here.
     # ------------------------------------------------------------------ #
-
-    def update_weights_from_tensor(
-        self,
-        *,
-        serialized_named_tensors: List[str],
-        target_modules: Optional[List[str]] = None,
-        load_format: Optional[str] = None,
-        flush_cache: bool = True,
-        track_prefix: str = "",
-    ) -> None:
-        del track_prefix
-        self._weight_sync.update_weights_from_tensor(
-            serialized_named_tensors=serialized_named_tensors,
-            target_modules=target_modules,
-            load_format=load_format,
-            flush_cache=flush_cache,
-        )
-        self._weight_version += 1  # weights changed → bump the version stamped onto gens
-
-    def init_weights_update_group(
-        self,
-        *,
-        master_address: str,
-        master_port: int,
-        rank_offset: int,
-        world_size: int,
-        group_name: str,
-        backend: str = "nccl",
-        track_prefix: str = "",
-    ) -> None:
-        del track_prefix
-        self._weight_sync.init_weights_update_group(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=rank_offset,
-            world_size=world_size,
-            group_name=group_name,
-            backend=backend,
-        )
-
-    def update_weights_from_distributed(
-        self,
-        *,
-        names: List[str],
-        dtypes: List[str],
-        shapes: List[List[int]],
-        group_name: str,
-        target_modules: Optional[List[str]] = None,
-        flush_cache: bool = True,
-        track_prefix: str = "",
-    ) -> None:
-        del track_prefix
-        self._weight_sync.update_weights_from_distributed(
-            names=names,
-            dtypes=dtypes,
-            shapes=shapes,
-            group_name=group_name,
-            target_modules=target_modules,
-            flush_cache=flush_cache,
-        )
-        self._weight_version += 1  # weights changed → bump the version stamped onto gens
-
-    def destroy_weights_update_group(
-        self,
-        *,
-        group_name: str,
-        track_prefix: str = "",
-    ) -> None:
-        del track_prefix
-        self._weight_sync.destroy_weights_update_group(group_name=group_name)
-
-    def set_lora_from_tensors(
-        self,
-        adapter_name: str,
-        lora_tensors: Dict[str, torch.Tensor],
-        *,
-        peft_config: Optional[dict] = None,
-    ) -> None:
-        self._weight_sync.set_lora_from_tensors(adapter_name, lora_tensors, peft_config=peft_config)
 
     def loaded_param_checksums(self, *, names: List[str]) -> Dict[int, List[Dict[str, str]]]:
         return self._weight_sync.loaded_param_checksums(names=names)
 
-    @property
-    def lora_dirty(self) -> bool:
-        """True when LoRA is in use but the adapter must be (re)pushed before generate."""
-        return self._weight_sync.lora_dirty
-
-    # ``update_weights_from_ipc`` is deliberately NOT defined — the base raises
-    # NotImplementedError (SGLang has no bucketed-IPC receiver).
+    # ``update_weights_from_ipc`` is deliberately absent: SGLang diffusion has
+    # no bucketed-IPC receiver and does not declare that capability.
 
 
 __all__ = ["SGLangDiffusionRolloutEngine"]

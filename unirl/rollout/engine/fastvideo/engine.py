@@ -73,6 +73,7 @@ class FastVideoRolloutEngine(BaseSingleTurnRolloutEngine):
         Capability.DEDICATED_ROLLOUT,
         Capability.SINGLE_TURN_GENERATION,
         Capability.QUIESCE,
+        Capability.MEMORY_LIFECYCLE,
         Capability.CHECKPOINT_WEIGHT_RECEIVER,
     )
     _component_name = "fastvideo"

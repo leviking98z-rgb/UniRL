@@ -2,16 +2,12 @@
 
 ``WeightSync`` is a plain object the engine constructs over the seam: it takes the
 backend and the LoRA spec explicitly and owns all sync/LoRA state
-(``_lora_loaded`` / ``_active_adapter``). Method names mirror
-the frozen ``base.py`` surface minus ``track_prefix`` (the engine's forwards absorb
-that, along with the per-worker ``Worker.call`` dispatch concern), so a grep for a
-trainer-side entry point lands here.
+(``_lora_loaded`` / ``_active_adapter``). Method names implement the engine's
+declared receiver capabilities; the shared delegator absorbs ``track_prefix``.
 
 The transports declared are exactly what SGLang supports: tensor-bag, NCCL
 (init/transfer/destroy), LoRA-from-tensors, and the checksum query. There is no
-IPC method — the engine simply doesn't define ``update_weights_from_ipc``, so it
-inherits ``BaseRolloutEngine``'s ``NotImplementedError`` (SGLang has no IPC
-receiver).
+IPC method — the engine does not declare or expose that receiver capability.
 
 The "weights released" event: the engine's ``sleep()`` calls
 :meth:`mark_weights_released` after releasing memory (the released tags include the

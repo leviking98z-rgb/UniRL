@@ -24,6 +24,14 @@ from unirl.config.execution import (
     SyncSelection,
 )
 from unirl.config.require import require
+from unirl.config.rollout import (
+    CheckpointWeightReceiver,
+    IPCWeightReceiver,
+    LoraWeightReceiver,
+    NCCLWeightReceiver,
+    RolloutMemoryLifecycle,
+    TensorWeightReceiver,
+)
 from unirl.config.validation import (
     PrecisionName,
     is_direct_sampling,
@@ -39,14 +47,20 @@ from unirl.config.validation import (
 __all__ = [
     "Capability",
     "CapabilityGraph",
+    "CheckpointWeightReceiver",
     "ComponentCapabilities",
     "EngineSelection",
     "ExecutionPlan",
+    "IPCWeightReceiver",
+    "LoraWeightReceiver",
     "LoopKind",
+    "NCCLWeightReceiver",
     "PlacementMode",
     "PrecisionName",
     "RolePlacement",
+    "RolloutMemoryLifecycle",
     "SyncSelection",
+    "TensorWeightReceiver",
     "is_direct_sampling",
     "require",
     "validate_dynamic_dotpaths",
