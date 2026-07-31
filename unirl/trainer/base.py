@@ -13,6 +13,8 @@ from unirl.algorithms.advantage import AdvantageEstimator
 from unirl.config.execution import ExecutionPlan, LoopKind, PlacementMode
 from unirl.distributed.group.device_pool import DevicePool
 from unirl.models.types.plugin import ModelPluginPlan
+from unirl.observability import create_observer, observer_state_dict
+from unirl.observability.instrumentation import install_phase_timing
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import ARSamplingParams, BaseSamplingParams, total_samples_per_prompt
@@ -156,9 +158,9 @@ class BaseTrainer:
     """Owns a DevicePool. Subclasses use ``placement(self.pool, ...)`` to
     instantiate their ``Remote`` roles inside ``__init__`` / ``setup``.
 
-    Also owns the rank-0 logger and the typed loop-program selector shared by
+    Also owns the rank-0 observer and the typed loop-program selector shared by
     every trainer. :class:`~unirl.trainer.program.TrainerLifecycle` initializes
-    and finalizes logging around the selected program.
+    and finalizes observability around the selected program.
     """
 
     LOOP_KIND: LoopKind = LoopKind.BATCH_RL
@@ -207,35 +209,28 @@ class BaseTrainer:
         )
         self.pool.setup()
 
-        # Driver/rank-0 wandb logger. Starts as a disabled null-object so trainers
-        # can call ``self.wandb_logger.X(...)`` without guards even before
-        # _init_wandb runs; _init_wandb replaces it with the configured (possibly
-        # live) logger. Disabled => wandb methods no-op, log_progress still prints.
-        # The optimizer-step counter now lives on the logger.
-        from unirl.utils.wandb_logger import UniRLWandBLogger
-
+        # Driver/rank-0 observer. It starts as a disabled null-object so trainers
+        # can emit through the stable observer contract before lifecycle startup.
+        # _init_observability replaces it with the configured provider adapter.
         self.logging_cfg = logging_cfg
-        self.wandb_logger = UniRLWandBLogger(enabled=False)
+        self.observer = create_observer(None, run_config={})
         # Driver-side state from a resumed checkpoint's trainer_state.json
-        # (wandb run id / step axis); populated by maybe_load_checkpoint,
-        # consumed by _init_wandb. Empty for fresh runs.
+        # (observer run id / step axis); populated by maybe_load_checkpoint,
+        # consumed by _init_observability. Empty for fresh runs.
         self._resume_state: Dict[str, Any] = {}
 
         # Reclaim per-rollout transport buffers after every train_step, centrally,
         # so each subclass train loop doesn't have to remember to.
         self._install_train_step_reset_hook()
 
-        # Time the standard step collaborators (rollout / weight_sync / reward /
-        # stack) and surface them as perf/<phase>_time_s, centrally, so every
-        # trainer gets step attribution without per-trainer edits. The machinery
-        # lives with the rest of the logging stack in wandb_logger.
-        from unirl.utils.wandb_logger import install_phase_timing
-
+        # Time the standard step collaborators and surface perf/<phase>_time_s
+        # through the provider-neutral observer boundary.
         install_phase_timing(self)
 
         # verl-parity memory monitoring (perf/max_memory_* + [mem] boundary
         # lines). Only constructed here — the collaborators to wrap don't exist
-        # until the subclass __init__ finishes, so install() runs in _init_wandb.
+        # until subclass initialization finishes, so install() runs at lifecycle
+        # observability startup.
         # None when disabled (logging.memory.enabled=false / UNIRL_MEM_MONITOR=0).
         from unirl.utils.memory_monitor import install_memory_monitoring
 
@@ -271,38 +266,15 @@ class BaseTrainer:
         """Reclaim per-rollout mooncake zero-copy buffers (no-op for other backends)."""
         self.pool.reset_transfer_queue_buffers()
 
-    # ---- wandb logging (shared by all v2 trainers) -------------------------
+    # ---- observability (shared by all v2 trainers) ------------------------
 
-    def _init_wandb(self, *, num_rollouts: Optional[int] = None, extra: Optional[Dict[str, Any]] = None) -> None:
-        """Build the (rank-0/driver) wandb logger from the optional ``logging`` block.
-
-        The single logger factory shared by every trainer. ALWAYS assigns
-        ``self.wandb_logger`` — a live run when ``report_to_wandb`` is on and a
-        ``project_name`` is set, otherwise a disabled null-object whose wandb
-        methods no-op (so trainers call ``self.wandb_logger.X(...)`` without
-        guards, while ``log_progress`` still prints). The whole ``train`` loop
-        runs on the driver, so ``rank=0``.
-
-        Reads (all under the ``logging`` block, all optional): ``report_to_wandb``,
-        ``project_name``, ``run_name``, ``entity`` (falls back to ``WANDB_ENTITY``),
-        ``tags`` (list or comma-separated string), ``logging_dir``, and the media
-        knobs ``log_media`` / ``media_max_items`` / ``media_log_interval``. Enabling
-        reporting inherently requires a successful wandb init (it raises on
-        failure) — there is no opt-out flag.
-        """
-        from unirl.utils.wandb_logger import init_logger
-
-        cfg = self.logging_cfg or {}
-        report = bool(cfg.get("report_to_wandb", False)) and bool(cfg.get("project_name"))
-
-        raw_tags = cfg.get("tags")
-        if isinstance(raw_tags, str):
-            tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
-        elif raw_tags:
-            tags = [str(t).strip() for t in raw_tags if str(t).strip()]
-        else:
-            tags = None
-
+    def _init_observability(
+        self,
+        *,
+        num_rollouts: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Build the rank-0 observer from the optional ``logging`` block."""
         sampling_params = getattr(self, "sampling_params", None)
         run_config: Dict[str, Any] = {
             "num_devices": self.num_devices,
@@ -313,28 +285,23 @@ class BaseTrainer:
         if extra:
             run_config.update(extra)
 
-        project = cfg.get("project_name")
-        self.wandb_logger = init_logger(
-            project=str(project) if project else None,
-            run_name=cfg.get("run_name"),
-            config=run_config,
-            log_dir=cfg.get("logging_dir"),
+        self.observer = create_observer(
+            self.logging_cfg,
+            run_config=run_config,
+            resume_state=self._resume_state,
             rank=0,
-            tags=tags,
-            entity=(cfg.get("entity") or os.environ.get("WANDB_ENTITY") or None),
-            log_media=bool(cfg.get("log_media", False)),
-            media_max_items=int(cfg.get("media_max_items", 8)),
-            media_log_interval=int(cfg.get("media_log_interval", 1)),
-            enabled=report,
-            run_id=self._resume_state.get("wandb_run_id"),
-            optimizer_step=int(self._resume_state.get("optimizer_step") or 0),
         )
-        if self.wandb_logger.initialized:
-            logger.info("WandB initialized: project=%s run=%s", project, cfg.get("run_name"))
+        if self.observer.initialized:
+            cfg = self.logging_cfg or {}
+            logger.info(
+                "Observability initialized: provider=%s project=%s run=%s",
+                cfg.get("provider") or "wandb",
+                cfg.get("project_name"),
+                cfg.get("run_name"),
+            )
 
-        # Every trainer calls _init_wandb at the top of train(): the subclass
-        # __init__ has finished (collaborators exist) and the live logger is in
-        # place — wrap the hand-off boundaries with memory probes here, once.
+        # Subclass initialization has finished and the live observer is in place;
+        # wrap hand-off boundaries with memory probes here, once.
         if self._memory_monitor is not None:
             self._memory_monitor.install(self)
 
@@ -351,12 +318,12 @@ class BaseTrainer:
         ever rides into the ``train_track`` dispatch (each gen ``Part`` is
         DP_SCATTER-serialized to the training workers right after this call):
 
-        1. **Media logging (driver-side).** When the logger wants media this
-           rollout (``UniRLWandBLogger.should_log_media``), take each gen Part's
+        1. **Media logging (driver-side).** When the observer wants media this
+           rollout (``Observer.should_log_media``), take each gen Part's
            inbound ``media_preview`` or build one from the still-live
            ``primitives`` (``build_media_preview_for_part`` hydrates a single DP
            shard), cap to ``media_max_items``, and upload it at the same
-           ``rollout/step`` value :meth:`UniRLWandBLogger.log_rollout_step` uses,
+           ``rollout/step`` value :meth:`Observer.log_rollout_step` uses,
            so the panels align. Captions default to the frontier-aligned prompt
            texts (``Sample.conditioning``).
         2. **Free the per-rollout payloads.** ``primitives`` (generated
@@ -373,8 +340,8 @@ class BaseTrainer:
         from unirl.types.primitives import Images, Texts
 
         gen_parts = sample.gen_parts()
-        wb = self.wandb_logger
-        if wb is not None and wb.should_log_media(rollout_id):
+        observer = self.observer
+        if observer.should_log_media(rollout_id):
             from unirl.types.media_preview import build_media_preview_for_part
 
             multi = len(gen_parts) > 1
@@ -394,16 +361,16 @@ class BaseTrainer:
                     # with the wrong-length caption list.
                     preview = build_media_preview_for_part(
                         part=part,
-                        max_items=wb.media_max_items,
+                        max_items=observer.media_max_items,
                         prompts=default_prompts if part is sample.parts[-1] else None,
                         input_image=input_image,
                     )
                 if preview is None:
                     continue
-                if len(preview) > wb.media_max_items:
-                    preview = preview.slice(0, wb.media_max_items)
+                if len(preview) > observer.media_max_items:
+                    preview = preview.slice(0, observer.media_max_items)
                 key = f"rollout/{name}/generated_media" if multi else "rollout/generated_media"
-                wb.log_generated_media(rollout_id + 1, preview, key=key)
+                observer.log_generated_media(rollout_id + 1, preview, key=key)
 
         for part in gen_parts:
             part.primitives = {}
@@ -442,8 +409,8 @@ class BaseTrainer:
         else:
             cleanup(_ray_get_timeout=timeout)
 
-    def _finish_wandb(self, *, active_exception: Optional[bool] = None) -> None:
-        """Flush pending work, clean transport artifacts, and close wandb."""
+    def _finish_observability(self, *, active_exception: Optional[bool] = None) -> None:
+        """Flush pending work, clean transport artifacts, and close the observer."""
         if active_exception is None:
             active_exception = sys.exc_info()[0] is not None
         # On the exception path, bound the flush's ray.get: a worker wedged in an NCCL
@@ -463,8 +430,7 @@ class BaseTrainer:
             # exception, just record the failed best-effort flush.
             logger.exception("Failed to flush checkpoint/weight-sync state during trainer teardown")
         finally:
-            if self.wandb_logger is not None:
-                self.wandb_logger.finish()
+            self.observer.finish()
 
     # ---- loop-program hooks and runtime ownership -------------------------
 
@@ -473,7 +439,7 @@ class BaseTrainer:
         for _ in range(start_step):
             self.data_source.get_samples(self.batch_size)
 
-    def _loop_wandb_extra(self) -> Optional[Dict[str, Any]]:
+    def _loop_observability_metadata(self) -> Optional[Dict[str, Any]]:
         """Additional run metadata supplied to the loop program."""
         return None
 
@@ -604,12 +570,12 @@ class BaseTrainer:
         if self._memory_monitor is not None:
             self._memory_monitor.boundary("ckpt_save:end", self.backend)
         # Driver-owned state rides beside the worker-written checkpoint data:
-        # the wandb run id + train/ step axis let a resume append to the SAME
-        # wandb run instead of starting a fresh, misaligned one.
+        # Provider run identity + train/ step axis let a resume append to the
+        # same observer stream instead of starting a fresh, misaligned one.
         trainer_state_path = os.path.join(path, "trainer_state.json")
         trainer_state_tmp = f"{trainer_state_path}.tmp"
         with open(trainer_state_tmp, "w") as f:
-            json.dump({"wandb_run_id": self.wandb_logger.run_id, "optimizer_step": self.wandb_logger.optimizer_step}, f)
+            json.dump(observer_state_dict(self.observer), f)
         os.replace(trainer_state_tmp, trainer_state_path)
         # An async DCP save (checkpoint_format="dcp" + checkpoint_async) writes
         # its shards on a background thread, normally drained by the next save.

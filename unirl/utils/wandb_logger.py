@@ -6,26 +6,27 @@ and image samples. Designed to match the logging behavior of DanceGRPO,
 FlowGRPO, DiffusionNFT, and MixGRPO for comparison and reproducibility.
 
 Usage:
-    from unirl.utils.wandb_logger import init_logger
+    from unirl.observability import create_observer
 
-    # Initialize (typically via BaseTrainer._init_wandb)
-    logger = init_logger(project="unirl", run_name="exp1", config=args)
+    observer = create_observer(
+        {"provider": "wandb", "enabled": True, "project_name": "unirl"},
+        run_config=args,
+    )
 
     # Log training metrics
-    logger.log_step(step=100, metrics={"loss": 0.5, "policy_loss": 0.3})
+    observer.log_step(step=100, metrics={"loss": 0.5, "policy_loss": 0.3})
 
     # Log rollout metrics
-    logger.log_rollout(rollout_id=10, metrics={"reward_mean": 0.8})
+    observer.log_rollout(rollout_id=10, metrics={"reward_mean": 0.8})
 """
 
-import functools
 import logging
 import os
-import time
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
+
+from unirl.observability.api import emit_progress
 
 try:
     import wandb
@@ -124,141 +125,6 @@ def _write_video_with_audio(
     return path
 
 
-class PhaseTimer:
-    """Per-phase wall-clock timer for one train step.
-
-    Construction starts the step total; each ``phase(name)`` block accumulates
-    into :attr:`phases` (re-entering a name adds to it, so a phase split across
-    code paths still reports one number). Feed the results straight to
-    :meth:`UniRLWandBLogger.log_rollout_step`::
-
-        timer = PhaseTimer()
-        with timer.phase("generate"):
-            sample = self.rollout.generate(sample)
-        ...
-        logger.log_rollout_step(
-            rollout_id, result, sample,
-            step_time_s=timer.total(), phase_times=timer.phases,
-        )
-
-    Phases sum to ~``total()``; the residual is whatever ran outside any
-    ``phase`` block (cheap glue like logging).
-    """
-
-    def __init__(self) -> None:
-        self._t0 = time.perf_counter()
-        self.phases: Dict[str, float] = {}
-
-    @contextmanager
-    def phase(self, name: str) -> Iterator[None]:
-        """Time the enclosed block and accumulate it under ``name``."""
-        t = time.perf_counter()
-        try:
-            yield
-        finally:
-            self.phases[name] = self.phases.get(name, 0.0) + (time.perf_counter() - t)
-
-    def total(self) -> float:
-        """Wall-clock seconds since construction (the whole step)."""
-        return time.perf_counter() - self._t0
-
-
-#: (handle attr, method, phase name) — the standard per-step collaborator
-#: handles every v2 trainer drives; missing ones (e.g. trainside has no
-#: ``weight_sync``) are skipped by :func:`install_phase_timing`.
-_STEP_PHASE_SPECS = (
-    ("rollout", "wake_up", "wake_up"),
-    ("rollout", "generate", "generate"),
-    ("rollout", "sleep", "sleep"),
-    ("weight_sync", "sync", "weight_sync"),
-    ("reward", "score_and_attach", "reward"),
-    ("stack", "train_track", "train"),
-)
-
-
-def install_phase_timing(trainer: Any) -> None:
-    """Attribute every train step into ``perf/<phase>_time_s`` — no trainer edits.
-
-    Wraps ``trainer.train_step`` to arm a fresh :class:`PhaseTimer` per step and,
-    lazily on the first step (the collaborators are created by the subclass
-    ``__init__`` after this installs, and ``_init_wandb`` replaces the logger
-    before stepping), wraps the standard collaborators from
-    ``_STEP_PHASE_SPECS`` to accumulate their wall-clocks, plus the live
-    logger's :meth:`UniRLWandBLogger.log_rollout_step` to inject the collected
-    ``phase_times`` unless the caller already passed them. The trainers' own
-    ``log_rollout_step(step_time_s=...)`` call sites stay the boundary —
-    untouched.
-
-    Handle methods are instance attributes (``handle.py`` binds them via
-    ``setattr``), so instance-level re-``setattr`` wrapping is the framework's
-    own extension mechanism. ``evaluate`` between steps also hits the wrapped
-    collaborators, but it accumulates into the stale timer of the
-    already-logged step and is discarded at the next re-arm.
-
-    Timing semantics: handle dispatch is a blocking barrier (``handle_fn``
-    does ``ray.get`` on all workers before returning), so each phase is the
-    step's true critical-path wall-clock and phases sum to ~the step total.
-    If a collaborator ever becomes async-submit (returns before the work
-    finishes), its phase collapses to submission time and the wait leaks into
-    the residual — a sudden near-zero phase plus a large
-    ``step_time_s - sum(phases)`` residual is the tell.
-    """
-    inner = getattr(trainer, "train_step", None)
-    if not callable(inner):
-        return
-
-    @functools.wraps(inner)
-    def _steady_step(*args, **kwargs):
-        trainer._step_timer = PhaseTimer()  # re-arm: fresh phases for this step
-        return inner(*args, **kwargs)
-
-    @functools.wraps(inner)
-    def _first_step(*args, **kwargs):
-        # First step is the earliest point the collaborators and the live logger
-        # are all constructed; wrap them once, then rebind to the lean steady
-        # wrapper so later steps just re-arm (no per-step branch, no latch flag).
-        trainer._step_timer = PhaseTimer()
-        _wrap_step_collaborators(trainer)
-        trainer.train_step = _steady_step
-        return inner(*args, **kwargs)
-
-    trainer._step_timer = PhaseTimer()  # target for any pre-step evaluate()
-    trainer.train_step = _first_step
-
-
-def _timed_call(trainer: Any, fn, phase: str):
-    """Return ``fn`` wrapped to accumulate its wall-clock under ``phase``."""
-
-    @functools.wraps(fn)
-    def _timed(*args, **kwargs):
-        with trainer._step_timer.phase(phase):
-            return fn(*args, **kwargs)
-
-    return _timed
-
-
-def _wrap_step_collaborators(trainer: Any) -> None:
-    """Time each present collaborator method, and teach the logger to emit phases."""
-    for handle_attr, method, phase in _STEP_PHASE_SPECS:
-        handle = getattr(trainer, handle_attr, None)
-        fn = getattr(handle, method, None)
-        if not callable(fn):
-            continue
-        setattr(handle, method, _timed_call(trainer, fn, phase))
-
-    # Inject the phases we collected into the logger boundary, unless the
-    # trainer already passed its own.
-    log_inner = trainer.wandb_logger.log_rollout_step
-
-    @functools.wraps(log_inner)
-    def _log_with_phases(*args, **kwargs):
-        if kwargs.get("phase_times") is None and trainer._step_timer.phases:
-            kwargs["phase_times"] = dict(trainer._step_timer.phases)
-        return log_inner(*args, **kwargs)
-
-    trainer.wandb_logger.log_rollout_step = _log_with_phases
-
-
 class UniRLWandBLogger:
     """WandB logger for unirl training.
 
@@ -324,7 +190,7 @@ class UniRLWandBLogger:
         self.run_id = run_id
         self._initialized = False
         # Optimizer-step counter for the ``train/`` panel (moved here from
-        # BaseTrainer so all step-axis bookkeeping lives in the logger).
+        # the trainer so all step-axis bookkeeping lives in the adapter).
         self._optimizer_step = int(optimizer_step)
         # Set by MemoryMonitor.install(); when present, log_rollout_step folds
         # its per-step summary (perf/max_memory_* etc.) into the perf dict.
@@ -348,6 +214,10 @@ class UniRLWandBLogger:
     def optimizer_step(self) -> int:
         """Current ``train/`` step-axis value — checkpointed for resume."""
         return self._optimizer_step
+
+    def bind_memory_monitor(self, monitor: Any) -> None:
+        """Attach the provider-neutral performance monitor used at step boundaries."""
+        self.memory_monitor = monitor
 
     def _handle_init_failure(
         self,
@@ -879,61 +749,14 @@ class UniRLWandBLogger:
         extra: Optional[Dict[str, Any]] = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
-        """Emit the one-line stdout progress summary for a rollout.
-
-        NOT gated by ``enabled`` — console progress prints even when wandb
-        reporting is off. Generic over single- and multi-track ``results``:
-        a single result renders ``loss/grad_norm/lr`` (+ ``ratio``/``clip``
-        when the algorithm reported them); a dict renders one ``name[...]``
-        group per track, preserving the richer per-track line trainers used
-        to hand-format.
-        """
-        log = logger if logger is not None else module_logger
-
-        def _metric(metrics: Any, key: str) -> Optional[float]:
-            value = (metrics or {}).get(key) if metrics is not None else None
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
-
-        def _fmt(result: Any) -> str:
-            parts = f"loss={result.loss:.4f} gn={result.grad_norm:.4f} lr={result.lr:.2e}"
-            metrics = getattr(result, "metrics", None)
-            ratio_mean = _metric(metrics, "ratio_mean")
-            ratio_std = _metric(metrics, "ratio_std")
-            clip_fraction = _metric(metrics, "clip_fraction")
-            if ratio_mean is not None:
-                parts += f" ratio={ratio_mean:.4f}"
-                if ratio_std is not None:
-                    parts += f"±{ratio_std:.4f}"
-            if clip_fraction is not None:
-                parts += f" clip={clip_fraction:.2f}"
-            # Rollout↔replay alignment gate (AR): k3 KL surrogate + |Δlogp|. On an
-            # on-policy first update both are ~0; they surface a temperature /
-            # weight-sync / position-encoding mismatch that ratio alone hides.
-            # Printed to the console (not just wandb) so the gate is visible when
-            # reporting is off.
-            k3_mean = _metric(metrics, "k3_mean")
-            absdiff_mean = _metric(metrics, "rollout_replay_logp_absdiff_mean")
-            if k3_mean is not None:
-                parts += f" k3={k3_mean:.2e}"
-            if absdiff_mean is not None:
-                parts += f" |Δlogp|={absdiff_mean:.2e}"
-            return parts
-
-        if isinstance(results, dict):
-            body = "  ".join(f"{name}[{_fmt(result)}]" for name, result in results.items())
-        else:
-            body = _fmt(results)
-        suffix = ("  " + " ".join(f"{k}={v}" for k, v in extra.items())) if extra else ""
-        log.info(
-            "rollout %d/%d  reward=%.4f  %s%s",
-            rollout_id + 1,
+        """Emit provider-independent console progress."""
+        emit_progress(
+            rollout_id,
             num_rollouts,
+            results,
             mean_reward,
-            body,
-            suffix,
+            extra=extra,
+            logger=logger if logger is not None else module_logger,
         )
 
     def finish(self):
@@ -961,9 +784,8 @@ def init_logger(
 ) -> UniRLWandBLogger:
     """Construct a :class:`UniRLWandBLogger`.
 
-    Always returns a logger instance. Pass ``enabled=False`` (the BaseTrainer
-    factory does this when reporting is off) for a no-op null-object whose wandb
-    methods short-circuit while ``log_progress`` still prints. An *enabled* run
+    Always returns a logger instance. Pass ``enabled=False`` for a no-op adapter
+    whose WandB methods short-circuit while ``log_progress`` still prints. An enabled run
     that fails to init raises (success is inherent to enabling — no opt-out flag).
 
     Args:

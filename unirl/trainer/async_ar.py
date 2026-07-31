@@ -253,7 +253,7 @@ class AsyncARTrainer(ARTrainer):
         if self.balance_shards:
             train_part = part.balance_shards(self._train_devices)  # over the TRAIN slab DP size
         result = self.stack.train_track(train_part, training_progress=float(training_progress))
-        self.wandb_logger.log_rollout_step(
+        self.observer.log_rollout_step(
             rollout_id,
             result,
             sample,

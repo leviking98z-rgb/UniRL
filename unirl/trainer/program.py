@@ -71,7 +71,7 @@ class TrainerLifecycle:
     """Prepare and tear down a trainer while preserving the primary failure.
 
     Cleanup is ordered as ``before_finish`` callbacks (async drain / agentic
-    abort), checkpoint and weight-sync flush plus logger finalization, then
+    abort), checkpoint and weight-sync flush plus observer finalization, then
     runtime shutdown.  Every callback is attempted.  If training is already
     failing, cleanup failures are logged and suppressed; otherwise the first
     cleanup failure is re-raised after the remaining cleanup has run.
@@ -93,7 +93,7 @@ class TrainerLifecycle:
         spec: LoopSpec,
         *,
         restore_data: Callable[[int], None],
-        wandb_extra: Optional[Dict[str, Any]] = None,
+        observability_metadata: Optional[Dict[str, Any]] = None,
     ) -> LoopState:
         start_step = self.trainer.maybe_load_checkpoint(
             spec.load_dir,
@@ -105,9 +105,9 @@ class TrainerLifecycle:
             resumed=bool(spec.load_dir),
         )
         restore_data(start_step)
-        self.trainer._init_wandb(
+        self.trainer._init_observability(
             num_rollouts=spec.total_steps,
-            extra=wandb_extra,
+            extra=observability_metadata,
         )
         return state
 
@@ -129,7 +129,9 @@ class TrainerLifecycle:
             run(name, callback)
         run(
             "trainer finalization",
-            lambda: self.trainer._finish_wandb(active_exception=primary_active or first_cleanup_error is not None),
+            lambda: self.trainer._finish_observability(
+                active_exception=primary_active or first_cleanup_error is not None
+            ),
         )
         run("runtime shutdown", self.trainer._shutdown_runtime)
 
@@ -166,7 +168,7 @@ class BatchRLProgram(LoopProgram):
             state = lifecycle.start(
                 spec,
                 restore_data=trainer._loop_restore_data,
-                wandb_extra=trainer._loop_wandb_extra(),
+                observability_metadata=trainer._loop_observability_metadata(),
             )
             try:
                 if trainer.eval_interval > 0:
@@ -184,7 +186,7 @@ class BatchRLProgram(LoopProgram):
                         sync_weights=sync_weights,
                         rollout_id=step,
                     )
-                    trainer.wandb_logger.log_progress(
+                    trainer.observer.log_progress(
                         step,
                         spec.total_steps,
                         result,
@@ -217,7 +219,7 @@ class BatchRLProgram(LoopProgram):
 
         stale = trainer._buffer_max_staleness if trainer._buffer_max_staleness is not None else 0
         max_inflight = trainer._max_inflight
-        extra = dict(trainer._loop_wandb_extra() or {})
+        extra = dict(trainer._loop_observability_metadata() or {})
         extra.update(
             {
                 "max_inflight": max_inflight,
@@ -233,7 +235,7 @@ class BatchRLProgram(LoopProgram):
             state = lifecycle.start(
                 spec,
                 restore_data=trainer._loop_restore_data,
-                wandb_extra=extra,
+                observability_metadata=extra,
             )
             trainer._async_scheduler = AsyncRolloutScheduler(
                 RayGenerationDispatcher(trainer.rollout),
@@ -268,7 +270,7 @@ class BatchRLProgram(LoopProgram):
                     rollout_id=step,
                     t0=t0,
                 )
-                trainer.wandb_logger.log_progress(
+                trainer.observer.log_progress(
                     step,
                     spec.total_steps,
                     result,
@@ -316,7 +318,7 @@ class AgenticRLProgram(BatchRLProgram):
             trainer._pump()
             trainer._apply_tail_policy(carried, spec.total_steps)
 
-        extra = dict(trainer._loop_wandb_extra() or {})
+        extra = dict(trainer._loop_observability_metadata() or {})
         extra.update(
             {
                 "oversample_batch_size": trainer._oversample,
@@ -328,7 +330,7 @@ class AgenticRLProgram(BatchRLProgram):
 
         with TrainerLifecycle(trainer, self.logger) as lifecycle:
             lifecycle.add_before_finish("partial agentic drive abort", stop_drive)
-            state = lifecycle.start(spec, restore_data=restore_data, wandb_extra=extra)
+            state = lifecycle.start(spec, restore_data=restore_data, observability_metadata=extra)
             trainer._buffer = _GroupBuffer()
             trainer._assembler = _GroupAssembler(trainer._n)
             trainer._carried = []
@@ -352,7 +354,7 @@ class AgenticRLProgram(BatchRLProgram):
                     t0=t0,
                 )
                 trainer._reset_transport_buffers()
-                trainer.wandb_logger.log_progress(
+                trainer.observer.log_progress(
                     step,
                     spec.total_steps,
                     result,
@@ -384,7 +386,7 @@ class AgenticRLProgram(BatchRLProgram):
             if checkpointed:
                 trainer._log_tail_metrics(spec.total_steps)
 
-        extra = dict(trainer._loop_wandb_extra() or {})
+        extra = dict(trainer._loop_observability_metadata() or {})
         extra.update(
             {
                 "buffer_max_staleness": stale,
@@ -397,7 +399,7 @@ class AgenticRLProgram(BatchRLProgram):
 
         with TrainerLifecycle(trainer, self.logger) as lifecycle:
             lifecycle.add_before_finish("async agentic drive abort", stop_drive)
-            state = lifecycle.start(spec, restore_data=restore_data, wandb_extra=extra)
+            state = lifecycle.start(spec, restore_data=restore_data, observability_metadata=extra)
             trainer._buffer = _GroupBuffer()
             trainer._assembler = _GroupAssembler(trainer._n)
             trainer._pending_carried = []
@@ -421,7 +423,7 @@ class AgenticRLProgram(BatchRLProgram):
                     t0=t0,
                 )
                 trainer._reset_transport_buffers()
-                trainer.wandb_logger.log_progress(
+                trainer.observer.log_progress(
                     step,
                     spec.total_steps,
                     result,
@@ -478,7 +480,7 @@ class SFTProgram(LoopProgram):
                     trainer.data_source.epoch,
                     step_time,
                 )
-                trainer.wandb_logger.log_step(
+                trainer.observer.log_step(
                     state.completed_step,
                     {
                         "train/loss": result.loss,

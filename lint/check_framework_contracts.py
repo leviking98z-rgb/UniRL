@@ -21,6 +21,8 @@ torch/Ray/engine packages:
 * reward operations own service dispatch, transport materialization, statistics,
   and lineage credit assignment instead of duplicating them across trainers;
 * trainer variants select explicit loop programs instead of copying ``train``;
+* trainers depend on the provider-neutral Observer contract rather than a
+  concrete telemetry backend or backend-named lifecycle hooks;
 * every ``train_*.py`` entrypoint exposes ``main`` and selects exactly one trainer
   module.
 
@@ -597,6 +599,63 @@ def check_reward_operations(errors: list[str], simple: dict[str, list[ClassInfo]
     return 1
 
 
+def check_observer_contract(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
+    observers = [info for info in simple.get("Observer", ()) if info.module == "unirl.observability.api"]
+    if len(observers) != 1:
+        errors.append(f"unirl/observability/api.py: expected one Observer protocol, found {len(observers)}")
+    else:
+        _require_members(
+            errors,
+            observers[0],
+            kind="observer contract",
+            methods=(
+                "bind_memory_monitor",
+                "finish",
+                "initialized",
+                "log_eval",
+                "log_generated_media",
+                "log_progress",
+                "log_rollout",
+                "log_rollout_step",
+                "log_step",
+                "optimizer_step",
+                "should_log_media",
+            ),
+            fields=("media_max_items", "run_id"),
+            simple=simple,
+        )
+
+    forbidden_methods = {"_finish_wandb", "_init_wandb", "_loop_wandb_extra"}
+    for trainer_path in _iter_python(ROOT / "unirl/trainer"):
+        tree = ast.parse(trainer_path.read_text(encoding="utf-8"), filename=str(trainer_path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "unirl.utils.wandb_logger":
+                errors.append(
+                    f"{trainer_path.relative_to(ROOT)}:{node.lineno}: trainers must depend on "
+                    "unirl.observability, not the WandB adapter"
+                )
+            if isinstance(node, ast.Import) and any(alias.name == "unirl.utils.wandb_logger" for alias in node.names):
+                errors.append(
+                    f"{trainer_path.relative_to(ROOT)}:{node.lineno}: trainers must depend on "
+                    "unirl.observability, not the WandB adapter"
+                )
+            if isinstance(node, ast.Attribute) and node.attr == "wandb_logger":
+                errors.append(
+                    f"{trainer_path.relative_to(ROOT)}:{node.lineno}: use the provider-neutral observer attribute"
+                )
+            if isinstance(node, ast.Attribute) and node.attr in forbidden_methods:
+                errors.append(
+                    f"{trainer_path.relative_to(ROOT)}:{node.lineno}: lifecycle call {node.attr} "
+                    "leaks a concrete observability provider"
+                )
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in forbidden_methods:
+                errors.append(
+                    f"{trainer_path.relative_to(ROOT)}:{node.lineno}: lifecycle hook {node.name} "
+                    "leaks a concrete observability provider"
+                )
+    return 1
+
+
 def check_loop_programs(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
     expected = {
         "TrainerLifecycle": ("start", "__enter__", "__exit__"),
@@ -705,6 +764,7 @@ def main() -> int:
         "wire types": check_sample_contract(errors, simple),
         "advantage contracts": check_advantage_estimators(errors, simple),
         "reward contracts": check_reward_operations(errors, simple),
+        "observer contracts": check_observer_contract(errors, simple),
         "loop programs": check_loop_programs(errors, simple),
         "entrypoints": check_entrypoints(errors),
     }

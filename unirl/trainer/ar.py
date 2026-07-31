@@ -300,7 +300,7 @@ class ARTrainer(BaseTrainer):
 
         Returns ``(train_result, mean_reward)`` — the mean unnormalized
         per-sample reward of the frontier gen Part (0.0 if none), for the log
-        line. ``rollout_id`` only keys the wandb panels (see :meth:`UniRLWandBLogger.log_rollout_step`).
+        line. ``rollout_id`` only keys the observer panels (see :meth:`Observer.log_rollout_step`).
         """
         t0 = time.perf_counter()
         anchored = self._rollout_anchor_device is not None
@@ -348,7 +348,7 @@ class ARTrainer(BaseTrainer):
             # eager-load/activation allocator cache, not only the anchor rank.
             if anchored:
                 self._ensure_anchored_backend_offloaded()
-        self.wandb_logger.log_rollout_step(
+        self.observer.log_rollout_step(
             rollout_id,
             result,
             sample,
@@ -469,7 +469,7 @@ class ARTrainer(BaseTrainer):
         )
         # MC reward is 0/1 so mean reward == accuracy; also emit it as `reward`
         # so this run shares the eval/reward axis with the other trainers.
-        self.wandb_logger.log_eval(rollout_id + 1, {"acc": acc, "reward": acc})
+        self.observer.log_eval(rollout_id + 1, {"acc": acc, "reward": acc})
         return acc
 
     def _pad_eval_inputs(self, inputs: Sample) -> Sample:
@@ -557,7 +557,7 @@ class ARTrainer(BaseTrainer):
         except Exception as exc:  # debug path — never let it kill training
             logger.warning("rollout sample dump failed: %s", exc)
 
-    def _loop_wandb_extra(self):
+    def _loop_observability_metadata(self):
         return {"adv_normalization_scope": self.adv_normalization_scope}
 
     def _loop_evaluate_baseline(self, state) -> None:
