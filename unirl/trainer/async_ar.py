@@ -39,13 +39,14 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.config.execution import Capability, LoopKind, PlacementMode
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.async_runtime import InflightGeneration
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
-from unirl.trainer.base import BaseTrainer, build_sampling_dict
+from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
@@ -77,6 +78,7 @@ class AsyncARTrainer(ARTrainer):
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
         logging_cfg: Optional[DictConfig] = None,
+        advantage_cfg: Optional[DictConfig] = None,
         adv_normalization_scope: str = "group",
         normalize_adv_by_std: bool = True,
         balance_shards: bool = False,
@@ -99,6 +101,13 @@ class AsyncARTrainer(ARTrainer):
         self.batch_size = batch_size
         self.adv_normalization_scope = adv_normalization_scope
         self.normalize_adv_by_std = normalize_adv_by_std
+        self.advantage_estimator = build_advantage_estimator(
+            advantage_cfg,
+            default=GroupedAdvantageEstimator(
+                scope=self.adv_normalization_scope,
+                normalize=self.normalize_adv_by_std,
+            ),
+        )
         self.balance_shards = bool(balance_shards)
         self.eval_interval = int(eval_interval)
         _num = int(eval_num_prompts)
@@ -240,7 +249,7 @@ class AsyncARTrainer(ARTrainer):
         if part.rewards is not None:
             part.rewards = hydrate(part.rewards)
             mean_reward = float(part.rewards.to(torch.float32).mean().item())
-        part = part.compute_advantages(normalize=self.normalize_adv_by_std, scope=self.adv_normalization_scope)
+        part = estimate_part_advantages(part, self.advantage_estimator)
         sample = sample.with_parts([*sample.parts[:-1], part])
         train_part = part
         if self.balance_shards:

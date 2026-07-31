@@ -91,8 +91,8 @@ and reward metadata remains in `Part.metadata`.
 | `resp.split()` | `sample.split()`; each result contains one root prompt's complete lineage |
 | `track.group_ids` | `part.group_ids` |
 | Root-group lookup / `_root_group_per_sample(...)` | `sample.root_group_ids(part_index)` |
-| `track.compute_advantages(...)` | `part.compute_advantages(...)`; use `group_layer=0` for root-prompt grouping |
-| `resp.compute_track_advantages(...)` | Locate the part, call `Part.compute_advantages(...)`, and write the returned part back with `Sample.with_parts(...)` |
+| `track.compute_advantages(...)` | `algorithms.advantage.estimate_part_advantages(part, estimator)`; use `group_layer=0` for root-prompt grouping |
+| `resp.compute_track_advantages(...)` | Locate the part, run its configured `AdvantageEstimator`, and write the returned part back with `Sample.with_parts(...)` |
 | `resp.propagate_rewards(op=...)` | `sample.propagate_rewards(op=...)` |
 | `track.balance_shards(...)` | `part.balance_shards(...)` |
 | `_track_with_field(...)` | `dataclasses.replace(part, field=value)`, followed by `replace_frontier(...)` or `with_parts(...)` |

@@ -39,6 +39,7 @@ def main(cfg: DictConfig) -> None:
         sync_cfg=cfg.get("sync"),
         dump_dir=cfg.get("dump_dir"),
         logging_cfg=cfg.get("logging"),
+        advantage_cfg=cfg.get("advantage"),
         enable_fsdp_offload=cfg.get("enable_fsdp_offload", True),
         eval_interval=cfg.get("eval_interval", 0),
         eval_num_prompts=cfg.get("eval_num_prompts", cfg.batch_size),

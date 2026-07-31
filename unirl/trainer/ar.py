@@ -8,10 +8,11 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
+from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict, prepare_input_sample
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
@@ -50,6 +51,7 @@ class ARTrainer(BaseTrainer):
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
         logging_cfg: Optional[DictConfig] = None,
+        advantage_cfg: Optional[DictConfig] = None,
         adv_normalization_scope: str = "group",
         normalize_adv_by_std: bool = True,
         balance_shards: bool = False,
@@ -69,6 +71,13 @@ class ARTrainer(BaseTrainer):
         # group std. False = mean-center only (reward - group_mean), NO std division —
         # removes the difficulty bias that over-amplifies low-std (hard) prompts.
         self.normalize_adv_by_std = normalize_adv_by_std
+        self.advantage_estimator = build_advantage_estimator(
+            advantage_cfg,
+            default=GroupedAdvantageEstimator(
+                scope=self.adv_normalization_scope,
+                normalize=self.normalize_adv_by_std,
+            ),
+        )
         # verl trainer.balance_batch parity: driver-side reorder of the rollout
         # batch so each DP shard receives a similar total-token workload. FSDP
         # collectives sync all ranks every micro, so a step runs at the SLOWEST
@@ -325,7 +334,7 @@ class ARTrainer(BaseTrainer):
             if isinstance(part.component_rewards, dict):
                 part.component_rewards = {name: hydrate(value) for name, value in part.component_rewards.items()}
             mean_reward = float(part.rewards.to(torch.float32).mean().item())
-            part = part.compute_advantages(normalize=self.normalize_adv_by_std, scope=self.adv_normalization_scope)
+            part = estimate_part_advantages(part, self.advantage_estimator)
             sample = sample.with_parts([*sample.parts[:-1], part])
 
         self._dump_rollout_samples(sample, rollout_id)

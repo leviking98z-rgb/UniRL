@@ -41,7 +41,7 @@ One ``train_step``::
     sleep ar+dit
     reward.score_and_attach(sample)              # only the frontier image Part is scorable
     sample.propagate_rewards("mean")             # image reward → ar Part
-    part.compute_advantages() per Part           # ar groups by prompt, image by recaption
+    AdvantageEstimator per Part                  # ar groups by prompt, image by recaption
     unified_model_stack.train_track(sample)      # tree-shard lineage → 2 backward → 1 step
 
 Pairs with ``examples/unified_model/hi3_vllmomni.yaml`` and ``unirl/train_unified_model.py``.
@@ -62,11 +62,12 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import TensorRef, hydrate
 from unirl.distributed.tensor.batch import Batch
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
+from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict, prepare_input_sample
 from unirl.trainer.eval_suites import build_eval_suites
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample
@@ -143,6 +144,7 @@ class UnifiedModelTrainer(BaseTrainer):
         sync_cfg: Optional[DictConfig] = None,
         dump_dir: Optional[str] = None,
         logging_cfg: Optional[DictConfig] = None,
+        advantage_cfg: Optional[DictConfig] = None,
         enable_fsdp_offload: bool = True,
         eval_interval: int = 0,
         eval_num_prompts: int = 32,
@@ -152,6 +154,10 @@ class UnifiedModelTrainer(BaseTrainer):
     ) -> None:
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
+        self.advantage_estimator = build_advantage_estimator(
+            advantage_cfg,
+            default=GroupedAdvantageEstimator(),
+        )
         # Colocate memory dance: offload the FSDP train state (base + grads +
         # optimizer) to CPU during rollout so the awake engines fit, onload
         # before the train backward. HI3's ~150GB base needs this → default True.
@@ -625,7 +631,7 @@ class UnifiedModelTrainer(BaseTrainer):
         #    Part is 1:1 with the AR Part, so share the prompt-level advantage;
         #    computing an image advantage by rewrite would produce size-1 groups.
         new_parts = list(sample.parts)
-        new_parts[ar_idx] = new_parts[ar_idx].compute_advantages(normalize=True)
+        new_parts[ar_idx] = estimate_part_advantages(new_parts[ar_idx], self.advantage_estimator)
         if self._shared_advantage:
             if new_parts[img_idx].batch_size != new_parts[ar_idx].batch_size:
                 raise ValueError(
@@ -634,7 +640,7 @@ class UnifiedModelTrainer(BaseTrainer):
                 )
             new_parts[img_idx] = dataclasses.replace(new_parts[img_idx], advantages=new_parts[ar_idx].advantages)
         else:
-            new_parts[img_idx] = new_parts[img_idx].compute_advantages(normalize=True)
+            new_parts[img_idx] = estimate_part_advantages(new_parts[img_idx], self.advantage_estimator)
         sample = sample.with_parts(new_parts)
 
         # Captions for the image previews fall back to the frontier-aligned prompt

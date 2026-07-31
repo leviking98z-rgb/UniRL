@@ -46,10 +46,11 @@ from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.algorithms.advantage import GroupedAdvantageEstimator
 from unirl.config.execution import Capability, LoopKind, PlacementMode
 from unirl.distributed.group.placement import placement, remote
 from unirl.trainer.agentic import AgenticTrainer
-from unirl.trainer.base import BaseTrainer, build_sampling_dict
+from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import BaseSamplingParams
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
@@ -201,6 +202,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
         logging_cfg: Optional[DictConfig] = None,
+        advantage_cfg: Optional[DictConfig] = None,
         adv_normalization_scope: str = "group",
         normalize_adv_by_std: bool = True,
         stop: Optional[List[str]] = None,
@@ -218,6 +220,16 @@ class AsyncAgenticTrainer(AgenticTrainer):
         self.batch_size = int(batch_size)
         self.adv_normalization_scope = adv_normalization_scope
         self.normalize_adv_by_std = normalize_adv_by_std
+        self.advantage_estimator = build_advantage_estimator(
+            advantage_cfg,
+            default=GroupedAdvantageEstimator(
+                scope=self.adv_normalization_scope,
+                normalize=self.normalize_adv_by_std,
+                global_std_unbiased=False,
+                exclude_non_finite=True,
+                variance_epsilon=False,
+            ),
+        )
         self.balance_shards = False
         self.eval_interval = 0  # AgenticTrainer.evaluate raises; agentic eval is a follow-up
         self.data_source = instantiate(data_source_cfg)

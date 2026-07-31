@@ -115,9 +115,9 @@ matching `GRPO` / `DRPO`.
 2. `SGLangRolloutEngine` samples completions and fills the AR `Part` with packed
    `TextSegment.tokens`, `log_probs`, `lengths`, and masks.
 3. `MathVerifyRewardScorer` scores each completion correct/incorrect.
-4. `Part.compute_advantages(normalize=False, scope="group")` mean-centers rewards
-   within each prompt group; the recipe sets `normalize_adv_by_std: false`, so there is **no
-   std division**.
+4. `GroupedAdvantageEstimator(normalize=False, scope="group")` mean-centers
+   rewards within each prompt group; the recipe sets
+   `normalize_adv_by_std: false`, so there is **no std division**.
 5. `TrainStack.train_track` calls `CPPO.compute_loss_and_backward`, which replays the sampled
    tokens at `temperature=sampling_temperature`, reads `old_logp = segment.log_probs`, expands
    advantages to tokens, builds the CPPO mask, applies `segment.loss_mask`, reduces, and

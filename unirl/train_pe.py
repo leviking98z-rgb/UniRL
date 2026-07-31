@@ -30,6 +30,7 @@ def main(cfg: DictConfig) -> None:
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
         logging_cfg=cfg.get("logging"),
+        advantage_cfg=cfg.get("advantage"),
         enable_fsdp_offload=cfg.get("enable_fsdp_offload", False),
         pe_cfg=cfg.get("pe"),
         freeze_llm=cfg.get("freeze_llm", False),

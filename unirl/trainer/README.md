@@ -47,7 +47,7 @@ stay swappable by `_target_`.
 - **The Sample-native loop** (`train_step`) is the conductor sequence, one
   rollout per call: `wake_up` → (sync weights, if due) →
   `rollout.generate(sample)` → `reward.score_and_attach(sample)` →
-  `part.compute_advantages(...)` → drop reward-only decoded media →
+  `estimate_part_advantages(part, advantage_estimator)` → drop reward-only decoded media →
   `stack.train_track(...)`. The driver builds a request `Sample` whose Parts
   preserve prompt lineage and carry sampling parameters. A single-stage stack
   receives the trainable frontier `Part`; `UnifiedModelTrainStack` receives the

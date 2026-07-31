@@ -1,8 +1,9 @@
 # Algorithms
 
-> **Where it fits:** the loss half of the *train* step —
-> rollout → reward → advantage → **train** → sync. In: a track with advantages.
-> Out: gradients on the model (the optimizer step in `../train` consumes them).
+> **Where it fits:** the policy-math half of the loop —
+> rollout → reward → **advantage** → **train** → sync. In: scored rollout data.
+> Out: advantages/value targets and gradients (the optimizer step in `../train`
+> consumes them).
 > Full map: [`../README.md`](../README.md).
 
 <div align="center">
@@ -13,11 +14,12 @@
 
 ## What it is
 
-`unirl.algorithms` is the train-side loss half of the framework. Each algorithm is
-a `StageAlgorithm` that takes a rollout track with advantages already attached,
-replays the stage at the current weights, computes a policy-gradient loss, and
-calls `backward()`. It owns the loss math and nothing else — no optimizer, no
-model, no data.
+`unirl.algorithms` owns reward-to-advantage policy and train-side loss policy.
+An `AdvantageEstimator` converts a typed `AdvantageBatch` into advantages and
+optional value targets; a `StageAlgorithm` then takes a rollout track with those
+advantages attached, replays the stage at current weights, computes a
+policy-gradient loss, and calls `backward()`. Neither owns the optimizer, model,
+reward service, or data source.
 
 ## Why it exists
 
@@ -35,6 +37,31 @@ not just three-tensor arithmetic.
 
 ## How it works
 
+- **Advantage estimation is a component.** `advantage.py` defines one structural
+  input/output contract, `GroupedAdvantageEstimator` for GRPO-style grouped or
+  global normalization, and `GeneralizedAdvantageEstimator` for GAE. Trainers
+  default to grouped estimation and may select another driver-side component
+  with a root recipe block:
+
+  ```yaml
+  advantage:
+    _target_: unirl.algorithms.advantage.GroupedAdvantageEstimator
+    scope: group
+    normalize: true
+  ```
+
+  An explicit `advantage:` block takes precedence over the legacy root
+  `adv_normalization_scope` and `normalize_adv_by_std` compatibility knobs.
+  Agentic rollouts mark failed trajectories with non-finite rewards, so a custom
+  estimator used by an agentic trainer must define how those rows are handled
+  (the built-in agentic default excludes them and returns zero advantage).
+  The estimator must also match the inputs assembled by its trainer: current
+  outcome-reward trainers provide rewards, lineage groups, and component
+  rewards; a value-based trainer is responsible for additionally supplying
+  values and masks to `GeneralizedAdvantageEstimator`.
+
+  The `Part` wire type only carries `rewards`, `component_rewards`, and the
+  resulting `advantages`; estimator policy no longer lives on the data class.
 - **The loop.** The trainer builds one algorithm per track and hands it to a
   `TrainStack`. Per rollout the stack runs `prepare_segment` once (freeze the π_old
   anchor), then `num_updates_per_batch` optimizer steps over disjoint mini-batches,
@@ -56,7 +83,10 @@ not just three-tensor arithmetic.
   with a different SDE strategy or a windowed index scheduler. Add a class only when
   the loss math itself changes.
 
-**Extending it:** a new diffusion loss subclasses `StageAlgorithm`, calls
+**Extending it:** a new reward-to-advantage policy implements
+`AdvantageEstimator.estimate(AdvantageBatch)`, so GDPO-style component rewards or
+value-based targets do not add methods to `Part` or branches to every trainer. A
+new diffusion loss subclasses `StageAlgorithm`, calls
 `stage.replay(...)`, computes a per-element loss, and `(loss * loss_scale).backward()`;
 if it needs multi-update, set `anchor_fields` and `supports_multi_update = True` and
 mirror `FlowGRPO`. A new AR loss mirrors `GRPO` (early-return on an empty

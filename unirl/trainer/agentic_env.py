@@ -64,7 +64,7 @@ class _EnvRewardSource:
                 values.append(float(hydrate(reward).to(torch.float32).flatten()[0].item()))
             else:
                 # Gen-less trajectory = engine-marked failure (the fault hit before the
-                # first turn). NaN, not 0.0, so _group_advantages drops it from the
+                # first turn). NaN, not 0.0, so the estimator drops it from the
                 # group's mean/std and gives it zero advantage — scoring an
                 # infrastructure fault as a genuine miss biases every sibling.
                 values.append(float("nan"))

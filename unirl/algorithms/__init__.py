@@ -5,6 +5,14 @@ Public surface for the ``models`` training contract.
 
 from __future__ import annotations
 
+from .advantage import (
+    AdvantageBatch,
+    AdvantageEstimate,
+    AdvantageEstimator,
+    GeneralizedAdvantageEstimator,
+    GroupedAdvantageEstimator,
+    estimate_part_advantages,
+)
 from .bagel_flow_unigrpo import BagelFlowUniGRPO
 from .base import AlgorithmStepResult, StageAlgorithm
 from .cppo import CPPO, CPPOConfig
@@ -18,6 +26,11 @@ from .gspo import GSPO, GSPOConfig
 from .sft import SFT, FlowMatchSFT
 
 __all__ = [
+    "AdvantageBatch",
+    "AdvantageEstimate",
+    "AdvantageEstimator",
+    "GeneralizedAdvantageEstimator",
+    "GroupedAdvantageEstimator",
     "SFT",
     "FlowMatchSFT",
     "GRPO",
@@ -39,4 +52,5 @@ __all__ = [
     "FlowDPPO",
     "FlowDPPOConfig",
     "StageAlgorithm",
+    "estimate_part_advantages",
 ]

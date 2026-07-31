@@ -94,9 +94,9 @@ The rollout follows the same GRPO-style SDE path, plus the per-step Gaussian mea
 
 1. Selected SDE steps produce `LatentSegment.latents`, `sigmas`, `sde_indices`, and
    (in rollout mode) `sde_logp`.
-2. `RewardService` scores the decoded images, then
-   `Part.compute_advantages(normalize=True, use_global_std=True)` writes
-   prompt-centered, batch-std advantages.
+2. `RewardService` scores the decoded images, then a
+   `GroupedAdvantageEstimator(use_global_std=True)` writes prompt-centered,
+   batch-std advantages.
 3. `TrainStack.train_track` calls `FlowDPPO.prepare_segment` once: a `no_grad`
    replay at pre-update weights that keeps `sde_logp` if present, fills it if missing,
    and **always** writes `segment.sde_means`.

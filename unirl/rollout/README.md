@@ -88,7 +88,8 @@ implements, and add a matching `sync:` handler in `../distributed/weight_sync`.
   intentional exception: `BROADCAST + RANK_ZERO` returns its trajectory list.
 - **Direct sampling forbids a `sync:` block; dedicated requires one.** The trainside
   engine also can't live on a `layout: separate` slab — `_build_rollout` raises.
-- **Reward/advantage methods are not engine code** — `Part.compute_advantages` and
-  `Sample.propagate_rewards` are called by the trainer after scoring. An engine
+- **Reward/advantage methods are not engine code** — `Sample.propagate_rewards`
+  and the configured `AdvantageEstimator` are called by the trainer after
+  scoring. An engine
   fills generation fields such as `segment`, `conditions`, `primitive`, and
   `media_preview`; rewards arrive later from `RewardService`.
