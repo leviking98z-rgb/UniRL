@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.config.execution import ExecutionPlan, LoopKind, PlacementMode
 from unirl.distributed.group.device_pool import DevicePool
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
@@ -141,12 +142,26 @@ class BaseTrainer:
     after each ``train_step``, and :meth:`_finish_wandb` in a ``finally``.
     """
 
+    LOOP_KIND: LoopKind = LoopKind.BATCH_RL
+    PLACEMENT_OVERRIDE: Optional[PlacementMode] = None
+    REQUIRED_SYNC_CAPABILITIES = frozenset()
+
     def __init__(
         self,
         *,
         cfg: DictConfig,
         logging_cfg: Optional[DictConfig] = None,
     ) -> None:
+        # Resolve and validate the recipe's component graph before creating Ray
+        # actors or claiming GPUs. Subclasses select only the outer-loop and
+        # fixed-placement policy; engine/sync capabilities live on components.
+        self.execution_plan = ExecutionPlan.from_config(
+            cfg,
+            loop_kind=self.LOOP_KIND,
+            placement_override=self.PLACEMENT_OVERRIDE,
+            required_sync_capabilities=self.REQUIRED_SYNC_CAPABILITIES,
+        )
+
         # Device topology and tensor transport are driven entirely by top-level
         # cfg keys (num_devices / devices_per_node / workers_per_device /
         # transport_kind / transfer_queue), so the base owns the whole pool +

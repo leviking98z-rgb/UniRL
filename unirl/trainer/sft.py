@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.config.execution import LoopKind
 from unirl.distributed.group.placement import placement
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer
@@ -48,6 +49,8 @@ _DATA_STATE_FILENAME = "sft_data_state.json"
 
 class SFTTrainer(BaseTrainer):
     """Supervised trainer: dataset records → stage loss → optimizer step."""
+
+    LOOP_KIND: LoopKind = LoopKind.SUPERVISED
 
     def __init__(
         self,

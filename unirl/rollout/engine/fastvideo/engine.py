@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.base import BaseSingleTurnRolloutEngine
@@ -68,6 +69,12 @@ def _resolve_sde_window(raw_indices: Any, num_steps: int) -> tuple[Optional[List
 class FastVideoRolloutEngine(BaseSingleTurnRolloutEngine):
     """Rollout engine backed by FastVideo ``VideoGenerator`` (RL fork, PR #1222)."""
 
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.DEDICATED_ROLLOUT,
+        Capability.SINGLE_TURN_GENERATION,
+        Capability.QUIESCE,
+        Capability.CHECKPOINT_WEIGHT_RECEIVER,
+    )
     _component_name = "fastvideo"
 
     def __init__(

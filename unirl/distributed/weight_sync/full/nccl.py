@@ -32,12 +32,19 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.distributed.weight_sync.full.base import FullWeightSync
 
 
 class NCCLWeightSync(FullWeightSync):
     """Separate-slab full-weight sync: rank 0 broadcasts to all rollout GPUs."""
+
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.CROSS_SLAB_WEIGHT_SYNC,
+        Capability.NCCL_RENDEZVOUS,
+        requires=(Capability.NCCL_WEIGHT_RECEIVER,),
+    )
 
     def __init__(
         self,

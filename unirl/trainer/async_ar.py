@@ -31,7 +31,6 @@ plumbing, but ``__init__`` calls ``BaseTrainer.__init__`` **directly** (the pare
 opens the colocate ``placement(fraction=1.0)`` block we replace with two slabs).
 """
 
-import inspect
 import logging
 import sys
 import time
@@ -41,6 +40,7 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.config.execution import Capability, LoopKind, PlacementMode
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.async_runtime import (
@@ -61,6 +61,10 @@ logger = logging.getLogger(__name__)
 
 class AsyncARTrainer(ARTrainer):
     """Disaggregated async AR trainer (two slabs, resident engine, NCCL sync)."""
+
+    LOOP_KIND: LoopKind = LoopKind.ASYNC_BATCH_RL
+    PLACEMENT_OVERRIDE: PlacementMode = PlacementMode.SEPARATE
+    REQUIRED_SYNC_CAPABILITIES = frozenset({Capability.NCCL_RENDEZVOUS})
 
     def __init__(
         self,
@@ -163,7 +167,7 @@ class AsyncARTrainer(ARTrainer):
         # Rollout slab = the rest (fraction is relative to the WHOLE pool).
         with placement(self.pool, fraction=1.0 - self._train_fraction, shared_workers=True):
             rollout_parsed = parse_hydra_cfg(rollout_cfg)
-            if "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters:
+            if self.execution_plan.engine("rollout").is_direct:
                 raise ValueError(
                     "AsyncARTrainer needs a dedicated-rollout engine (vllm/sglang) on the "
                     "separate slab; the trainside direct-sampling engine needs the pipeline "
@@ -172,9 +176,9 @@ class AsyncARTrainer(ARTrainer):
             self.rollout = remote(**rollout_parsed)
 
         if self.weight_sync is not None:
-            self._connect_separate(sync_cfg)
+            self._connect_separate()
 
-    def _connect_separate(self, sync_cfg: DictConfig) -> None:
+    def _connect_separate(self) -> None:
         """One-time cross-slab handshake (NCCL branch of diffusion.py:191-208).
 
         Rank 0 picks a rendezvous addr/port, is handed the rollout slab's Worker
@@ -183,11 +187,11 @@ class AsyncARTrainer(ARTrainer):
         itself. Only ``NCCLWeightSync`` is supported here (always cross-slab
         full-weight); a non-NCCL target is a config error.
         """
-        target = str(sync_cfg.get("_target_", ""))
-        if not target.endswith("NCCLWeightSync"):
+        sync = self.execution_plan.sync_for("rollout")
+        if not sync.supports(Capability.NCCL_RENDEZVOUS):
             raise ValueError(
                 f"AsyncARTrainer (separate slabs) requires a cross-slab weight sync "
-                f"(NCCLWeightSync); got sync._target_={target!r}."
+                f"with NCCL rendezvous; got {sync.node.target!r}."
             )
         addr, port = self.weight_sync.pick_master()[0]
         self.weight_sync.set_rollout_targets(self.rollout.workers, self.rollout.role_name)

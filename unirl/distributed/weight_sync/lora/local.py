@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.weight_sync.lora.base import LoraWeightSyncBase
 
@@ -29,6 +30,11 @@ class LocalLoraWeightSync(LoraWeightSyncBase):
     REQUIRED. (Cross-process engines that are not siblings are handled by
     :class:`~unirl.distributed.weight_sync.lora.remote.RemoteLoraWeightSync`.)
     """
+
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.COLOCATED_WEIGHT_SYNC,
+        requires=(Capability.LORA_WEIGHT_RECEIVER,),
+    )
 
     def __init__(
         self,

@@ -52,7 +52,6 @@ eval cadence, structured logging.
 from __future__ import annotations
 
 import dataclasses
-import inspect
 import json
 import logging
 import os
@@ -233,7 +232,7 @@ class UnifiedModelTrainer(BaseTrainer):
                 self.ar_rollout = None
                 self.dit_rollout = None
                 rollout_parsed = parse_hydra_cfg(rollout_cfg)
-                self._rollout_is_trainside = "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters
+                self._rollout_is_trainside = self.execution_plan.engine("rollout").is_direct
                 if self._rollout_is_trainside:
                     self.rollout = remote(**rollout_parsed, pipeline=self.pipeline)
                     self._enable_fsdp_offload = False  # shares live FSDP modules

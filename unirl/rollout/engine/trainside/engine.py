@@ -14,6 +14,7 @@ from typing import List, Optional, Sequence, Union
 
 import torch
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.models.types.ar import ARStage
 from unirl.models.types.diffusion import DiffusionStage
@@ -50,6 +51,10 @@ class TrainsideRolloutEngine(BaseSingleTurnRolloutEngine):
             drop their output; ``generate`` rejects that combination.
     """
 
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.DIRECT_ROLLOUT,
+        Capability.SINGLE_TURN_GENERATION,
+    )
     _component_name = "trainside"
 
     def __init__(

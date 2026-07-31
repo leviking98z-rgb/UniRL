@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.distributed.weight_sync.lora.base import LoraWeightSyncBase
 
@@ -37,6 +38,12 @@ class RemoteLoraWeightSync(LoraWeightSyncBase):
     ranks 2..N (HI3); leave it False for TP=1 engines (SD3 separate slabs).
     ``verify`` (``loaded_lora_checksums`` read-back) is vLLM-Omni-only.
     """
+
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.CROSS_SLAB_WEIGHT_SYNC,
+        Capability.ROLLOUT_TARGET_HANDOFF,
+        requires=(Capability.LORA_WEIGHT_RECEIVER,),
+    )
 
     def __init__(
         self,

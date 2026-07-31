@@ -187,7 +187,26 @@ def check_rollout_engines(errors: list[str], simple: dict[str, list[ClassInfo]])
             errors.append(
                 f"{info.path.relative_to(ROOT)}: rollout engine {info.name} must implement {missing} directly"
             )
+        if "CAPABILITIES" not in info.fields:
+            errors.append(
+                f"{info.path.relative_to(ROOT)}: rollout engine {info.name} must declare CAPABILITIES directly"
+            )
     return len(engines)
+
+
+def check_weight_syncs(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
+    syncs = [
+        info
+        for infos in simple.values()
+        for info in infos
+        if info.name not in {"FullWeightSync", "LoraWeightSyncBase"}
+        and (_descends_from(info, "FullWeightSync", simple) or _descends_from(info, "LoraWeightSyncBase", simple))
+        and "/distributed/weight_sync/" in info.path.as_posix()
+    ]
+    for info in syncs:
+        if "CAPABILITIES" not in info.fields:
+            errors.append(f"{info.path.relative_to(ROOT)}: weight sync {info.name} must declare CAPABILITIES directly")
+    return len(syncs)
 
 
 def check_model_pipelines(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
@@ -324,6 +343,7 @@ def main() -> int:
     errors: list[str] = []
     counts = {
         "rollout engines": check_rollout_engines(errors, simple),
+        "weight syncs": check_weight_syncs(errors, simple),
         "model pipelines": check_model_pipelines(errors, simple),
         "train backends": check_train_backends(errors, simple),
         "wire types": check_sample_contract(errors, simple),

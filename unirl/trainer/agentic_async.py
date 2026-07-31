@@ -39,7 +39,6 @@ turns span weight versions is correct per-token because each gen ``Part`` keeps 
 
 from __future__ import annotations
 
-import inspect
 import logging
 import sys
 import time
@@ -49,6 +48,7 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from unirl.config.execution import Capability, LoopKind, PlacementMode
 from unirl.distributed.group.placement import placement, remote
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.agentic import AgenticTrainer
@@ -179,6 +179,10 @@ class _GroupBuffer:
 class AsyncAgenticTrainer(AgenticTrainer):
     """Disaggregated fully-async agentic trainer (two slabs, resident engine, NCCL sync)."""
 
+    LOOP_KIND: LoopKind = LoopKind.ASYNC_AGENTIC_RL
+    PLACEMENT_OVERRIDE: PlacementMode = PlacementMode.SEPARATE
+    REQUIRED_SYNC_CAPABILITIES = frozenset({Capability.NCCL_RENDEZVOUS})
+
     _POLL_INTERVAL_S = 0.02  # backoff between polls while the in-flight drive fills the buffer
     _MAX_REFILLS = 64  # underflow guard: refills of a drained-but-short buffer before we give up
 
@@ -277,7 +281,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
                 self.weight_sync = remote_hydra(sync_cfg, backend=self.backend)
         with placement(self.pool, fraction=1.0 - self._train_fraction, shared_workers=True):
             rollout_parsed = parse_hydra_cfg(rollout_cfg)
-            if "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters:
+            if self.execution_plan.engine("rollout").is_direct:
                 raise ValueError(
                     "AsyncAgenticTrainer needs a dedicated agentic-rollout engine on the "
                     "separate slab (its inner sglang/vllm engine lives cross-slab)."
@@ -288,15 +292,15 @@ class AsyncAgenticTrainer(AgenticTrainer):
         self.rollout.set_workers(self.rollout.workers, self.rollout.role_name)
 
         if self.weight_sync is not None:
-            self._connect_separate(sync_cfg)
+            self._connect_separate()
 
-    def _connect_separate(self, sync_cfg: DictConfig) -> None:
+    def _connect_separate(self) -> None:
         """One-time cross-slab NCCL handshake (identical to AsyncARTrainer)."""
-        target = str(sync_cfg.get("_target_", ""))
-        if not target.endswith("NCCLWeightSync"):
+        sync = self.execution_plan.sync_for("rollout")
+        if not sync.supports(Capability.NCCL_RENDEZVOUS):
             raise ValueError(
                 f"AsyncAgenticTrainer (separate slabs) requires a cross-slab weight sync "
-                f"(NCCLWeightSync); got sync._target_={target!r}."
+                f"with NCCL rendezvous; got {sync.node.target!r}."
             )
         addr, port = self.weight_sync.pick_master()[0]
         self.weight_sync.set_rollout_targets(self.rollout.workers, self.rollout.role_name)

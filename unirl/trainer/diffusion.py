@@ -1,5 +1,4 @@
 import dataclasses
-import inspect
 import logging
 import os
 import time
@@ -9,6 +8,7 @@ import torch
 from hydra.utils import get_class, get_object, instantiate
 from omegaconf import DictConfig
 
+from unirl.config.execution import Capability
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.train.stack import TrainStepResult
@@ -186,7 +186,7 @@ class DiffusionTrainer(BaseTrainer):
             with placement(self.pool, fraction=1.0 - train_fraction - reward_fraction, shared_workers=True):
                 self.rollout = self._build_rollout(rollout_cfg, allow_pipeline=False)
             if self.weight_sync is not None:
-                self._connect_separate(sync_cfg)
+                self._connect_separate()
         else:
             # Single slab: train + rollout are siblings on one Worker; reward (if
             # separate) takes the tail below, so this slab is the pool minus reward.
@@ -281,7 +281,7 @@ class DiffusionTrainer(BaseTrainer):
         sglang engines take no pipeline and work in either layout.
         """
         rollout_parsed = parse_hydra_cfg(rollout_cfg)
-        if "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters:
+        if self.execution_plan.engine("rollout").is_direct:
             if not allow_pipeline:
                 raise ValueError(
                     "layout='separate' requires a dedicated-rollout engine "
@@ -299,7 +299,7 @@ class DiffusionTrainer(BaseTrainer):
             return remote(**rollout_parsed, pipeline=self.pipeline, sp_size=self.backend.sp_size)  # direct sampling
         return remote(**rollout_parsed)  # vllm / sglang
 
-    def _connect_separate(self, sync_cfg: DictConfig) -> None:
+    def _connect_separate(self) -> None:
         """One-time cross-slab handshake: hand rank 0 the rollout Worker handles.
 
         Driver-orchestrated because the rollout slab is cross-slab (not a
@@ -309,7 +309,8 @@ class DiffusionTrainer(BaseTrainer):
         on rank 0, hand it the rollout Worker handles, then ``connect`` (rank 0
         fires the rollout joins non-blocking, then joins the group itself).
         """
-        if str(sync_cfg.get("_target_", "")).endswith("NCCLWeightSync"):
+        sync = self.execution_plan.sync_for("rollout")
+        if sync.supports(Capability.NCCL_RENDEZVOUS):
             addr, port = self.weight_sync.pick_master()[0]
             self.weight_sync.set_rollout_targets(self.rollout.workers, self.rollout.role_name)
             self.weight_sync.connect(
@@ -317,8 +318,10 @@ class DiffusionTrainer(BaseTrainer):
                 master_port=port,
                 num_rollout_gpus=len(self.rollout.workers),
             )
-        else:
+        elif sync.supports(Capability.ROLLOUT_TARGET_HANDOFF):
             self.weight_sync.set_rollout_targets([(self.rollout.role_name, self.rollout.workers)])
+        else:  # ExecutionPlan normally rejects this before DevicePool creation.
+            raise RuntimeError(f"{sync.node.target} has no supported cross-slab connection protocol.")
 
     def _resolve_noise_latent_shape(self, *, pipeline_cfg: DictConfig, model_cfg: DictConfig) -> Optional[list]:
         """Per-sample latent shape for the driver-authored x_T recipe, or ``None``.

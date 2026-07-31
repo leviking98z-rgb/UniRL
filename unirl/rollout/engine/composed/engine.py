@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from unirl.config.execution import Capability, ComponentCapabilities
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.models.pe.instruction import postprocess_pe_texts
@@ -53,6 +54,15 @@ def _cleanup_constructed_child(name: str, child: Any) -> None:
 class ComposedRolloutEngine(BaseSingleTurnRolloutEngine):
     """Two-child rollout engine for prompt-enhancement (PE) serial flow."""
 
+    CAPABILITIES: ComponentCapabilities = ComponentCapabilities.of(
+        Capability.DEDICATED_ROLLOUT,
+        Capability.SINGLE_TURN_GENERATION,
+        Capability.QUIESCE,
+        Capability.TENSOR_WEIGHT_RECEIVER,
+        Capability.NCCL_WEIGHT_RECEIVER,
+        Capability.IPC_WEIGHT_RECEIVER,
+        Capability.LORA_WEIGHT_RECEIVER,
+    )
     _component_name = "composed"
 
     # ------------------------------------------------------------------

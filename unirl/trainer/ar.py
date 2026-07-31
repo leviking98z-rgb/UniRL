@@ -1,4 +1,3 @@
-import inspect
 import logging
 import math
 import time
@@ -126,7 +125,7 @@ class ARTrainer(BaseTrainer):
             rollout_parsed = parse_hydra_cfg(rollout_cfg)
             if self._rollout_anchor_device is None:
                 # Default SPMD rollout path.
-                if "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters:
+                if self.execution_plan.engine("rollout").is_direct:
                     self.rollout = remote(**rollout_parsed, pipeline=self.pipeline)  # for direct sampling
                 else:
                     self.rollout = remote(**rollout_parsed)  # for vllm / sglang TP=1
