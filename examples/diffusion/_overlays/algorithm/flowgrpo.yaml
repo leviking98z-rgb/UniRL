@@ -1,0 +1,14 @@
+# @package _global_
+# Standard FlowGRPO kernel and fixed first-half SDE schedule.
+
+pipeline:
+  strategy:
+    _target_: unirl.sde.kernels.FlowSDEStrategy
+
+sampling:
+  init_same_noise: false
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: null

@@ -1,0 +1,75 @@
+# @package _global_
+# Canonical WAN 2.1 T2V model/task profile shared by the 720p GRPO recipes.
+
+batch_size: 48
+adv_use_global_std: true
+num_rollouts: 1000
+
+bundle:
+  _target_: unirl.models.wan21.bundle.WAN21Bundle.from_config
+  config:
+    _target_: unirl.models.wan21.config.WAN21PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Wan-AI/Wan2.1-T2V-1.3B-Diffusers}
+    model_precision: bf16
+    shift: 5.0
+    max_sequence_length: 512
+
+pipeline:
+  _target_: unirl.models.wan21.pipeline.WAN21Pipeline
+  shift: 5.0
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  max_sequence_length: 512
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.video_pickscore.VideoPickScoreScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.video_pickscore.VideoPickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+      model_id: yuvalkirstain/PickScore_v1
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  old_logp_source: replay
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.wan21.conditions.WAN21Conditions
+  params: ${sampling}
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 14
+  guidance_scale: 1.0
+  height: 720
+  width: 1280
+  num_frames: 5
+  eta: 0.7
+  samples_per_prompt: 16
+  seed: 42
+
+logging:
+  report_to_wandb: ${oc.decode:${oc.env:REPORT_TO_WANDB,true}}
+  project_name: ${oc.env:WANDB_PROJECT,unirl-grpo-t2v}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  log_media: false
+  media_max_items: 8
+  media_log_interval: 1

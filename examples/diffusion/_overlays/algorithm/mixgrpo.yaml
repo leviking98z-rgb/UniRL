@@ -1,0 +1,22 @@
+# @package _global_
+# MixGRPO shares group noise and advances a progressive SDE-index window.
+
+pipeline:
+  strategy:
+    _target_: unirl.sde.kernels.FlowSDEStrategy
+
+sampling:
+  init_same_noise: true
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.WindowScheduler
+    num_timesteps: ${..num_inference_steps}
+    config:
+      _target_: unirl.utils.scheduler_utils.WindowConfig
+      strategy: progressive
+      window_size: 4
+      iters_per_window: 25
+      init_timestep: 0
+      overlap_size: 1
+      roll_back: true
+      max_iters_per_window: 10
+      min_iters_per_window: 1
