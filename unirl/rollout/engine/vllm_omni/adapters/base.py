@@ -24,6 +24,7 @@ frozensets so the engine never branches on a modality string.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from importlib import import_module
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from unirl.config.require import require
@@ -36,12 +37,31 @@ from unirl.types.rollout_resp import RolloutResp
 # --------------------------------------------------------------------------- #
 
 _REGISTRY: Dict[str, type["ModelAdapter"]] = {}
+_BUILTIN_ADAPTERS = {
+    "bagel_t2i": "unirl.rollout.engine.vllm_omni.adapters.bagel:BagelT2iAdapter",
+    "hi3_ar_recaption": "unirl.rollout.engine.vllm_omni.adapters.hi3:Hi3ArRecaptionAdapter",
+    "hi3_dit_recaption": "unirl.rollout.engine.vllm_omni.adapters.hi3:Hi3DitRecaptionAdapter",
+    "hi3_i2t": "unirl.rollout.engine.vllm_omni.adapters.hi3:Hi3I2tAdapter",
+    "hi3_it2i": "unirl.rollout.engine.vllm_omni.adapters.hi3:Hi3It2iAdapter",
+    "hi3_t2i": "unirl.rollout.engine.vllm_omni.adapters.hi3:Hi3T2iAdapter",
+    "hi3_t2t": "unirl.rollout.engine.vllm_omni.adapters.hi3:Hi3T2tAdapter",
+    "hv15_t2v": "unirl.rollout.engine.vllm_omni.adapters.hv15:Hv15T2vAdapter",
+    "qwen_image_t2i": "unirl.rollout.engine.vllm_omni.adapters.qwen_image:QwenImageT2iAdapter",
+    "sd3_t2i": "unirl.rollout.engine.vllm_omni.adapters.sd3:Sd3T2iAdapter",
+}
 
 
 def register_adapter(key: str):
     """Class decorator: register an adapter under its ``modality`` key."""
 
     def deco(cls: type["ModelAdapter"]) -> type["ModelAdapter"]:
+        builtin = _BUILTIN_ADAPTERS.get(key)
+        if builtin is not None:
+            expected_module, expected_name = builtin.split(":", 1)
+            require(
+                (cls.__module__, cls.__name__) == (expected_module, expected_name),
+                f"adapter key {key!r} is reserved for {builtin}",
+            )
         require(
             key not in _REGISTRY,
             f"adapter key {key!r} already registered by {_REGISTRY.get(key)!r}",
@@ -54,16 +74,26 @@ def register_adapter(key: str):
 
 
 def get_adapter(key: str) -> type["ModelAdapter"]:
-    """Look up the adapter class for a ``modality`` key."""
+    """Look up an adapter class, importing its family module only on first use."""
+    if key in _REGISTRY:
+        return _REGISTRY[key]
+
     require(
-        key in _REGISTRY,
-        f"unknown modality {key!r}; registered: {sorted(_REGISTRY)}",
+        key in _BUILTIN_ADAPTERS,
+        f"unknown modality {key!r}; registered: {list(registered_adapters())}",
     )
-    return _REGISTRY[key]
+    module_name, class_name = _BUILTIN_ADAPTERS[key].split(":", 1)
+    module = import_module(module_name)
+    adapter_cls = getattr(module, class_name)
+    require(
+        _REGISTRY.get(key) is adapter_cls,
+        f"built-in adapter {key!r} did not register {_BUILTIN_ADAPTERS[key]}",
+    )
+    return adapter_cls
 
 
 def registered_adapters() -> Tuple[str, ...]:
-    return tuple(sorted(_REGISTRY))
+    return tuple(sorted(_BUILTIN_ADAPTERS.keys() | _REGISTRY.keys()))
 
 
 # --------------------------------------------------------------------------- #
