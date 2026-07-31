@@ -48,7 +48,7 @@ framework's default machinery already handles.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 
 import PIL.Image
 import torch
@@ -131,21 +131,31 @@ class Video:
             raise ValueError("Cannot take the first frame of an empty video")
         return frames[0]
 
-    def sample_uniform(self, count: int) -> torch.Tensor:
+    def sample_uniform(
+        self,
+        count: int,
+        *,
+        rounding: Literal["floor", "nearest"] = "floor",
+    ) -> torch.Tensor:
         """Return exactly ``count`` evenly-spaced frames in canonical order.
 
         Sampling includes both endpoints when ``count > 1``. Indices repeat
         when the video has fewer than ``count`` frames, which keeps downstream
-        frame batches rectangular.
+        frame batches rectangular. ``rounding`` makes the estimator's index
+        policy explicit while preserving floor sampling as the default.
         """
         if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
             raise ValueError(f"Video.sample_uniform count must be a positive integer, got {count!r}")
+        if rounding not in {"floor", "nearest"}:
+            raise ValueError(f"Video.sample_uniform rounding must be 'floor' or 'nearest', got {rounding!r}")
         frames = self.as_tchw()
         total = int(frames.shape[0])
         if total == 0:
             raise ValueError("Cannot sample frames from an empty video")
-        indices = torch.linspace(0, total - 1, steps=count, device=frames.device).long()
-        return frames.index_select(0, indices)
+        indices = torch.linspace(0, total - 1, steps=count, device=frames.device)
+        if rounding == "nearest":
+            indices = indices.round()
+        return frames.index_select(0, indices.long())
 
     def to_pils(self) -> List[PIL.Image.Image]:
         from torchvision.transforms.functional import to_pil_image
