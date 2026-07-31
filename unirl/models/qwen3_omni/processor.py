@@ -246,10 +246,7 @@ class Qwen3OmniProcessorCodec:
         input_ids = encoding["input_ids"]
         attention_mask = encoding["attention_mask"]
         if input_ids.ndim != 2 or int(input_ids.shape[0]) != 1:
-            raise ValueError(
-                f"{self.owner}: processor input_ids must have shape [1, L], "
-                f"got {tuple(input_ids.shape)}"
-            )
+            raise ValueError(f"{self.owner}: processor input_ids must have shape [1, L], got {tuple(input_ids.shape)}")
         if tuple(attention_mask.shape) != tuple(input_ids.shape):
             raise ValueError(
                 f"{self.owner}: attention_mask shape {tuple(attention_mask.shape)} "
