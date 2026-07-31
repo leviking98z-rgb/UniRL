@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from hydra import compose, initialize_config_dir
@@ -17,6 +18,8 @@ CANONICAL_RECIPES = (
     "diffusion/wan21/wan21_t2v",
     "diffusion/wan21/wan21_t2v_dancegrpo",
     "diffusion/wan21/wan21_t2v_mixgrpo",
+    "diffusion/wan22_v2v/wan22_v2v_14b",
+    "diffusion/wan2_v2v",
 )
 
 REQUIRED_ROOT_KEYS = {
@@ -34,6 +37,7 @@ REQUIRED_ROOT_KEYS = {
 
 def main() -> int:
     errors: list[str] = []
+    os.environ.setdefault("DATA_PATH", "__canonical_recipe_data__")
     with initialize_config_dir(version_base=None, config_dir=str(CONFIG_ROOT)):
         for recipe in CANONICAL_RECIPES:
             try:
