@@ -65,7 +65,7 @@ cross-layer imports there.
 | Path | Responsibility |
 |---|---|
 | `train_*.py` | Hydra entrypoints for diffusion, AR, prompt enhancement, unified models, and synchronous/partial/asynchronous agentic workflows |
-| `trainer/` | Training lifecycle (`base.py` plus domain and agentic trainers): owns placement, builds workers, and runs the rollout→reward→advantage→train loop |
+| `trainer/` | Orchestration (`base.py`, explicit loop programs, and domain trainers): owns placement, worker wiring, resume/cadence/teardown, and the rollout→reward→advantage→train sequence |
 | `config/` | `require` + `validate_*` cross-component validators over the flat Hydra recipe (instantiation itself is `_target_`-driven, not in this module) |
 | `distributed/` | Ray worker base (`Remote`) + placement/dispatch (`group/`), tensor transport (`tensor/`), and weight sync (`weight_sync/`) |
 | `rollout/` | Rollout engine contracts and implementations (`engine/`: trainside, sglang, sglang_diffusion, vllm_omni, composed) |

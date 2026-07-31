@@ -850,80 +850,14 @@ class UnifiedModelTrainer(BaseTrainer):
                     counts[name] += int(r.numel())
         return {name: sums[name] / max(1, counts[name]) for name, _ in scorers}
 
-    def train(
-        self,
-        *,
-        num_rollouts: int,
-        weight_sync_interval: int = 1,
-        save_interval: int = 0,
-        save_dir: Optional[str] = None,
-        load_dir: Optional[str] = None,
-        save_mode: str = "auto",
-    ) -> None:
-        """Minimal training loop: ``num_rollouts`` iterations of ``train_step``.
+    def _loop_before_step(self, state) -> None:
+        self._dump_rollout_id = state.step
 
-        ``save_interval``: write a checkpoint every N rollouts (and on the last
-        one); ``0`` disables it. ``save_dir`` defaults to ``./checkpoints``;
-        ``save_mode="auto"`` writes LoRA-only checkpoints when LoRA is active
-        and full checkpoints otherwise. ``load_dir``: restore from a checkpoint
-        directory and RESUME from its saved step — ``num_rollouts`` is the TOTAL
-        budget.
-        """
-        interval = max(1, weight_sync_interval)
-        start_rollout = self.maybe_load_checkpoint(load_dir, num_rollouts=num_rollouts)
-        resumed = bool(load_dir)
-        # Fast-forward the data stream to the resume point — exact when
-        # run.seed is set (deterministic shuffle); with seed=null the stream
-        # is non-reproducible anyway.
-        for _ in range(start_rollout):
-            self.data_source.get_samples(self.batch_size)
-        self._init_wandb(num_rollouts=num_rollouts)
-        try:
-            if self.eval_interval > 0:
-                self.evaluate(start_rollout)  # baseline eval before any training
-            for rollout_id in range(start_rollout, num_rollouts):
-                training_progress = rollout_id / max(1, num_rollouts - 1)
-                self._dump_rollout_id = rollout_id  # picked up by train_step's dump
-                inputs = self.data_source.get_samples(self.batch_size)
-                sample = self._build_request_sample(inputs, rollout_id)
-                # Sync before generate; skip step 0 (nothing trained yet). On
-                # resume, force the first sync — the engine booted with fresh
-                # weights and needs the restored adapter before generate. The
-                # HI3_SYNC_FIRST env forces a sync on rollout 0 too — a debug knob
-                # to exercise the LoRA-sync path early (cheaply) without a full
-                # extra rollout; the rollout-0 adapter is ~0 but that's fine for
-                # testing the register→activate mechanism.
-                force_sync = (resumed and rollout_id == start_rollout) or (
-                    rollout_id == 0 and bool(os.environ.get("HI3_SYNC_FIRST"))
-                )
-                sync_weights = force_sync or (rollout_id > 0 and rollout_id % interval == 0)
-                results, mean_reward = self.train_step(
-                    sample,
-                    training_progress=training_progress,
-                    sync_weights=sync_weights,
-                    rollout_id=rollout_id,
-                )
-                # Per-track console line (ar / image) with the step-0 ratio probe
-                # (π_old vs π_θ alignment): on rollout 0 the LoRA is ~0 so a correct
-                # replay should give ratio≈1, std≈0; a systematic offset means the
-                # logp convention (temperature / top-k-p filtering / full-vs-renorm
-                # softmax) doesn't match vLLM's sampler.
-                self.wandb_logger.log_progress(rollout_id, num_rollouts, results, mean_reward, logger=logger)
-                # eval(k) BEFORE save(checkpoint-k) at the same step, so a
-                # resumed checkpoint re-runs the same eval (A/B consistency).
-                if self.eval_interval > 0 and (rollout_id + 1) % self.eval_interval == 0:
-                    self.evaluate(rollout_id + 1)
-                self.maybe_save_checkpoint(
-                    rollout_id, num_rollouts, save_interval=save_interval, save_dir=save_dir, save_mode=save_mode
-                )
-        except Exception:
-            # Surface the real failure (e.g. a worker CUDA OOM re-raised by ray.get)
-            # at the point we catch it -- before _finish_wandb runs -- so it lands in
-            # the log immediately instead of being masked by a hanging teardown.
-            logger.exception("Training loop aborted at rollout %s", locals().get("rollout_id", "?"))
-            raise
-        finally:
-            self._finish_wandb()
+    def _loop_force_sync(self, state) -> bool:
+        return state.step == 0 and bool(os.environ.get("HI3_SYNC_FIRST"))
+
+    def _loop_on_error(self, state) -> None:
+        logger.exception("Training loop aborted at rollout %s", state.step if state is not None else "?")
 
 
 __all__ = ["UnifiedModelTrainer"]

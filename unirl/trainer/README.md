@@ -10,11 +10,11 @@
 
 `unirl/trainer/` holds the driver-side trainers for diffusion, autoregressive,
 supervised fine-tuning, prompt-enhancement, unified-model, ReFL, asynchronous,
-and agentic runs. They
-subclass `BaseTrainer` directly or through a domain trainer. A trainer places the
-rollout and train workers on GPUs, builds the rollout engine / reward service /
-train stack(s) / weight-sync handler, and runs the optimizer loop over them. It
-owns **placement and sequencing** — and nothing else: the loss math is
+and agentic runs. They subclass `BaseTrainer` directly or through a domain
+trainer. A trainer places the rollout and train workers on GPUs and builds the
+rollout engine / reward service / train stack(s) / weight-sync handler. Explicit
+`LoopProgram` families then sequence those collaborators. Together they own
+**placement and sequencing** — and nothing else: the loss math is
 `../algorithms`, the optimizer is `../train`, sampling is `../rollout`, and
 scoring is `../reward`.
 
@@ -30,7 +30,13 @@ stay swappable by `_target_`.
 
 - **`BaseTrainer`** (`base.py`) owns the `DevicePool` (built from the top-level cfg:
   `num_devices` / `transport_kind` + the optional TransferQueue bootstrap) and the
-  optional rank-0 wandb logger. Subclasses get the configured pool for free.
+  optional rank-0 wandb logger. It also exposes the standard synchronous batch-RL
+  entry point and idempotent runtime shutdown. Subclasses get the configured pool
+  for free.
+- **Loop programs** (`program.py`) own resume, data restoration, eval/save/sync
+  cadence, logger finalization, quiescence, and ordered shutdown. The three
+  explicit families are `BatchRLProgram`, `AgenticRLProgram`, and `SFTProgram`;
+  `TrainerLifecycle` preserves the original training error if cleanup also fails.
 - **Build phase** (`__init__`). The trainer builds the remote graph in a
   `placement(...)` scope, threading **one shared bundle** into both consumers —
   `bundle → pipeline(bundle) → backend(bundle) → reward → algorithm → stack` — then
@@ -67,9 +73,13 @@ The current trainer surface is:
 | `AgenticPartialTrainer` / `AgenticEnvPartialTrainer` | freshest complete trajectory groups → concatenated turn `Part` | Colocated over-sample/commit/abort loop. `carry` is for Sample-resumable stateless tools; `drop` purges tails from stateful environments that restart episodes. |
 | `AsyncAgenticTrainer` / `AsyncAgenticEnvTrainer` | buffered complete trajectory groups → concatenated turn `Part` | Disaggregated train/rollout slabs, resident agentic drive, weight-version staleness control, and the same explicit `carry`/`drop` tail policy. |
 
-**Extending it:** a new domain is a new `<Domain>Trainer(BaseTrainer)` that builds its
-remotes inside a `placement(...)` scope and implements `train_step` + `train`; the
-matching `../train_<domain>.py` entrypoint composes the recipe and calls it.
+**Extending it:** a new batch-RL domain is a new
+`<Domain>Trainer(BaseTrainer)` that builds its remotes inside a
+`placement(...)` scope and implements request construction plus `train_step`;
+it inherits the standard program. Add a new program only when the outer-loop
+semantics are genuinely different (for example agentic tail handling or SFT's
+dataset cursor), rather than copying `train()`. The matching
+`../train_<domain>.py` entrypoint composes the recipe and calls it.
 
 ## Checkpointing
 

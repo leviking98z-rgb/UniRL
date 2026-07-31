@@ -29,13 +29,12 @@ how long a completed group remains eligible in the buffer.
 from __future__ import annotations
 
 import logging
-import sys
 import time
 from collections import Counter
 from typing import Dict, List, Literal, Optional
 
+from unirl.config.execution import LoopKind
 from unirl.trainer.agentic import AgenticTrainer
-from unirl.trainer.agentic_async import _GroupAssembler, _GroupBuffer
 from unirl.trainer.agentic_env import _EnvRewardSource
 from unirl.types.sample import Part, Sample
 
@@ -44,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 class AgenticPartialTrainer(AgenticTrainer):
     """Colocate partial-rollout trainer (over-sample → commit-N → abort tail → carry/drop)."""
+
+    LOOP_KIND: LoopKind = LoopKind.PARTIAL_AGENTIC_RL
 
     # Backoff between polls while the in-flight drive fills the buffer. Larger than the async
     # trainer's 0.02 because the colocate coordinator (rank 0) also serves every worker's
@@ -225,98 +226,41 @@ class AgenticPartialTrainer(AgenticTrainer):
         self._apply_tail_policy(carried, rollout_id)
         return groups
 
-    # ------------------------------------------------------------------
-    # Train loop — override ARTrainer.train (the tail must carry across rollouts)
-    # ------------------------------------------------------------------
-
-    def train(
+    def _train_on_groups(
         self,
+        groups: List[List[Sample]],
         *,
-        num_rollouts: int,
-        weight_sync_interval: int = 1,
-        save_interval: int = 0,
-        save_dir: Optional[str] = None,
-        load_dir: Optional[str] = None,
-        save_mode: str = "auto",
-    ) -> None:
-        interval = max(1, weight_sync_interval)
-        stale = self._buffer_max_staleness if self._buffer_max_staleness is not None else 0
-
-        start_rollout = self.maybe_load_checkpoint(load_dir, num_rollouts=num_rollouts)
-        resumed = bool(load_dir)
-        # One get_samples(oversample) per drive → replay to restore the stream position (a refill
-        # draws extra, so exact resume holds only when the over-sample avoids refills).
-        for _ in range(start_rollout):
-            self.data_source.get_samples(self._oversample)
-        self._init_wandb(
-            num_rollouts=num_rollouts,
-            extra={
-                "adv_normalization_scope": self.adv_normalization_scope,
-                "oversample_batch_size": self._oversample,
-                "buffer_max_staleness": stale,
-                "tail_policy": self._tail_policy,
-                "weight_sync_interval": interval,
+        training_progress: float,
+        rollout_id: int,
+        t0: float,
+    ):
+        """Reward and train one committed batch of complete trajectory groups."""
+        trajs = [trajectory for group in groups for trajectory in group]
+        rewards, group_ids = self._rewards_and_groups(
+            self._reconstruct_request(trajs),
+            trajs,
+            rollout_id,
+        )
+        for root in {self._assembler.root_of(traj) for traj in trajs}:
+            self._gt_by_root.pop(root, None)
+        return self._advantage_train_and_log(
+            trajs,
+            rewards,
+            group_ids,
+            rollout_id=rollout_id,
+            training_progress=training_progress,
+            t0=t0,
+            extra_metrics={
+                "partial/committed_groups": len(groups),
+                "partial/carried_trajectories": len(self._carried),
+                "partial/dropped_trajectories": self._last_dropped_trajectories,
+                "partial/dropped_roots": self._last_dropped_roots,
+                "partial/discarded_completed_trajectories": self._last_discarded_completed_trajectories,
+                "partial/assembler_pending_roots": self._assembler.size(),
+                "partial/buffer_groups": self._buffer.size(),
+                "partial/weight_version": self._weight_version,
             },
         )
-
-        self._buffer = _GroupBuffer()
-        self._assembler = _GroupAssembler(self._n)
-        self._carried = []
-        self._gen_id = start_rollout
-
-        try:
-            if self.eval_interval > 0:
-                self.evaluate(rollout_id=-1)  # AgenticTrainer.evaluate raises → recipes keep eval_interval=0
-            for rollout_id in range(start_rollout, num_rollouts):
-                t0 = time.perf_counter()
-                training_progress = rollout_id / max(1, num_rollouts - 1)
-                sync_weights = (rollout_id > 0 and rollout_id % interval == 0) or (
-                    resumed and rollout_id == start_rollout
-                )
-
-                groups = self._drive_partial(rollout_id, sync_weights, stale)
-                trajs: List[Sample] = [t for group in groups for t in group]
-                rewards, group_ids = self._rewards_and_groups(self._reconstruct_request(trajs), trajs, rollout_id)
-                for root in {self._assembler.root_of(traj) for traj in trajs}:
-                    self._gt_by_root.pop(root, None)
-                result, mean_reward = self._advantage_train_and_log(
-                    trajs,
-                    rewards,
-                    group_ids,
-                    rollout_id=rollout_id,
-                    training_progress=training_progress,
-                    t0=t0,
-                    extra_metrics={
-                        "partial/committed_groups": len(groups),
-                        "partial/carried_trajectories": len(self._carried),
-                        "partial/dropped_trajectories": self._last_dropped_trajectories,
-                        "partial/dropped_roots": self._last_dropped_roots,
-                        "partial/discarded_completed_trajectories": self._last_discarded_completed_trajectories,
-                        "partial/assembler_pending_roots": self._assembler.size(),
-                        "partial/buffer_groups": self._buffer.size(),
-                        "partial/weight_version": self._weight_version,
-                    },
-                )
-                self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
-
-                if self.eval_interval > 0 and (rollout_id + 1) % self.eval_interval == 0:
-                    self.evaluate(rollout_id=rollout_id)
-                self.maybe_save_checkpoint(
-                    rollout_id, num_rollouts, save_interval=save_interval, save_dir=save_dir, save_mode=save_mode
-                )
-        finally:
-            active_error = sys.exc_info()[0] is not None
-            try:
-                carried = self.rollout.abort()[0]  # stop any drive left running
-                self._pump()
-                self._apply_tail_policy(carried, num_rollouts)
-            except BaseException:  # noqa: BLE001 — preserve an active training failure
-                if active_error:
-                    logger.warning("AgenticPartialTrainer cleanup failed", exc_info=True)
-                else:
-                    raise
-            finally:
-                self._finish_wandb()
 
 
 class AgenticEnvPartialTrainer(_EnvRewardSource, AgenticPartialTrainer):

@@ -116,6 +116,7 @@ class LoopKind(str, Enum):
     BATCH_RL = "batch_rl"
     ASYNC_BATCH_RL = "async_batch_rl"
     AGENTIC_RL = "agentic_rl"
+    PARTIAL_AGENTIC_RL = "partial_agentic_rl"
     ASYNC_AGENTIC_RL = "async_agentic_rl"
     SUPERVISED = "supervised"
 
@@ -125,7 +126,11 @@ class LoopKind(str, Enum):
 
     @property
     def is_agentic(self) -> bool:
-        return self in {LoopKind.AGENTIC_RL, LoopKind.ASYNC_AGENTIC_RL}
+        return self in {
+            LoopKind.AGENTIC_RL,
+            LoopKind.PARTIAL_AGENTIC_RL,
+            LoopKind.ASYNC_AGENTIC_RL,
+        }
 
 
 class PlacementMode(str, Enum):

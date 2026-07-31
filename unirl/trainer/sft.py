@@ -30,7 +30,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from typing import Any, Dict, List, Optional
 
 from hydra.utils import instantiate
@@ -221,48 +220,17 @@ class SFTTrainer(BaseTrainer):
         ``N * len(dataset) / batch_size`` steps (``train/epoch`` tracks the
         exact position).
         """
-        start_step = self.maybe_load_checkpoint(load_dir, num_rollouts=num_steps)
-        self._load_data_state(load_dir, start_step)
-        self._init_wandb(num_rollouts=num_steps)
-        try:
-            if self.eval_interval > 0:
-                self.evaluate(step=-1)  # baseline eval-loss at step 0
-            for step in range(start_step, num_steps):
-                t0 = time.perf_counter()
-                training_progress = step / max(1, num_steps - 1)
-                records = self.data_source.get_samples(self.batch_size)
-                result = self.train_step(records, training_progress=training_progress)
-                dt = time.perf_counter() - t0
-                logger.info(
-                    "step %d/%d  loss=%.5f grad_norm=%.4f lr=%.2e epoch=%.3f  %.1fs",
-                    step + 1,
-                    num_steps,
-                    result.loss,
-                    result.grad_norm,
-                    result.lr,
-                    self.data_source.epoch,
-                    dt,
-                )
-                self.wandb_logger.log_step(
-                    step + 1,
-                    {
-                        "train/loss": result.loss,
-                        "train/grad_norm": result.grad_norm,
-                        "train/lr": result.lr,
-                        "train/epoch": self.data_source.epoch,
-                        "perf/step_time_s": dt,
-                        **{f"train/{k}": v for k, v in dict(result.metrics).items()},
-                    },
-                    prefix="",
-                )
-                if self.eval_interval > 0 and (step + 1) % self.eval_interval == 0:
-                    self.evaluate(step=step)
-                self.maybe_save_checkpoint(
-                    step, num_steps, save_interval=save_interval, save_dir=save_dir, save_mode=save_mode
-                )
-                self._save_data_state(step, num_steps, save_interval=save_interval, save_dir=save_dir)
-        finally:
-            self._finish_wandb()
+        from unirl.trainer.program import LoopSpec, SFTProgram
+
+        SFTProgram(self, logger).run(
+            LoopSpec(
+                total_steps=num_steps,
+                save_interval=save_interval,
+                save_dir=save_dir,
+                load_dir=load_dir,
+                save_mode=save_mode,
+            )
+        )
 
 
 __all__ = ["SFTTrainer"]

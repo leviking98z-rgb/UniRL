@@ -12,6 +12,7 @@ torch/Ray/engine packages:
 * the FSDP and VeOmni backend leaves implement the shared backend hook surface;
 * ``Sample``/``Part`` retain the request/fork/fill and batch-algebra seam used by
   rollout, reward, and train;
+* trainer variants select explicit loop programs instead of copying ``train``;
 * every ``train_*.py`` entrypoint exposes ``main`` and selects exactly one trainer
   module.
 
@@ -285,6 +286,47 @@ def check_sample_contract(errors: list[str], simple: dict[str, list[ClassInfo]])
     return len(expected)
 
 
+def check_loop_programs(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
+    expected = {
+        "TrainerLifecycle": ("start", "__enter__", "__exit__"),
+        "BatchRLProgram": ("run", "run_async"),
+        "AgenticRLProgram": ("run_barrier", "run_partial", "run_async"),
+        "SFTProgram": ("run",),
+    }
+    for name, methods in expected.items():
+        matches = [info for info in simple.get(name, ()) if info.module == "unirl.trainer.program"]
+        if len(matches) != 1:
+            errors.append(f"unirl/trainer/program.py: expected one {name} class, found {len(matches)}")
+            continue
+        _require_members(
+            errors,
+            matches[0],
+            kind="loop program",
+            methods=methods,
+            simple=simple,
+        )
+
+    inherited_loop_trainers = {
+        "ARTrainer",
+        "DiffusionTrainer",
+        "PETrainer",
+        "UnifiedModelTrainer",
+        "AsyncARTrainer",
+        "AsyncDiffusionTrainer",
+        "AgenticTrainer",
+        "AgenticPartialTrainer",
+        "AsyncAgenticTrainer",
+    }
+    for name in inherited_loop_trainers:
+        for info in simple.get(name, ()):
+            if "train" in info.methods:
+                errors.append(
+                    f"{info.path.relative_to(ROOT)}: {name} must select a LoopProgram through BaseTrainer, "
+                    "not own a copied train() loop"
+                )
+    return len(expected)
+
+
 def check_entrypoints(errors: list[str]) -> int:
     paths = sorted(ROOT.glob("unirl/train_*.py"))
     for path in paths:
@@ -347,6 +389,7 @@ def main() -> int:
         "model pipelines": check_model_pipelines(errors, simple),
         "train backends": check_train_backends(errors, simple),
         "wire types": check_sample_contract(errors, simple),
+        "loop programs": check_loop_programs(errors, simple),
         "entrypoints": check_entrypoints(errors),
     }
     if errors:
