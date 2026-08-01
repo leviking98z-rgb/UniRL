@@ -324,13 +324,14 @@ class ARTrainer(BaseTrainer):
 
         try:
             if do_sync and do_offload and self._supports_staged_wake:
-                # Keep the large KV and CUDA-graph regions paused during the full
-                # FSDP gather. A following full wake resumes only those remaining
-                # regions because SGLangRolloutEngine tracks the weights stage.
-                self.rollout.wake_up(tags=["weights"])
-                self.weight_sync.sync()
+                # Park the latest FSDP shards (plus grads/optimizer) on CPU before
+                # restoring SGLang weights. FullWeightSync then streams each CPU
+                # shard back through one CUDA all-gather / IPC bucket at a time,
+                # so the two complete model copies never coexist on GPU.
                 train_state_maybe_offloaded = True
                 self.backend.offload()
+                self.rollout.wake_up(tags=["weights"])
+                self.weight_sync.sync()
                 # If this call fails after SGLang resumed only some tags (or the
                 # response is lost), its lifecycle flags cannot prove which
                 # regions are live. Fail closed with FSDP left on CPU rather

@@ -119,6 +119,12 @@ def _prepare_qwen_moe_dtensor(
     if not isinstance(tensor, DTensor):
         return tensor, dtype
 
+    mesh_device = getattr(tensor.device_mesh, "device_type", None)
+    if tensor.to_local().device.type == "cpu" and mesh_device != "cpu":
+        if not torch.cuda.is_available():
+            raise RuntimeError("Qwen MoE export: cannot redistribute a CPU DTensor over a CUDA mesh without CUDA.")
+        tensor = tensor.cuda()
+
     if dtype is not None and tensor.is_floating_point() and tensor.dtype != dtype:
         tensor = tensor.to(dtype)
 
