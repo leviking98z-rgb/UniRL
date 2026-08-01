@@ -18,6 +18,7 @@ eagerly pulling torch-heavy or vLLM-only deps.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -119,6 +120,12 @@ class LoraWeightSyncBase(Remote):
         exp_a = sorted(h for k, h in expected.items() if ".lora_A." in k)
         exp_b = sorted(h for k, h in expected.items() if ".lora_B." in k)
         return exp_a, exp_b
+
+    @staticmethod
+    def _checksum_fingerprint(exp_a: List[str], exp_b: List[str]) -> str:
+        """Return a compact identity for one extracted adapter version."""
+        payload = "\n".join(["lora_A", *exp_a, "lora_B", *exp_b]).encode("ascii")
+        return hashlib.sha256(payload).hexdigest()[:16]
 
     def _assert_loaded(self, exp_a: List[str], exp_b: List[str], loaded: Dict, *, label: str) -> None:
         """Assert one engine's loaded LoRA matches the expected multisets.

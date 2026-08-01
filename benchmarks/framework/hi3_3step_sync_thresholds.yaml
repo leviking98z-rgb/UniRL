@@ -1,0 +1,68 @@
+{
+  "warmup_steps": 0,
+  "minimum_steps": 3,
+  "expected_steps": 3,
+  "require_complete_run": true,
+  "metrics": {
+    "rollout/num_samples": {
+      "reducer": "min",
+      "min_value": 16,
+      "required": true
+    },
+    "rollout/sync_weights": {
+      "reducer": "min",
+      "min_value": 1.0,
+      "required": true
+    },
+    "rollout/ar_advantage_std": {
+      "reducer": "min",
+      "min_value": 1e-6,
+      "required": true
+    },
+    "rollout/image_advantage_std": {
+      "reducer": "min",
+      "min_value": 1e-6,
+      "required": true
+    },
+    "rollout/ar_zero_std_group_ratio": {
+      "reducer": "max",
+      "max_value": 0.0,
+      "required": true
+    },
+    "rollout/image_zero_std_group_ratio": {
+      "reducer": "max",
+      "max_value": 0.0,
+      "required": true
+    },
+    "train/ar/has_backward": {
+      "reducer": "min",
+      "min_value": 1.0,
+      "required": true
+    },
+    "train/image/has_backward": {
+      "reducer": "min",
+      "min_value": 1.0,
+      "required": true
+    },
+    "train/ar/grad_norm": {
+      "reducer": "min",
+      "min_value": 1e-8,
+      "required": true
+    },
+    "train/image/grad_norm": {
+      "reducer": "min",
+      "min_value": 1e-8,
+      "required": true
+    },
+    "train/ar/loss": {
+      "reducer": "mean",
+      "min_abs_value": 1e-8,
+      "required": true
+    },
+    "train/image/loss": {
+      "reducer": "mean",
+      "min_abs_value": 1e-8,
+      "required": true
+    }
+  }
+}

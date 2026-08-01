@@ -504,7 +504,15 @@ class BucketedIPCReceiveMixin:
         )
         if manager is None:
             return {}
+        # Diffusion workers expose DiffusionLoRAManager directly.  Current
+        # vLLM AR workers instead expose WorkerLoRAManager, whose registered
+        # LoRAModel objects live one level deeper in ``_adapter_manager``.
+        # Probe the public wrapper first for compatibility with older vLLM,
+        # then unwrap the current layout.
         registered = getattr(manager, "_registered_adapters", None)
+        if registered is None:
+            manager = getattr(manager, "_adapter_manager", None)
+            registered = getattr(manager, "_registered_adapters", None)
         if registered is None:
             return {}
         lora_model = registered.get(int(adapter_id))

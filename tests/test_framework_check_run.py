@@ -72,6 +72,14 @@ def test_check_run_rejects_missing_run_end(tmp_path):
         check_run(run, {"metrics": {}})
 
 
+def test_check_run_rejects_partial_run_with_run_end(tmp_path):
+    run = tmp_path / "run.jsonl"
+    _write_run(run, {"train/ar/has_backward": 1.0})
+
+    with pytest.raises(ValueError, match="step count.*found=1, expected=3"):
+        check_run(run, {"expected_steps": 3, "metrics": {}})
+
+
 def test_matrix_health_command_is_opt_in(tmp_path):
     experiment = tmp_path / "experiment.jsonl"
     output = tmp_path / "health.json"
