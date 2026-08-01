@@ -18,6 +18,21 @@ candidate gate:
 
 3. A non-zero exit means at least one speed, memory, or reward guard regressed.
 
+For a one-run learning smoke test, use the absolute health gate. It rejects
+records that merely finish while producing zero advantages or zero gradients:
+
+```bash
+python -m benchmarks.framework.check_run \
+  experiment.jsonl \
+  --policy benchmarks/framework/hi3_learning_thresholds.yaml
+```
+
+The HI3 learning workload intentionally samples two AR recaptions and two
+images per recaption. This yields four joint trajectories per prompt, so GRPO
+has within-group variation on both tracks. When a workload declares
+`health_policy`, `run_matrix.py --execute` runs that gate automatically after
+training and fails the workload if the record is incomplete or degenerate.
+
 `run_matrix.py` expands representative diffusion, AR, and unified-model
 workloads. It is dry-run by default:
 

@@ -21,6 +21,25 @@
       "tags": ["unified-model", "vllm-omni", "single-node"],
       "gpus": 8,
       "overrides": ["num_devices=8"]
+    },
+    "hi3_unified_learning_smoke_1x8": {
+      "entrypoint": "unirl.train_unified_model",
+      "config_name": "unified_model/hi3_vllmomni",
+      "tags": ["unified-model", "vllm-omni", "single-node", "learning-signal"],
+      "gpus": 8,
+      "overrides": [
+        "batch_size=8",
+        "num_rollouts=1",
+        "sampling.ar.samples_per_prompt=2",
+        "sampling.ar.max_new_tokens=64",
+        "sampling.diffusion.samples_per_prompt=2",
+        "sampling.diffusion.num_inference_steps=4",
+        "sampling.diffusion.scheduler.num_timesteps=4",
+        "sampling.diffusion.scheduler.num_sde_steps=2",
+        "sampling.diffusion.height=512",
+        "sampling.diffusion.width=512"
+      ],
+      "health_policy": "benchmarks/framework/hi3_learning_thresholds.yaml"
     }
   }
 }

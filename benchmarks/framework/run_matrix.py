@@ -21,6 +21,26 @@ def build_command(spec: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def build_health_command(
+    spec: Mapping[str, Any],
+    experiment_path: Path,
+    output_path: Path,
+) -> list[str] | None:
+    policy = spec.get("health_policy")
+    if not policy:
+        return None
+    return [
+        sys.executable,
+        "-m",
+        "benchmarks.framework.check_run",
+        str(experiment_path),
+        "--policy",
+        str(policy),
+        "--json-output",
+        str(output_path),
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -67,6 +87,21 @@ def main() -> None:
             completed = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
         if completed.returncode:
             raise SystemExit(f"{name} failed with exit code {completed.returncode}; see {run_dir / 'train.log'}")
+
+        health_command = build_health_command(spec, experiment_path, run_dir / "health.json")
+        if health_command is None:
+            continue
+        with (run_dir / "health.log").open("w", encoding="utf-8") as log:
+            health = subprocess.run(
+                health_command,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        if health.returncode:
+            raise SystemExit(
+                f"{name} completed but failed its health gate; see {run_dir / 'health.log'}"
+            )
 
 
 if __name__ == "__main__":
