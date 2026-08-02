@@ -93,14 +93,64 @@ class Image:
 
 @dataclass
 class Video:
-    """A video as a ``[T, C, H, W]`` tensor with values in ``[0, 1]``."""
+    """A video in the canonical ``[T, C, H, W]`` in-memory layout.
+
+    Values are expected to be in ``[0, 1]``. Layout adapters live here so
+    consumers do not need to infer which axis represents time.
+    """
 
     frames: torch.Tensor
+
+    def as_tchw(self) -> torch.Tensor:
+        """Return the canonical ``[T, C, H, W]`` tensor after rank validation."""
+        if not isinstance(self.frames, torch.Tensor):
+            raise TypeError(f"Video.frames must be a torch.Tensor, got {type(self.frames).__name__}")
+        if self.frames.ndim != 4:
+            raise ValueError(
+                f"Video.frames must use the canonical [T, C, H, W] layout; got shape {tuple(self.frames.shape)}"
+            )
+        return self.frames
+
+    @classmethod
+    def from_cthw(cls, frames: torch.Tensor) -> "Video":
+        """Build a canonical video from an explicit legacy ``[C, T, H, W]`` tensor."""
+        if not isinstance(frames, torch.Tensor):
+            raise TypeError(f"Video.from_cthw expects a torch.Tensor, got {type(frames).__name__}")
+        if frames.ndim != 4:
+            raise ValueError(f"Video.from_cthw expects [C, T, H, W], got shape {tuple(frames.shape)}")
+        return cls(frames=frames.permute(1, 0, 2, 3).contiguous())
+
+    def to_cthw(self) -> torch.Tensor:
+        """Return an explicit legacy ``[C, T, H, W]`` compatibility tensor."""
+        return self.as_tchw().permute(1, 0, 2, 3).contiguous()
+
+    def first_frame(self) -> torch.Tensor:
+        """Return the first frame as ``[C, H, W]``."""
+        frames = self.as_tchw()
+        if frames.shape[0] == 0:
+            raise ValueError("Cannot take the first frame of an empty video")
+        return frames[0]
+
+    def sample_uniform(self, count: int) -> torch.Tensor:
+        """Return exactly ``count`` evenly-spaced frames in canonical order.
+
+        Sampling includes both endpoints when ``count > 1``. Indices repeat
+        when the video has fewer than ``count`` frames, which keeps downstream
+        frame batches rectangular.
+        """
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise ValueError(f"Video.sample_uniform count must be a positive integer, got {count!r}")
+        frames = self.as_tchw()
+        total = int(frames.shape[0])
+        if total == 0:
+            raise ValueError("Cannot sample frames from an empty video")
+        indices = torch.linspace(0, total - 1, steps=count, device=frames.device).long()
+        return frames.index_select(0, indices)
 
     def to_pils(self) -> List[PIL.Image.Image]:
         from torchvision.transforms.functional import to_pil_image
 
-        return [to_pil_image(frame.clamp(0.0, 1.0)) for frame in self.frames]
+        return [to_pil_image(frame.clamp(0.0, 1.0)) for frame in self.as_tchw()]
 
 
 @dataclass

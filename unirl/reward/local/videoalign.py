@@ -22,6 +22,7 @@ from torchvision.transforms import InterpolationMode
 
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.reward.local.device import resolve_device
+from unirl.types.primitives import Video
 from unirl.types.reward import RewardRequest, RewardResponse
 
 from .base import LocalRewardBackend
@@ -676,7 +677,7 @@ class VideoAlignRewardScorer(LocalRewardBackend):
 
         with tempfile.TemporaryDirectory(prefix="unirl_videoalign_") as tmpdir:
             video_paths = []
-            for idx, video in enumerate(request.videos):
+            for idx, video in enumerate(request.video_items or []):
                 path = os.path.join(tmpdir, f"sample_{idx:05d}.mp4")
                 _export_tensor_video(video, path)
                 video_paths.append(path)
@@ -696,33 +697,15 @@ class VideoAlignRewardScorer(LocalRewardBackend):
         return all_rewards, components
 
 
-def _export_tensor_video(video: torch.Tensor, path: str) -> None:
-    """Write a decoded video tensor to mp4.
-
-    Accepts the tensor in either [T, C, H, W] (canonical ``Video.frames``) or
-    [C, T, H, W] (the layout produced by ``RewardRequest.videos``) and converts
-    to [T, H, W, C] for export.
-    """
+def _export_tensor_video(video: Video, path: str) -> None:
+    """Write a canonical ``Video[T, C, H, W]`` to mp4."""
     from diffusers.utils import export_to_video
 
-    video = video.detach().cpu()
-    if video.dim() == 5:
-        video = video.squeeze(0)
-    if video.dim() != 4:
-        raise ValueError(f"Expected 4D video tensor, got shape={tuple(video.shape)}")
-
-    # Normalize to [T, C, H, W]. ``RewardRequest.videos`` hands us [C, T, H, W]
-    # (channel-first), while a raw ``Video.frames`` is already [T, C, H, W].
-    # Disambiguate by the channel axis: the C dimension is the one of size 3.
-    c0, t0 = video.shape[0], video.shape[1]
-    if c0 == 3 and t0 != 3:
-        # [C, T, H, W] -> [T, C, H, W]
-        video = video.permute(1, 0, 2, 3)
-
+    frames_tchw = video.as_tchw().detach().cpu()
     # Convert [T, C, H, W] → [T, H, W, C]
-    video = video.permute(0, 2, 3, 1)
-    video = video[..., :3].clamp(0.0, 1.0)
-    frames = (video * 255).round().to(torch.uint8).numpy()
+    frames_thwc = frames_tchw.permute(0, 2, 3, 1)
+    frames_thwc = frames_thwc[..., :3].clamp(0.0, 1.0)
+    frames = (frames_thwc * 255).round().to(torch.uint8).numpy()
     export_to_video(list(frames), path, fps=24)
 
 

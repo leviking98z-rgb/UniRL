@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 from unirl.distributed.tensor.batch import Batch, concat_field, max_field
+from unirl.types.primitives import Video
 
 
 class RewardType(Enum):
@@ -35,9 +36,10 @@ class RewardRequest:
         Typical keys: ``"image"`` (generated ``Images``), ``"video"``
         (generated ``Videos``), ``"text"`` (generated ``Texts``).
 
-    Backward-compat properties (``prompts``, ``images``, ``videos``,
-    ``texts``) bridge to the new structure with lazy format conversion
-    so existing scorers work unchanged.
+    Convenience properties bridge to the typed structure. ``video_items``
+    exposes canonical :class:`Video` objects; backward-compat properties
+    (``prompts``, ``images``, ``videos``, ``texts``) retain their legacy
+    representations so existing scorers work unchanged.
     """
 
     primitives: Dict[str, Any] = field(default_factory=dict)
@@ -72,10 +74,24 @@ class RewardRequest:
 
     @property
     def videos(self) -> Optional[List[torch.Tensor]]:
+        """Legacy per-sample ``[C, T, H, W]`` tensors.
+
+        New consumers should use :attr:`video_items`, whose
+        :class:`~unirl.types.primitives.Video` objects keep the canonical
+        ``[T, C, H, W]`` layout.
+        """
+        items = self.video_items
+        if items is None:
+            return None
+        return [video.to_cthw() for video in items]
+
+    @property
+    def video_items(self) -> Optional[List[Video]]:
+        """Generated videos in the canonical ``Video[T, C, H, W]`` contract."""
         prim = self.generated.get("video")
         if prim is None:
             return None
-        return [v.frames.permute(1, 0, 2, 3).contiguous() for v in prim.to_list()]
+        return prim.to_list()
 
     @property
     def texts(self) -> Optional[List[str]]:
