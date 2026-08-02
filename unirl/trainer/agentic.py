@@ -34,6 +34,7 @@ from omegaconf import OmegaConf
 from unirl.algorithms.advantage import AdvantageBatch, GroupedAdvantageEstimator
 from unirl.config.execution import LoopKind
 from unirl.distributed.tensor import hydrate
+from unirl.reward.ops import score_frontier
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.ar import ARTrainer
 from unirl.trainer.base import prepare_input_sample
@@ -327,8 +328,10 @@ class AgenticTrainer(ARTrainer):
             .fork(1, sampling_params=ar_sp)  # frontier is a gen Part (reward/adv panels read gen_parts)
             .with_filled_frontier(primitives={"text": Texts(texts=list(predictions))})
         )
-        scoring = self.reward.score_and_attach(scoring)
-        rewards = hydrate(scoring.parts[-1].rewards).to(torch.float32)
+        outcome = score_frontier(self.reward, scoring)
+        if outcome.rewards is None:
+            raise RuntimeError("Agentic reward service returned no frontier rewards.")
+        rewards = outcome.rewards.to(torch.float32)
         # A failed trajectory was still graded above (its empty answer scores as a
         # miss); overwrite with NaN so the estimator excludes it from the group's
         # mean/std and gives it zero advantage instead of a real negative signal.

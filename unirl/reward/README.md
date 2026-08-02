@@ -21,7 +21,9 @@ thin HTTP client for the standalone server in `unirl-reward-service/`.
 
 Turning rewards into advantages belongs to the selected
 `unirl.algorithms.advantage.AdvantageEstimator`; generating the media is the
-rollout engine's.
+rollout engine's. `unirl.reward.ops` owns transport materialization, scalar
+reward statistics, and multi-stage lineage credit assignment; those policies do
+not live on the `Sample` wire type or in individual trainers.
 
 ## Why it exists
 
@@ -54,6 +56,12 @@ never mutates the input Sample — it returns a fresh one. Per call it:
    one that hit `max_new_tokens` (never terminated) gets reward 0, so training
    doesn't learn to ramble to the cap.
 6. **Attaches** `rewards` + `component_rewards` and returns the Sample.
+
+Trainer-facing code calls `reward.ops.score_frontier`, which delegates to that
+single service method and materializes actor-returned reward fields exactly once.
+For composed lineages such as prompt enhancement, `reward.ops.propagate_rewards`
+then reduces a scored child's branches into unscored ancestors. `RewardOutcome`
+provides the shared count, sum, and mean used by train and eval logging.
 
 A backend is just `compute_rewards(request) -> RewardResponse`. Local scorers
 (`local/`) subclass `LocalRewardBackend` and implement `_compute_model_rewards`;

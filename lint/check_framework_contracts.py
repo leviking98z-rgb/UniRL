@@ -18,6 +18,8 @@ torch/Ray/engine packages:
   transition-kernel exceptions stay explicit and reviewable;
 * advantage estimators own reward normalization/value-target policy instead of
   growing methods on the ``Part`` wire type;
+* reward operations own service dispatch, transport materialization, statistics,
+  and lineage credit assignment instead of duplicating them across trainers;
 * trainer variants select explicit loop programs instead of copying ``train``;
 * every ``train_*.py`` entrypoint exposes ``main`` and selects exactly one trainer
   module.
@@ -549,6 +551,52 @@ def check_advantage_estimators(errors: list[str], simple: dict[str, list[ClassIn
     return len(expected)
 
 
+def check_reward_operations(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
+    path = ROOT / "unirl/reward/ops.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    expected_functions = {
+        "attach_frontier",
+        "materialize_reward",
+        "propagate_rewards",
+        "score_frontier",
+    }
+    missing = sorted(expected_functions - functions)
+    if missing:
+        errors.append(f"unirl/reward/ops.py: reward operation owner lacks functions {missing}")
+
+    outcomes = [info for info in simple.get("RewardOutcome", ()) if info.module == "unirl.reward.ops"]
+    if len(outcomes) != 1:
+        errors.append(f"unirl/reward/ops.py: expected one RewardOutcome class, found {len(outcomes)}")
+    else:
+        _require_members(
+            errors,
+            outcomes[0],
+            kind="reward outcome contract",
+            methods=("part", "rewards", "count", "total", "mean"),
+            fields=("sample", "part_index"),
+            simple=simple,
+        )
+
+    samples = [info for info in simple.get("Sample", ()) if info.module == "unirl.types.sample"]
+    if len(samples) == 1 and "propagate_rewards" in samples[0].methods:
+        errors.append(
+            "unirl/types/sample.py: Sample must remain a wire type; reward credit policy belongs in unirl.reward.ops"
+        )
+
+    for trainer_path in _iter_python(ROOT / "unirl/trainer"):
+        trainer_tree = ast.parse(trainer_path.read_text(encoding="utf-8"), filename=str(trainer_path))
+        for node in ast.walk(trainer_tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr in {"score_and_attach", "propagate_rewards"}:
+                errors.append(
+                    f"{trainer_path.relative_to(ROOT)}:{node.lineno}: call reward operations through "
+                    "unirl.reward.ops, not a trainer-owned service/credit path"
+                )
+    return 1
+
+
 def check_loop_programs(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
     expected = {
         "TrainerLifecycle": ("start", "__enter__", "__exit__"),
@@ -656,6 +704,7 @@ def main() -> int:
         "train backends": check_train_backends(errors, simple),
         "wire types": check_sample_contract(errors, simple),
         "advantage contracts": check_advantage_estimators(errors, simple),
+        "reward contracts": check_reward_operations(errors, simple),
         "loop programs": check_loop_programs(errors, simple),
         "entrypoints": check_entrypoints(errors),
     }

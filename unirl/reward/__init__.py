@@ -6,6 +6,7 @@ appropriate submodule directly:
 
 - ``unirl.reward.base`` — ``RewardBackend`` + ``BaseRewardComponentSpec``
 - ``unirl.reward.service`` — ``RewardService`` (holds one backend)
+- ``unirl.reward.ops`` — score materialization, statistics, and lineage credit assignment
 - ``unirl.reward.remote`` — ``RemoteRewardBackend`` (remote backend)
 - ``unirl.reward.local.<name>`` — per-scorer ``<Name>RewardScorer`` + ``<Name>Spec`` (local backends)
 """

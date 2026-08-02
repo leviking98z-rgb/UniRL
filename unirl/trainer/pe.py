@@ -8,8 +8,8 @@ rollout (the rollout reads the live FSDP modules, so no weight sync).
 One ``train_step``::
 
     rollout.generate(sample)         → 3-part Sample [input, ar, diffusion]
-    reward.score_and_attach(sample)  → score the frontier (image) Part only
-    sample.propagate_rewards("mean") → credit-assign image reward up to "ar"
+    score_frontier(reward, sample)         → score/materialize the image Part
+    propagate_rewards(sample, "mean")      → credit-assign image reward up to "ar"
     AdvantageEstimator per Part      → GRPO (ar by prompt, diff by rewrite)
     {name}.stack.train_track(part)   → route each Part to its own model
 
@@ -28,14 +28,13 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.distributed.group.placement import placement, remote
-from unirl.distributed.tensor import hydrate
 from unirl.models.pe.pipeline import PEPipeline
+from unirl.reward.ops import propagate_rewards, score_frontier
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict, prepare_input_sample
 from unirl.trainer.eval_suites import build_eval_suites
@@ -342,26 +341,17 @@ class PETrainer(BaseTrainer):
         #    directly scorable; its reward is credit-assigned below. The reward
         #    derives its prompt context from the Sample lineage (conditioning),
         #    so no manual req expansion is needed.
-        sample = self.reward.score_and_attach(sample)
-        # propagate_rewards reshapes child rewards directly (no hydration), so
-        # realize the worker-returned TensorRef first.
-        diff_part = sample.parts[diff_idx]
-        if diff_part.rewards is not None:
-            diff_part.rewards = hydrate(diff_part.rewards)
-        if isinstance(diff_part.component_rewards, dict):
-            diff_part.component_rewards = {name: hydrate(value) for name, value in diff_part.component_rewards.items()}
+        outcome = score_frontier(self.reward, sample)
+        sample = outcome.sample
 
         # 2. Credit-assign image reward up the lineage → fills the "ar" Part
         #    (mean over the M images of each rewrite). Kept even with a frozen
         #    LLM: it is cheap and gives the AR Part a logged reward for parity,
         #    though the resulting AR advantage is unused when the LLM is frozen.
-        sample = sample.propagate_rewards(op="mean")
+        sample = propagate_rewards(sample, op="mean")
 
         # 3. Mean image reward for the log line.
-        mean_reward = 0.0
-        di_rewards = sample.parts[diff_idx].rewards
-        if di_rewards is not None:
-            mean_reward = float(hydrate(di_rewards).to(torch.float32).mean().item())
+        mean_reward = outcome.mean
 
         # 4. Per-Part GRPO advantages. "ar" groups by prompt (its N rewrites).
         #    "diffusion" groups by rewrite (M images) by default, or — when
@@ -473,12 +463,9 @@ class PETrainer(BaseTrainer):
             request = self._build_request_sample(sub, step, sampling=eval_sp)
             generated = self.rollout.generate(request)
             for name, reward in scorers:
-                scored = reward.score_and_attach(generated)
-                rewards = scored.parts[-1].rewards
-                if rewards is not None:
-                    r = hydrate(rewards).to(torch.float32)
-                    sums[name] += float(r.sum().item())
-                    counts[name] += int(r.numel())
+                outcome = score_frontier(reward, generated)
+                sums[name] += outcome.total
+                counts[name] += outcome.count
         return {name: sums[name] / max(1, counts[name]) for name, _ in scorers}
 
     # ---- checkpointing (PE trains two sides → one subdir per trained side) --
