@@ -41,6 +41,10 @@ class HunyuanImage3PipelineConfig:
     autocast_precision: str = "bf16"
     trajectory_precision: str = "fp16"
     logprob_precision: str = "fp32"
+    # Replay all selected SDE steps in one step-major transformer batch.
+    # Disabled by default so existing recipes keep their serial replay
+    # numerics/memory behavior unless they opt in explicitly.
+    batch_replay_steps: bool = False
 
     # Diffusion schedule policy. ``shift`` is the FlowMatch time-shift used
     # by ``sde.runtime.get_sigma_schedule`` (static branch); HunyuanImage3

@@ -42,7 +42,8 @@ import torch
 
 from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
 from unirl.models.types.replay_result import ReplayResult
-from unirl.sde.kernels import StepStrategy
+from unirl.sde.kernels import SDEStrategy, StepStrategy
+from unirl.types.conditions import ImageEmbedCondition, ImageLatentCondition
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment
@@ -116,12 +117,25 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
                 f"fused.input_ids batch ({n_fused}) is neither equal to nor "
                 f"2x of sample batch ({n_sample}). Unexpected capture shape."
             )
-        # timestep: scalar or [B] -> [N] float, matching sample_2's batch axis.
+        # timestep: scalar or [B] -> [N] float, matching sample_2's batch
+        # axis. In CFG mode the fused inputs are [cond, uncond], and sample_2
+        # duplicates the latent batch in the same two-block order, so a
+        # per-sample sigma vector must be duplicated too.
         t_scalar = sigma * 1000.0
         if t_scalar.dim() == 0:
             t_expand = t_scalar.expand(sample_2.shape[0])
         else:
-            t_expand = t_scalar.expand(sample_2.shape[0])
+            t_vector = t_scalar.reshape(-1)
+            if int(t_vector.numel()) == n_sample:
+                t_expand = torch.cat([t_vector, t_vector], dim=0) if cfg else t_vector
+            elif int(t_vector.numel()) == int(sample_2.shape[0]):
+                t_expand = t_vector
+            else:
+                raise ValueError(
+                    "HunyuanImage3DiffusionStep.predict_noise: sigma has "
+                    f"{t_vector.numel()} values, expected {n_sample} "
+                    f"(latent batch) or {sample_2.shape[0]} (CFG-expanded batch)."
+                )
 
         # Decide which path we're on — stateless vs KV-cached.
         use_cache: bool = state is not None
@@ -550,6 +564,7 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
         logprob_precision: str = "fp32",
         vae_scale_factor: int = 16,
         latent_channels: int = 32,
+        batch_replay_steps: bool = False,
     ) -> None:
         self.model = model
         self.step = step
@@ -559,6 +574,11 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
         self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
         self.vae_scale_factor = vae_scale_factor
         self.latent_channels = latent_channels
+        # Fast replay path: stack S selected SDE transitions on the batch
+        # dimension and issue one transformer forward instead of S serial
+        # forwards. Restrict it to stateless SDE strategies; stateful solvers may
+        # interpret ``step_index`` or retain cross-step state.
+        self.batch_replay_steps = bool(batch_replay_steps)
 
     # ------------------------------------------------------------------
     # Sampling
@@ -780,6 +800,23 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
             if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
             else nullcontext()
         )
+
+        # Stateless SDE fast path. Replay itself is stateless (``state=None`` in
+        # ``step_with_logp``), so the selected transitions can be stacked
+        # step-major as [S*B, ...]. The SDE kernel accepts vector sigma values
+        # and the output is reshaped back to the serial path's [B, S] order.
+        if self.batch_replay_steps and len(target) > 1 and isinstance(self.strategy, SDEStrategy):
+            with autocast_ctx:
+                return self._replay_batched_steps(
+                    conditions,
+                    segment=segment,
+                    params=params,
+                    target=target,
+                    sigmas=sigmas,
+                    sigma_max=sigma_max,
+                    device=device,
+                )
+
         log_probs: List[torch.Tensor] = []
         prev_sample_means: List[torch.Tensor] = []
         with autocast_ctx:
@@ -819,6 +856,196 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
         # None if the strategy didn't produce them at any step.
         means_t = torch.stack(prev_sample_means, dim=1).to(dtype=self.trajectory_dtype) if prev_sample_means else None
         return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
+
+    def _replay_batched_steps(
+        self,
+        conditions: HunyuanImage3DiffusionConditions,
+        *,
+        segment: LatentSegment,
+        params: DiffusionSamplingParams,
+        target: List[int],
+        sigmas: torch.Tensor,
+        sigma_max: float,
+        device: torch.device,
+    ) -> ReplayResult:
+        """Replay all selected SDE steps with one step-major model forward.
+
+        For ``S = len(target)`` and rollout batch ``B``, each contiguous block
+        ``[k*B:(k+1)*B]`` corresponds to ``target[k]``. Conditions are tiled in
+        the same block order, while sigma/sigma_next become per-row vectors.
+        The stateless SDE transition is then vectorized over ``S*B`` rows and
+        reshaped back to the public ``[B, S, ...]`` contract.
+        """
+        S = len(target)
+        sample_all = torch.cat([segment.latents_at(i).to(device) for i in target], dim=0)
+        prev_all = torch.cat([segment.latents_at(i + 1).to(device) for i in target], dim=0)
+        B = int(sample_all.shape[0]) // S
+        sigma_all = torch.cat([sigmas[i].to(torch.float32).expand(B) for i in target], dim=0)
+        sigma_next_all = torch.cat([sigmas[i + 1].to(torch.float32).expand(B) for i in target], dim=0)
+        tiled = self._tile_conditions(conditions, S, sample_batch_size=B)
+
+        _, log_prob_all, prev_mean_all = self.step.step_with_logp(
+            self.model,
+            tiled,
+            strategy=self.strategy,
+            sample=sample_all,
+            prev_sample=prev_all,
+            sigma=sigma_all,
+            sigma_next=sigma_next_all,
+            guidance_scale=float(params.guidance_scale),
+            eta=float(params.eta),
+            sigma_max=sigma_max,
+            # Signature parity only: the SDEStrategy guard above guarantees a
+            # stateless kernel whose transition math ignores step_index.
+            step_index=int(target[0]),
+        )
+        if log_prob_all is None:
+            raise RuntimeError(
+                "HunyuanImage3DiffusionStage._replay_batched_steps: strategy "
+                "returned None log-prob (deterministic mode); batched replay "
+                "requires a stochastic SDE strategy."
+            )
+
+        log_probs_t = log_prob_all.view(S, B).transpose(0, 1).contiguous().to(dtype=self.logprob_dtype)
+        means_t = None
+        if prev_mean_all is not None:
+            tail = prev_mean_all.shape[1:]
+            means_t = prev_mean_all.view(S, B, *tail).transpose(0, 1).contiguous().to(dtype=self.trajectory_dtype)
+        return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
+
+    @staticmethod
+    def _tile_conditions(
+        conditions: HunyuanImage3DiffusionConditions,
+        repeats: int,
+        *,
+        sample_batch_size: int,
+    ) -> HunyuanImage3DiffusionConditions:
+        """Tile HI3 conditions to match a step-major replay latent batch.
+
+        HI3 CFG stores fused conditions as ``[cond_B, uncond_B]``. Batched
+        replay stores latents as ``[step0_B, step1_B, ...]`` and
+        ``predict_noise`` duplicates that whole stack for CFG. Preserve the
+        branch-major condition layout as
+        ``[cond_step0_B, cond_step1_B, ..., uncond_step0_B, ...]``.
+
+        Conditional-image payloads are lists in the upstream it2i path even
+        though their generic condition annotations are tensors, so both
+        tensor-backed and sequence-backed batch fields are handled here.
+        """
+
+        if repeats < 1:
+            raise ValueError(f"repeats must be >= 1, got {repeats}")
+        if sample_batch_size < 1:
+            raise ValueError(f"sample_batch_size must be >= 1, got {sample_batch_size}")
+
+        fused = conditions.fused
+        if fused is None or fused.input_ids is None:
+            raise ValueError("HunyuanImage3DiffusionStage._tile_conditions: conditions.fused/input_ids is None")
+        fused_batch = int(fused.input_ids.shape[0])
+        if fused_batch not in (sample_batch_size, 2 * sample_batch_size):
+            raise ValueError(
+                "HunyuanImage3DiffusionStage._tile_conditions: fused input "
+                f"batch {fused_batch} is neither B={sample_batch_size} nor "
+                f"2B={2 * sample_batch_size}."
+            )
+        cfg_factor = fused_batch // sample_batch_size
+
+        def _tile_value(value: Any, *, field_name: str) -> Any:
+            if value is None:
+                return None
+            is_tensor = isinstance(value, torch.Tensor)
+            is_sequence = isinstance(value, (list, tuple))
+            if not is_tensor and not is_sequence:
+                raise TypeError(
+                    "HunyuanImage3DiffusionStage._tile_conditions: "
+                    f"{field_name} must be a tensor/list/tuple, got "
+                    f"{type(value).__name__}."
+                )
+            if is_tensor:
+                if value.dim() == 0:
+                    raise ValueError(
+                        "HunyuanImage3DiffusionStage._tile_conditions: "
+                        f"{field_name} is scalar; expected a batched value."
+                    )
+                value_batch = int(value.shape[0])
+            else:
+                value_batch = len(value)
+
+            # A B-sized optional payload is branch-independent; if the fused
+            # sequence is CFG-expanded, duplicate it for both branches.
+            if value_batch == sample_batch_size:
+                groups = [value] * cfg_factor
+            elif value_batch == cfg_factor * sample_batch_size:
+                groups = [value[i * sample_batch_size : (i + 1) * sample_batch_size] for i in range(cfg_factor)]
+            else:
+                raise ValueError(
+                    "HunyuanImage3DiffusionStage._tile_conditions: "
+                    f"{field_name} batch {value_batch} is incompatible with "
+                    f"B={sample_batch_size}, cfg_factor={cfg_factor}."
+                )
+
+            if is_tensor:
+                return torch.cat([group for group in groups for _ in range(repeats)], dim=0)
+            tiled_items = [item for group in groups for _ in range(repeats) for item in group]
+            return tuple(tiled_items) if isinstance(value, tuple) else tiled_items
+
+        rope_cache = fused.rope_cache
+        if rope_cache is not None:
+            rope_cache = tuple(_tile_value(t, field_name=f"fused.rope_cache[{i}]") for i, t in enumerate(rope_cache))
+        tiled_fused = type(fused)(
+            input_ids=_tile_value(fused.input_ids, field_name="fused.input_ids"),
+            attention_mask=_tile_value(fused.attention_mask, field_name="fused.attention_mask"),
+            position_ids=_tile_value(fused.position_ids, field_name="fused.position_ids"),
+            rope_cache=rope_cache,
+            gen_image_mask=_tile_value(fused.gen_image_mask, field_name="fused.gen_image_mask"),
+            gen_timestep_scatter_index=_tile_value(
+                fused.gen_timestep_scatter_index,
+                field_name="fused.gen_timestep_scatter_index",
+            ),
+            cond_vae_image_mask=_tile_value(
+                fused.cond_vae_image_mask,
+                field_name="fused.cond_vae_image_mask",
+            ),
+            cond_vit_image_mask=_tile_value(
+                fused.cond_vit_image_mask,
+                field_name="fused.cond_vit_image_mask",
+            ),
+            cond_timestep_scatter_index=_tile_value(
+                fused.cond_timestep_scatter_index,
+                field_name="fused.cond_timestep_scatter_index",
+            ),
+            prompt_lengths=_tile_value(fused.prompt_lengths, field_name="fused.prompt_lengths"),
+        )
+
+        cond_vae = conditions.cond_vae
+        tiled_vae = None
+        if cond_vae is not None:
+            tiled_vae = ImageLatentCondition(latents=_tile_value(cond_vae.latents, field_name="cond_vae.latents"))
+
+        cond_vit = conditions.cond_vit
+        tiled_vit = None
+        if cond_vit is not None:
+            tiled_vit = ImageEmbedCondition(
+                embeds=_tile_value(cond_vit.embeds, field_name="cond_vit.embeds"),
+                attn_mask=_tile_value(cond_vit.attn_mask, field_name="cond_vit.attn_mask"),
+                spatial_shapes=_tile_value(
+                    cond_vit.spatial_shapes,
+                    field_name="cond_vit.spatial_shapes",
+                ),
+            )
+
+        return HunyuanImage3DiffusionConditions(
+            fused=tiled_fused,
+            cond_vae=tiled_vae,
+            cond_vit=tiled_vit,
+            cond_timestep=_tile_value(
+                conditions.cond_timestep,
+                field_name="cond_timestep",
+            ),
+            # Opaque tokenizer metadata is only consumed by the stateful
+            # sampling cache path. Replay is stateless, so preserve it verbatim.
+            tokenizer_output=conditions.tokenizer_output,
+        )
 
     # ------------------------------------------------------------------
     # Single-step noise prediction (forward-process algorithms: DiffusionNFT et al.)

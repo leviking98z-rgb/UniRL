@@ -56,6 +56,9 @@ bundle:
     autocast_precision: bf16
     trajectory_precision: fp16
     logprob_precision: fp32
+    # Opt-in A/B switch: batch all selected SDE replay steps into one
+    # step-major transformer forward. False preserves the serial baseline.
+    batch_replay_steps: false
     shift: 3.0
     guidance_scale: 1.0
 
