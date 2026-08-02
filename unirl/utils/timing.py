@@ -11,9 +11,25 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from typing import Dict, Iterator
+from typing import Dict, Iterator, Mapping, Sequence
 
-__all__ = ["PhaseTimings"]
+__all__ = ["PhaseTimings", "critical_path_phase_times"]
+
+
+def critical_path_phase_times(
+    worker_phase_times: Mapping[str, Sequence[float]], *, prefix: str = ""
+) -> Dict[str, float]:
+    """Reduce per-worker phase samples to the slowest worker for each phase.
+
+    Distributed train stacks return one duration per DP worker. Taking the
+    maximum preserves the critical-path signal without adding a timing
+    collective to the training step. Empty phase samples are ignored.
+    """
+    return {
+        f"{prefix}{name}": max(float(value) for value in values)
+        for name, values in worker_phase_times.items()
+        if values
+    }
 
 
 class PhaseTimings:

@@ -57,6 +57,7 @@ import json
 import logging
 import os
 import time
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -75,6 +76,7 @@ from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack, _track_with_field
 from unirl.types.sampling import BaseSamplingParams
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
+from unirl.utils.timing import critical_path_phase_times
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +167,17 @@ class UnifiedModelTrainer(BaseTrainer):
         # optimizer) to CPU during rollout so the awake engines fit, onload
         # before the train backward. HI3's ~150GB base needs this → default True.
         self._enable_fsdp_offload = bool(enable_fsdp_offload)
+        self._detailed_timing = os.environ.get("UNIRL_DETAILED_TIMING", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if self._detailed_timing:
+            logger.warning(
+                "UNIRL_DETAILED_TIMING is enabled: worker phase boundaries synchronize CUDA; "
+                "use these runs for attribution, not speed A/B."
+            )
 
         # Periodic eval on the eval set (run.eval_data_path), logged under eval/*;
         # eval_interval=0 disables it. Scores only the image track, generated at
@@ -357,6 +370,11 @@ class UnifiedModelTrainer(BaseTrainer):
         role_cls = parsed.pop("role_cls")
         return self.pool.create_remote(role_cls, device_ids=[anchor_device], init_kwargs=parsed)
 
+    def _phase(self, name: str):
+        """Measure one driver-side step phase when phase timing is installed."""
+        timer = getattr(self, "_step_timer", None)
+        return timer.phase(name) if timer is not None else nullcontext()
+
     def _build_req(
         self, inputs: RolloutInputs, rollout_id: int, *, base_sampling: Optional[Dict[str, BaseSamplingParams]] = None
     ) -> RolloutReq:
@@ -413,22 +431,25 @@ class UnifiedModelTrainer(BaseTrainer):
             return self._run_rollout_one(self.ar_rollouts[0], self.dit_rollouts[0], req)
 
         # Contiguous near-equal prompt bounds across the dp replicas.
-        bounds = [(n * r) // self.dp for r in range(self.dp + 1)]
+        with self._phase("rollout_assemble"):
+            bounds = [(n * r) // self.dp for r in range(self.dp + 1)]
         shards: list[RolloutResp] = []
         for r in range(self.dp):
-            lo, hi = bounds[r], bounds[r + 1]
+            with self._phase("rollout_assemble"):
+                lo, hi = bounds[r], bounds[r + 1]
             if lo >= hi:
                 continue
             # Only "text" is consumed downstream by _run_rollout_one; slice it
             # to this replica's prompt range and rebuild a standalone sub-req.
-            sub_req = RolloutReq(
-                sample_ids=list(req.sample_ids[lo:hi]),
-                group_ids=list(req.group_ids[lo:hi]),
-                primitives={"text": Texts(texts=prompts[lo:hi])},
-                request_conditions=dict(req.request_conditions),
-                sampling_params=req.sampling_params,
-                metadata=list(req.metadata[lo:hi]) if req.metadata else [],
-            )
+            with self._phase("rollout_assemble"):
+                sub_req = RolloutReq(
+                    sample_ids=list(req.sample_ids[lo:hi]),
+                    group_ids=list(req.group_ids[lo:hi]),
+                    primitives={"text": Texts(texts=prompts[lo:hi])},
+                    request_conditions=dict(req.request_conditions),
+                    sampling_params=req.sampling_params,
+                    metadata=list(req.metadata[lo:hi]) if req.metadata else [],
+                )
             shards.append(self._run_rollout_one(self.ar_rollouts[r], self.dit_rollouts[r], sub_req))
         # Merge per-replica tracks via the default Batch.concat per-field
         # merge; segment rows are 1:1 with track samples, so the AR/image
@@ -445,9 +466,10 @@ class UnifiedModelTrainer(BaseTrainer):
         # dp>1 would SILENTLY feed replica-0 rope to every sample (wrong gradient,
         # no crash, reward unaffected); make rope_cache a tuple-aware CONCAT field
         # before relying on it.
-        return RolloutResp(
-            tracks={name: RolloutTrack.concat([s.tracks[name] for s in shards]) for name in (AR_TRACK, IMAGE_TRACK)}
-        )
+        with self._phase("rollout_assemble"):
+            return RolloutResp(
+                tracks={name: RolloutTrack.concat([s.tracks[name] for s in shards]) for name in (AR_TRACK, IMAGE_TRACK)}
+            )
 
     def _run_rollout_one(self, ar_engine: Any, dit_engine: Any, req: RolloutReq) -> RolloutResp:
         """One (AR, DiT) engine pair: PE-style fan-out → 2-track ``RolloutResp`` {"ar","image"}.
@@ -469,50 +491,56 @@ class UnifiedModelTrainer(BaseTrainer):
         (``primitives['cot_text']``); each image's unique ``sample_id`` drives
         ``engine.seed_from_sample_id`` so the M images of a recaption differ.
         """
-        texts = req.primitives.get("text")
-        if not isinstance(texts, Texts):
-            raise TypeError("UnifiedModelTrainer.run_rollout: req.primitives['text'] must be a Texts primitive.")
-        prompts = list(texts.texts)
+        with self._phase("rollout_assemble"):
+            texts = req.primitives.get("text")
+            if not isinstance(texts, Texts):
+                raise TypeError("UnifiedModelTrainer.run_rollout: req.primitives['text'] must be a Texts primitive.")
+            prompts = list(texts.texts)
 
-        ar_params = req.sampling_params.get("ar")
-        diff_params = req.sampling_params.get("diffusion")
-        n_recaptions = int(ar_params.samples_per_prompt) if ar_params is not None else 1
-        n_images = int(diff_params.samples_per_prompt)
+            ar_params = req.sampling_params.get("ar")
+            diff_params = req.sampling_params.get("diffusion")
+            n_recaptions = int(ar_params.samples_per_prompt) if ar_params is not None else 1
+            n_images = int(diff_params.samples_per_prompt)
 
-        # ── Level 1: P → P*N recaptions. Root "ar" track groups by prompt.
-        ar_shell = req.make_root_track(track_name=AR_TRACK, branch=n_recaptions)
-        ar_texts = Texts(texts=[t for t in prompts for _ in range(n_recaptions)])
-        # Ship the WHOLE composed params: the hi3_ar_recaption adapter reads its AR
-        # slice for sampling AND the diffusion slice's height/width for the
-        # recaption prompt (the engine keeps no sampling defaults).
-        ar_req = RolloutReq(
-            sample_ids=list(ar_shell.sample_ids),
-            group_ids=list(ar_shell.parent_ids),
-            primitives={"text": ar_texts},
-            request_conditions={},
-            sampling_params=req.sampling_params,
-        )
-        ar_resp = ar_engine.generate(ar_req)
-        ar_inner = ar_resp.tracks.get(AR_TRACK)
-        recaptions = ar_inner.decoded if ar_inner is not None else None
-        if not isinstance(recaptions, Texts):
-            raise RuntimeError("UnifiedModelTrainer.run_rollout: AR engine returned no decoded Texts on tracks['ar'].")
-        if len(recaptions.texts) != len(ar_shell.sample_ids):
-            raise RuntimeError(
-                f"UnifiedModelTrainer.run_rollout: AR engine returned {len(recaptions.texts)} recaption(s) "
-                f"but the AR track expects {len(ar_shell.sample_ids)} (= P*N). The AR engine must be 1:1."
+            # ── Level 1: P → P*N recaptions. Root "ar" track groups by prompt.
+            ar_shell = req.make_root_track(track_name=AR_TRACK, branch=n_recaptions)
+            ar_texts = Texts(texts=[t for t in prompts for _ in range(n_recaptions)])
+            # Ship the WHOLE composed params: the hi3_ar_recaption adapter reads its AR
+            # slice for sampling AND the diffusion slice's height/width for the
+            # recaption prompt (the engine keeps no sampling defaults).
+            ar_req = RolloutReq(
+                sample_ids=list(ar_shell.sample_ids),
+                group_ids=list(ar_shell.parent_ids),
+                primitives={"text": ar_texts},
+                request_conditions={},
+                sampling_params=req.sampling_params,
             )
-        ar_track = _track_with_field(ar_shell, "segment", ar_inner.segment)
-        ar_track = _track_with_field(ar_track, "decoded", recaptions)
-        ar_track = _track_with_field(ar_track, "conditions", dict(ar_inner.conditions))
+        with self._phase("ar_generate"):
+            ar_resp = ar_engine.generate(ar_req)
+        with self._phase("rollout_assemble"):
+            ar_inner = ar_resp.tracks.get(AR_TRACK)
+            recaptions = ar_inner.decoded if ar_inner is not None else None
+            if not isinstance(recaptions, Texts):
+                raise RuntimeError(
+                    "UnifiedModelTrainer.run_rollout: AR engine returned no decoded Texts on tracks['ar']."
+                )
+            if len(recaptions.texts) != len(ar_shell.sample_ids):
+                raise RuntimeError(
+                    f"UnifiedModelTrainer.run_rollout: AR engine returned {len(recaptions.texts)} recaption(s) "
+                    f"but the AR track expects {len(ar_shell.sample_ids)} (= P*N). The AR engine must be 1:1."
+                )
+            ar_track = _track_with_field(ar_shell, "segment", ar_inner.segment)
+            ar_track = _track_with_field(ar_track, "decoded", recaptions)
+            ar_track = _track_with_field(ar_track, "conditions", dict(ar_inner.conditions))
 
         # ── Level 2: P*N → P*N*M images. Fork "image" from "ar". For AR sample i
         # (0..P*N-1) the original prompt is prompts[i // N] and the recaption is
         # recaptions[i]; replicate each M× for the 1:1 DiT engine.
-        img_shell = ar_track.fork_track(parent_name=AR_TRACK, child_name=IMAGE_TRACK, branch=n_images)
-        n_ar = len(ar_shell.sample_ids)
-        dit_prompts = Texts(texts=[prompts[i // n_recaptions] for i in range(n_ar) for _ in range(n_images)])
-        dit_cot = Texts(texts=[recaptions.texts[i] for i in range(n_ar) for _ in range(n_images)])
+        with self._phase("rollout_assemble"):
+            img_shell = ar_track.fork_track(parent_name=AR_TRACK, child_name=IMAGE_TRACK, branch=n_images)
+            n_ar = len(ar_shell.sample_ids)
+            dit_prompts = Texts(texts=[prompts[i // n_recaptions] for i in range(n_ar) for _ in range(n_images)])
+            dit_cot = Texts(texts=[recaptions.texts[i] for i in range(n_ar) for _ in range(n_images)])
         # Driver-authoritative x_T RECIPE (per-IMAGE, ROLLOUT-keyed gids). HI3's
         # DiT latent shape is AR-dynamic, so we ship only the recipe (no shape);
         # the worker's prepare_latents hook fills the shape post-AR and regenerates
@@ -522,34 +550,38 @@ class UnifiedModelTrainer(BaseTrainer):
         # and so reused the SAME x_T every rollout (frozen-noise overfit, the bug
         # this fixes). ``_dump_rollout_id`` is set to the current rollout_id by the
         # train loop just before train_step. Opt out via DISABLE_DRIVER_XT.
-        dit_noise_gids = (
-            []
-            if os.environ.get("DISABLE_DRIVER_XT")
-            else [f"r{int(self._dump_rollout_id)}:{sid}" for sid in img_shell.sample_ids]
-        )
-        dit_req = RolloutReq(
-            sample_ids=list(img_shell.sample_ids),
-            group_ids=list(img_shell.parent_ids),
-            primitives={"text": dit_prompts, "cot_text": dit_cot},
-            request_conditions={},
-            sampling_params={"diffusion": diff_params},
-            init_noise_group_ids=dit_noise_gids,
-        )
-        dit_resp = dit_engine.generate(dit_req)
-        img_inner = dit_resp.tracks.get(IMAGE_TRACK)
-        if img_inner is None:
-            raise RuntimeError(
-                f"UnifiedModelTrainer.run_rollout: DiT engine returned no 'image' track (got {sorted(dit_resp.tracks.keys())})."
+        with self._phase("rollout_assemble"):
+            dit_noise_gids = (
+                []
+                if os.environ.get("DISABLE_DRIVER_XT")
+                else [f"r{int(self._dump_rollout_id)}:{sid}" for sid in img_shell.sample_ids]
             )
-        if len(img_inner.sample_ids) != len(img_shell.sample_ids):
-            raise RuntimeError(
-                f"UnifiedModelTrainer.run_rollout: DiT engine returned {len(img_inner.sample_ids)} image(s) "
-                f"but the image track expects {len(img_shell.sample_ids)} (= P*N*M). The DiT engine must be 1:1."
+            dit_req = RolloutReq(
+                sample_ids=list(img_shell.sample_ids),
+                group_ids=list(img_shell.parent_ids),
+                primitives={"text": dit_prompts, "cot_text": dit_cot},
+                request_conditions={},
+                sampling_params={"diffusion": diff_params},
+                init_noise_group_ids=dit_noise_gids,
             )
-        img_track = _track_with_field(img_shell, "segment", img_inner.segment)
-        img_track = _track_with_field(img_track, "decoded", img_inner.decoded)
-        img_track = _track_with_field(img_track, "conditions", dict(img_inner.conditions))
-        img_track = _track_with_field(img_track, "media_preview", img_inner.media_preview)
+        with self._phase("image_generate"):
+            dit_resp = dit_engine.generate(dit_req)
+        with self._phase("rollout_assemble"):
+            img_inner = dit_resp.tracks.get(IMAGE_TRACK)
+            if img_inner is None:
+                raise RuntimeError(
+                    "UnifiedModelTrainer.run_rollout: DiT engine returned no 'image' track "
+                    f"(got {sorted(dit_resp.tracks.keys())})."
+                )
+            if len(img_inner.sample_ids) != len(img_shell.sample_ids):
+                raise RuntimeError(
+                    f"UnifiedModelTrainer.run_rollout: DiT engine returned {len(img_inner.sample_ids)} image(s) "
+                    f"but the image track expects {len(img_shell.sample_ids)} (= P*N*M). The DiT engine must be 1:1."
+                )
+            img_track = _track_with_field(img_shell, "segment", img_inner.segment)
+            img_track = _track_with_field(img_track, "decoded", img_inner.decoded)
+            img_track = _track_with_field(img_track, "conditions", dict(img_inner.conditions))
+            img_track = _track_with_field(img_track, "media_preview", img_inner.media_preview)
 
         # Each anchored engine returns its track as ONE transport handle (a single
         # ref spanning all P*N / P*N*M samples). The train side is num_devices-way DP and
@@ -559,8 +591,9 @@ class UnifiedModelTrainer(BaseTrainer):
         # train DP dispatch then re-shards real tensors. (DiffusionTrainer dodges
         # this because its per-worker DP engine already emits one ref per rank,
         # aligned to the train DP boundaries — our single-actor TP engines don't.)
-        deep_hydrate(ar_track)
-        deep_hydrate(img_track)
+        with self._phase("rollout_hydrate"):
+            deep_hydrate(ar_track)
+            deep_hydrate(img_track)
 
         return RolloutResp(tracks={AR_TRACK: ar_track, IMAGE_TRACK: img_track})
 
@@ -590,19 +623,26 @@ class UnifiedModelTrainer(BaseTrainer):
             # rollout (base offloaded) -> sleep engines -> onload base for backward.
             if sync_weights and self.weight_sync is not None:
                 if self._enable_fsdp_offload:
-                    self.backend.onload()
-                self.weight_sync.extract()
+                    with self._phase("backend_onload"):
+                        self.backend.onload()
+                with self._phase("weight_extract"):
+                    self.weight_sync.extract()
                 if self._enable_fsdp_offload:
-                    self.backend.offload()
-            for _eng in self.ar_rollouts + self.dit_rollouts:
-                _eng.wake_up()
+                    with self._phase("backend_offload"):
+                        self.backend.offload()
+            with self._phase("engine_wake"):
+                for _eng in self.ar_rollouts + self.dit_rollouts:
+                    _eng.wake_up()
             if sync_weights and self.weight_sync is not None:
-                self.weight_sync.push()
+                with self._phase("weight_push"):
+                    self.weight_sync.push()
             resp = self.run_rollout(req)
-            for _eng in self.ar_rollouts + self.dit_rollouts:
-                _eng.sleep()
+            with self._phase("engine_sleep"):
+                for _eng in self.ar_rollouts + self.dit_rollouts:
+                    _eng.sleep()
             if self._enable_fsdp_offload:
-                self.backend.onload()
+                with self._phase("backend_onload"):
+                    self.backend.onload()
 
         # 1. Score the IMAGE track only — the AR track's TextSegment is not
         #    directly scorable; its reward is credit-assigned below.
@@ -611,87 +651,111 @@ class UnifiedModelTrainer(BaseTrainer):
         #    across ranks but broadcasts the req, so a P-prompt req leaves each
         #    rank with req(P) > track(P*N*M/dp) → "not an integer multiple". A
         #    1:1 req shards together with the track (req==track per rank).
-        img_track = resp.tracks[IMAGE_TRACK]
-        ar_params = req.sampling_params.get("ar")
-        diff_params = req.sampling_params.get("diffusion")
-        n_rec = int(ar_params.samples_per_prompt) if ar_params is not None else 1
-        n_img = int(diff_params.samples_per_prompt)
-        orig_texts = req.primitives.get("text")
-        reward_texts = Texts(texts=[orig_texts.texts[i // (n_rec * n_img)] for i in range(len(img_track.sample_ids))])
-        # Per-sample metadata, expanded 1:1 with the image track by the SAME
-        # prompt-index map as reward_texts. GenEval-style rewards read each
-        # image's compositional spec (tag/include/exclude) from metadata[i];
-        # without this expansion the geneval scorer raises (no per-item spec).
-        # Empty when the data source carries no metadata (e.g. pickscore prompts).
-        reward_metadata = (
-            [req.metadata[i // (n_rec * n_img)] for i in range(len(img_track.sample_ids))] if req.metadata else []
-        )
-        reward_req = RolloutReq(
-            sample_ids=list(img_track.sample_ids),
-            group_ids=list(img_track.parent_ids) if img_track.parent_ids else list(img_track.sample_ids),
-            primitives={"text": reward_texts},
-            request_conditions={},
-            sampling_params=req.sampling_params,
-            metadata=reward_metadata,
-        )
+        with self._phase("reward_prepare"):
+            img_track = resp.tracks[IMAGE_TRACK]
+            ar_params = req.sampling_params.get("ar")
+            diff_params = req.sampling_params.get("diffusion")
+            n_rec = int(ar_params.samples_per_prompt) if ar_params is not None else 1
+            n_img = int(diff_params.samples_per_prompt)
+            orig_texts = req.primitives.get("text")
+            reward_texts = Texts(
+                texts=[orig_texts.texts[i // (n_rec * n_img)] for i in range(len(img_track.sample_ids))]
+            )
+            # Per-sample metadata, expanded 1:1 with the image track by the SAME
+            # prompt-index map as reward_texts. GenEval-style rewards read each
+            # image's compositional spec (tag/include/exclude) from metadata[i];
+            # without this expansion the geneval scorer raises (no per-item spec).
+            # Empty when the data source carries no metadata (e.g. pickscore prompts).
+            reward_metadata = (
+                [req.metadata[i // (n_rec * n_img)] for i in range(len(img_track.sample_ids))] if req.metadata else []
+            )
+            reward_req = RolloutReq(
+                sample_ids=list(img_track.sample_ids),
+                group_ids=list(img_track.parent_ids) if img_track.parent_ids else list(img_track.sample_ids),
+                primitives={"text": reward_texts},
+                request_conditions={},
+                sampling_params=req.sampling_params,
+                metadata=reward_metadata,
+            )
         scored = self.reward.score_and_attach(req=reward_req, track=img_track)
-        if scored.rewards is not None:
-            scored.rewards = hydrate(scored.rewards)
-        resp.tracks[IMAGE_TRACK] = scored
+        with self._phase("sample_prepare"):
+            if scored.rewards is not None:
+                scored.rewards = hydrate(scored.rewards)
+            resp.tracks[IMAGE_TRACK] = scored
 
-        # 2. Credit-assign image reward up the lineage → fills the "ar" track.
-        resp = resp.propagate_rewards(op="mean")
+            # 2. Credit-assign image reward up the lineage → fills the "ar" track.
+            resp = resp.propagate_rewards(op="mean")
 
-        # 3. Mean image reward for the log line.
-        mean_reward = 0.0
-        di_rewards = resp.tracks[IMAGE_TRACK].rewards
-        if di_rewards is not None:
-            mean_reward = float(hydrate(di_rewards).to(torch.float32).mean().item())
+            # 3. Mean image reward for the log line.
+            mean_reward = 0.0
+            di_rewards = resp.tracks[IMAGE_TRACK].rewards
+            if di_rewards is not None:
+                mean_reward = float(hydrate(di_rewards).to(torch.float32).mean().item())
 
         # 3b. Intrusive debug dump (best-effort) — observe what AR generated and
         #     what DiT rendered before advantages/training mutate the tracks.
         if self.dump_dir:
-            self._dump_rollout(self._dump_rollout_id, req, resp)
+            with self._phase("debug_dump"):
+                self._dump_rollout(self._dump_rollout_id, req, resp)
 
         # 4. GRPO advantages. AR always groups by prompt. In single-engine
         #    (M=1 / UniGRPO) mode the image is 1:1 with its AR chain, so it SHARES
         #    the AR's prompt-level advantage (Â_i) — the framework's per-rewrite
         #    image grouping would be a degenerate size-1 group (advantage 0) at M=1.
-        resp.tracks[AR_TRACK] = resp.tracks[AR_TRACK].compute_advantages(normalize=True)
-        if self._shared_advantage:
-            resp.tracks[IMAGE_TRACK] = _track_with_field(
-                resp.tracks[IMAGE_TRACK], "advantages", resp.tracks[AR_TRACK].advantages
-            )
-        else:
-            resp.tracks[IMAGE_TRACK] = resp.tracks[IMAGE_TRACK].compute_advantages(normalize=True)
+        with self._phase("sample_prepare"):
+            resp.tracks[AR_TRACK] = resp.tracks[AR_TRACK].compute_advantages(normalize=True)
+            if self._shared_advantage:
+                resp.tracks[IMAGE_TRACK] = _track_with_field(
+                    resp.tracks[IMAGE_TRACK], "advantages", resp.tracks[AR_TRACK].advantages
+                )
+            else:
+                resp.tracks[IMAGE_TRACK] = resp.tracks[IMAGE_TRACK].compute_advantages(normalize=True)
 
-        # after the debug dump (which reads decoded), before training.
-        # ``reward_texts`` is 1:1 with the image track (built at scoring), so it
-        # captions the image previews correctly.
-        self._drop_decoded(
-            req,
-            resp,
-            rollout_id=rollout_id,
-            media_prompts={IMAGE_TRACK: list(reward_texts.texts)},
-        )
+            # after the debug dump (which reads decoded), before training.
+            # ``reward_texts`` is 1:1 with the image track (built at scoring), so it
+            # captions the image previews correctly.
+            self._drop_decoded(
+                req,
+                resp,
+                rollout_id=rollout_id,
+                media_prompts={IMAGE_TRACK: list(reward_texts.texts)},
+            )
         # 5. Two backward (shared backbone) → one optimizer step.
-        results: Dict[str, TrainStepResult] = self.stack.train_track(
+        train_output = self.stack.train_track(
             resp.tracks[AR_TRACK],
             resp.tracks[IMAGE_TRACK],
             training_progress=float(training_progress),
+            detailed_timing=self._detailed_timing,
         )
+        if self._detailed_timing:
+            results, worker_train_phases = train_output
+        else:
+            results = train_output
+            worker_train_phases = {}
+
+        # 6. Back to steady state (base on CPU) so the next rollout's engines
+        #    have room to wake. Preserve the historical step_time_s boundary
+        #    (through optimizer completion, before this steady-state offload),
+        #    while still attaching the offload as an explicitly post-step phase.
+        step_time_s = time.perf_counter() - t0
+        if self._enable_fsdp_offload:
+            with self._phase("post_step_backend_offload"):
+                self.backend.offload()
+
+        timer = getattr(self, "_step_timer", None)
+        phase_times = dict(getattr(timer, "phases", {}))
+        # DP_SCATTER returns one worker-local duration per rank. The slowest rank
+        # is the train critical path and is therefore the useful optimization
+        # signal; transporting these tiny Python lists avoids another collective.
+        phase_times.update(critical_path_phase_times(worker_train_phases, prefix="train/"))
         self.wandb_logger.log_rollout_step(
             rollout_id,
             results,
             resp,
-            step_time_s=time.perf_counter() - t0,
+            step_time_s=step_time_s,
+            phase_times=phase_times,
             extra_metrics={"sync_weights": float(bool(sync_weights))},
         )
-
-        # 6. Back to steady state (base on CPU) so the next rollout's engines
-        #    have room to wake.
-        if self._enable_fsdp_offload:
-            self.backend.offload()
         return results, mean_reward
 
     def _dump_rollout(self, rollout_id: int, req: RolloutReq, resp: Any) -> None:

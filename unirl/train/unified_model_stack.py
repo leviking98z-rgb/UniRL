@@ -34,7 +34,8 @@ optimizer step, in contrast to the single-stage ``TrainStack``.
 from __future__ import annotations
 
 import logging
-from contextlib import nullcontext
+import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from typing import Dict, List, Mapping, Tuple
 
@@ -234,17 +235,26 @@ class UnifiedModelTrainStack(Remote):
         slices_by_track: Dict[str, List[Tuple[int, int]]],
         *,
         training_progress: float,
+        phase_times: Dict[str, float],
+        detailed_timing: bool,
     ) -> Dict[str, TrainStepResult]:
         """One optimizer step: zero_grad → backward BOTH tracks over their mini-batch
         slices → shared optimizer_step → stamp grad_norm / lr onto each track's result.
         """
-        self.fsdp_backend.zero_grad()
+        with self._measure_phase(phase_times, "zero_grad", detailed_timing=detailed_timing):
+            self.fsdp_backend.zero_grad()
         results: Dict[str, TrainStepResult] = {}
         any_backward = False
         for name in self.algorithms:
-            partial, has_backward = self._backward_track(
-                name, tracks[name], slices_by_track[name], training_progress=training_progress
-            )
+            with self._measure_phase(
+                phase_times,
+                f"{name}_backward",
+                detailed_timing=detailed_timing,
+                synchronize_cuda=True,
+            ):
+                partial, has_backward = self._backward_track(
+                    name, tracks[name], slices_by_track[name], training_progress=training_progress
+                )
             results[name] = partial
             any_backward = any_backward or has_backward
 
@@ -256,8 +266,19 @@ class UnifiedModelTrainStack(Remote):
             # blocks to the driver first defragments. Gated on >1 so the single-update
             # path (and the LoRA recipe) pays nothing.
             if self.num_updates_per_batch > 1 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
+                with self._measure_phase(phase_times, "empty_cache", detailed_timing=detailed_timing):
+                    torch.cuda.empty_cache()
+            with self._measure_phase(phase_times, "optimizer", detailed_timing=detailed_timing):
+                grad_norm = float(
+                    self.fsdp_backend.optimizer_step(
+                        max_grad_norm=float(self.max_grad_norm),
+                        detailed_timing=detailed_timing,
+                    )
+                )
+            if detailed_timing:
+                for name, elapsed in getattr(self.fsdp_backend, "_last_optimizer_phase_times", {}).items():
+                    key = f"optimizer/{name}"
+                    phase_times[key] = phase_times.get(key, 0.0) + float(elapsed)
         else:
             grad_norm = 0.0
             logger.warning("UnifiedModelTrainStack._train_one_step: no algorithm reported backward; skipping step.")
@@ -268,6 +289,34 @@ class UnifiedModelTrainStack(Remote):
                 loss=r.loss, grad_norm=grad_norm, lr=lr, has_backward=r.has_backward, micros=r.micros, metrics=r.metrics
             )
         return results
+
+    @contextmanager
+    def _measure_phase(
+        self,
+        phase_times: Dict[str, float],
+        name: str,
+        *,
+        detailed_timing: bool,
+        synchronize_cuda: bool = False,
+    ):
+        """Measure a worker phase, optionally fencing CUDA for attribution.
+
+        Explicit CUDA fences are intentionally limited to detailed profiling
+        runs: they prevent asynchronous AR/image work from leaking into the next
+        phase, but would perturb a speed A/B run.
+        """
+        if not detailed_timing:
+            yield
+            return
+        if synchronize_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize(self.fsdp_backend._device)
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            if synchronize_cuda and torch.cuda.is_available():
+                torch.cuda.synchronize(self.fsdp_backend._device)
+            phase_times[name] = phase_times.get(name, 0.0) + (time.perf_counter() - started)
 
     def on_rollout_end(self) -> None:
         """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
@@ -290,7 +339,8 @@ class UnifiedModelTrainStack(Remote):
         image_track: RolloutTrack,
         *,
         training_progress: float,
-    ) -> Dict[str, TrainStepResult]:
+        detailed_timing: bool = False,
+    ) -> Dict[str, TrainStepResult] | Tuple[Dict[str, TrainStepResult], Dict[str, List[float]]]:
         """Driver-callable: prepare → backward(ar) + backward(image) → ONE step.
 
         Both tracks arrive DP_SCATTER-sharded (each DP worker gets its shard of
@@ -301,7 +351,14 @@ class UnifiedModelTrainStack(Remote):
         ratio trust region engages; ``num_updates_per_batch=1`` is the prior
         single-step behavior. Per-track results are reduced across the updates;
         per-shard results merge back via ``pytree_cat`` on collect.
+
+        ``detailed_timing=True`` adds a second return value with one wall-clock
+        value per DP worker for each internal phase. CUDA is synchronized at the
+        major replay/backward boundaries so asynchronous work is attributed to
+        the correct phase. The default keeps the historical dict-only API and
+        performs no timing synchronization.
         """
+        phase_times: Dict[str, float] = {}
         # Move both tracks onto this worker's model device before any replay.
         # The HI3 rollout tracks are hydrated to CPU on the driver (the two
         # anchored engines return single transport handles that the driver
@@ -310,8 +367,14 @@ class UnifiedModelTrainStack(Remote):
         # One to_device here covers both algorithms' replays (AR teacher-force +
         # diffusion step) and their conditions — no per-replay device juggling.
         device = self.fsdp_backend._device
-        ar_track = ar_track.to_device(device)
-        image_track = image_track.to_device(device)
+        with self._measure_phase(
+            phase_times,
+            "input_to_device",
+            detailed_timing=detailed_timing,
+            synchronize_cuda=True,
+        ):
+            ar_track = ar_track.to_device(device)
+            image_track = image_track.to_device(device)
 
         # Only UNIRL_PROFILE=train applies here (one-update lives in TrainStack._run_updates);
         # warn if one-update was set so it isn't silently ignored.
@@ -329,42 +392,71 @@ class UnifiedModelTrainStack(Remote):
             tracks = {"ar": ar_track, "image": image_track}
             # Freeze each track's π_old anchor once, before the multi-update loop.
             for name in self.algorithms:
-                self.prepare_segment(name, tracks[name])
+                with self._measure_phase(
+                    phase_times,
+                    f"{name}_prepare",
+                    detailed_timing=detailed_timing,
+                    synchronize_cuda=True,
+                ):
+                    self.prepare_segment(name, tracks[name])
 
             # N optimizer steps over disjoint mini-batches (each track sliced by the same
             # shared _optimizer_step_slices; M=1 keeps ar/image 1:1 and equally sized).
-            steps_by_track = {
-                name: self._optimizer_step_slices(int(tracks[name].batch_size)) for name in self.algorithms
-            }
+            with self._measure_phase(phase_times, "plan", detailed_timing=detailed_timing):
+                steps_by_track = {
+                    name: self._optimizer_step_slices(int(tracks[name].batch_size)) for name in self.algorithms
+                }
             per_update: List[Dict[str, TrainStepResult]] = []
             for u in range(self.num_updates_per_batch):
                 slices_by_track = {name: steps_by_track[name][u] for name in self.algorithms}
                 per_update.append(
-                    self._train_one_step(tracks, slices_by_track, training_progress=float(training_progress))
+                    self._train_one_step(
+                        tracks,
+                        slices_by_track,
+                        training_progress=float(training_progress),
+                        phase_times=phase_times,
+                        detailed_timing=detailed_timing,
+                    )
                 )
         if profiler is not None:
             profiler.step()
 
-        self.on_rollout_end()
+        with self._measure_phase(
+            phase_times,
+            "rollout_end",
+            detailed_timing=detailed_timing,
+            synchronize_cuda=True,
+        ):
+            self.on_rollout_end()
 
         # Reduce each track's per-optimizer-step results into one summary, attaching
         # each optimizer step's own metrics on ``per_update`` so the logger emits ONE
         # wandb point per optimizer update (on-policy update0 vs off-policy update1+
         # stay distinct series instead of being averaged into one misleading
         # ratio_mean). Mirrors TrainStack.train_track; passthrough at num_updates==1.
-        results: Dict[str, TrainStepResult] = {}
-        for name in self.algorithms:
-            updates = [upd[name] for upd in per_update]
-            aggregated = _aggregate_update_results(updates)
-            if len(updates) > 1:
-                aggregated = replace(
-                    aggregated,
-                    per_update=tuple(
-                        {**dict(r.metrics), "loss": float(r.loss), "grad_norm": float(r.grad_norm), "lr": float(r.lr)}
-                        for r in updates
-                    ),
-                )
-            results[name] = aggregated
+        with self._measure_phase(phase_times, "result_reduce", detailed_timing=detailed_timing):
+            results: Dict[str, TrainStepResult] = {}
+            for name in self.algorithms:
+                updates = [upd[name] for upd in per_update]
+                aggregated = _aggregate_update_results(updates)
+                if len(updates) > 1:
+                    aggregated = replace(
+                        aggregated,
+                        per_update=tuple(
+                            {
+                                **dict(r.metrics),
+                                "loss": float(r.loss),
+                                "grad_norm": float(r.grad_norm),
+                                "lr": float(r.lr),
+                            }
+                            for r in updates
+                        ),
+                    )
+                results[name] = aggregated
+        # Lists concatenate under DP_SCATTER's pytree_cat, yielding one duration
+        # per worker at the driver while TrainStepResult keeps its existing API.
+        if detailed_timing:
+            return results, {name: [float(elapsed)] for name, elapsed in phase_times.items()}
         return results
 
     def _current_lr(self) -> float:

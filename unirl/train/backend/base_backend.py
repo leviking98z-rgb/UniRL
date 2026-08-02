@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from typing import Dict, List, Literal, Optional
 
 import torch
@@ -78,6 +79,7 @@ class BaseFSDP2Backend(Remote):
     _rollout_adapter_name: str
     _defer_grad_sync: bool
     _grad_sync_enabled: bool
+    _last_optimizer_phase_times: Dict[str, float]
 
     # ------------------------------------------------------------------
     # Construction helpers (called in sequence from each leaf __init__)
@@ -248,7 +250,7 @@ class BaseFSDP2Backend(Remote):
         """True when no-sync accumulation is active (``defer_grad_sync`` under ZeRO-2)."""
         return self._defer_grad_sync
 
-    def optimizer_step(self, *, max_grad_norm: float) -> float:
+    def optimizer_step(self, *, max_grad_norm: float, detailed_timing: bool = False) -> float:
         """Clip (via the engine hook), optimizer step, scheduler step, EMA step.
 
         The algorithm sibling Remote populates grads on this backend's model
@@ -261,8 +263,18 @@ class BaseFSDP2Backend(Remote):
         all-rank scalar so the skip is identical on every rank. This is the one
         optimizer-step chokepoint every v2 trainer routes through.
         """
+        phase_times: Dict[str, float] = {}
+        self._last_optimizer_phase_times = phase_times
+        if detailed_timing:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self._device)
+            started = time.perf_counter()
         clipped = self._clip_grad_norm(float(max_grad_norm))
         grad_norm = float(clipped.item()) if isinstance(clipped, torch.Tensor) else float(clipped or 0.0)
+        if detailed_timing:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self._device)
+            phase_times["grad_clip"] = time.perf_counter() - started
 
         if not math.isfinite(grad_norm):
             # On a skipped step (already discarded), pinpoint which params carry the
@@ -291,11 +303,24 @@ class BaseFSDP2Backend(Remote):
             self.optimizer.zero_grad(set_to_none=True)
             return grad_norm
 
+        if detailed_timing:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self._device)
+            started = time.perf_counter()
         self.optimizer.step()
+        if detailed_timing:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self._device)
+            phase_times["apply"] = time.perf_counter() - started
+            started = time.perf_counter()
         if self.scheduler is not None:
             self.scheduler.step()
         if self.ema is not None:
             self.ema.step(self._optimizer_step_count)
+        if detailed_timing:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self._device)
+            phase_times["scheduler_ema"] = time.perf_counter() - started
         self._optimizer_step_count += 1
         return grad_norm
 
