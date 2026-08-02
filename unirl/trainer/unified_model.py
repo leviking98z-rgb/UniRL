@@ -87,6 +87,44 @@ AR_TRACK = "ar"
 IMAGE_TRACK = "image"
 
 
+def _validate_unified_track_dp_geometry(
+    *,
+    prompt_batch_size: int,
+    ar_samples_per_prompt: int,
+    image_samples_per_prompt: int,
+    dp_size: int,
+) -> Tuple[int, int]:
+    """Validate the two lineage-level batch axes before model materialization.
+
+    Unified training produces ``P*N`` AR rows and ``P*N*M`` image rows. The
+    stack shards both independently over all training workers, so each total
+    must divide the DP world. Failing here avoids discovering an invalid recipe
+    only after the expensive rollout has completed.
+    """
+    dimensions = {
+        "prompt_batch_size": int(prompt_batch_size),
+        "ar_samples_per_prompt": int(ar_samples_per_prompt),
+        "image_samples_per_prompt": int(image_samples_per_prompt),
+        "dp_size": int(dp_size),
+    }
+    for name, value in dimensions.items():
+        if value < 1:
+            raise ValueError(f"UnifiedModelTrainer: {name} must be >= 1; got {value}.")
+
+    ar_batch = dimensions["prompt_batch_size"] * dimensions["ar_samples_per_prompt"]
+    image_batch = ar_batch * dimensions["image_samples_per_prompt"]
+    invalid = [name for name, size in (("ar", ar_batch), ("image", image_batch)) if size % dimensions["dp_size"]]
+    if invalid:
+        raise ValueError(
+            "UnifiedModelTrainer: track batches must divide training DP before independent scatter; "
+            f"P={dimensions['prompt_batch_size']} N={dimensions['ar_samples_per_prompt']} "
+            f"M={dimensions['image_samples_per_prompt']} produce ar={ar_batch}, image={image_batch}, "
+            f"dp_size={dimensions['dp_size']}; non-divisible tracks={invalid}. "
+            "Adjust batch_size or samples_per_prompt."
+        )
+    return ar_batch, image_batch
+
+
 def deep_hydrate(obj: Any) -> Any:
     """Materialize every ``TensorRef`` leaf in ``obj`` to a real tensor, in place.
 
@@ -206,6 +244,16 @@ class UnifiedModelTrainer(BaseTrainer):
         self.data_source = instantiate(data_source_cfg)
 
         self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
+        ar_sampling = self.sampling_params.get(AR_TRACK)
+        image_sampling = self.sampling_params.get("diffusion")
+        if ar_sampling is None or image_sampling is None:
+            raise ValueError("UnifiedModelTrainer requires both 'ar' and 'diffusion' sampling parameters.")
+        _validate_unified_track_dp_geometry(
+            prompt_batch_size=int(self.batch_size),
+            ar_samples_per_prompt=int(ar_sampling.samples_per_prompt),
+            image_samples_per_prompt=int(image_sampling.samples_per_prompt),
+            dp_size=int(self.num_devices),
+        )
 
         # Set below from the `sync` block; None means no sync (e.g. trainside).
         self.weight_sync = None

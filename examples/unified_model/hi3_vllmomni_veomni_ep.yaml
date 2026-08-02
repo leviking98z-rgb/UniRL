@@ -56,9 +56,9 @@ bundle:
     autocast_precision: bf16
     trajectory_precision: fp16
     logprob_precision: fp32
-    # Opt-in A/B switch: batch all selected SDE replay steps into one
-    # step-major transformer forward. False preserves the serial baseline.
-    batch_replay_steps: false
+    # Validated default: batch selected SDE replay steps into one step-major
+    # transformer forward. Set false only for serial-replay baselines.
+    batch_replay_steps: true
     shift: 3.0
     guidance_scale: 1.0
 
@@ -196,9 +196,10 @@ algorithm:
 stack:
   _target_: unirl.train.unified_model_stack.UnifiedModelTrainStack
   micro_batch_size: 1
-  # Optional per-track overrides; null inherits micro_batch_size.
-  ar_micro_batch_size: null
-  image_micro_batch_size: null
+  # Keep AR at 1 for long variable-length responses. Image=1 plus batched SDE
+  # replay is the safe profile; image=2 is a faster, high-memory 512px profile.
+  ar_micro_batch_size: 1
+  image_micro_batch_size: 1
   max_grad_norm: 1.0
 
 data_source:

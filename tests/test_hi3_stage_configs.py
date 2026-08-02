@@ -32,9 +32,17 @@ def test_hi3_per_track_micro_batches_preserve_ar_sequence_objective() -> None:
     examples = Path(__file__).parents[1] / "examples" / "unified_model"
     for config_name in ("hi3_vllmomni.yaml", "hi3_vllmomni_veomni_ep.yaml"):
         config = yaml.safe_load((examples / config_name).read_text())
-        assert config["stack"]["ar_micro_batch_size"] is None
-        assert config["stack"]["image_micro_batch_size"] is None
+        assert config["stack"]["ar_micro_batch_size"] == 1
+        assert config["stack"]["image_micro_batch_size"] == 1
         assert config["algorithm"]["ar"]["loss_agg_mode"] == "seq-mean-token-mean"
+        assert config["bundle"]["config"]["batch_replay_steps"] is True
+
+        prompts = int(config["batch_size"])
+        ar_batch = prompts * int(config["sampling"]["ar"]["samples_per_prompt"])
+        image_batch = ar_batch * int(config["sampling"]["diffusion"]["samples_per_prompt"])
+        train_dp = int(config["num_devices"])
+        assert ar_batch % train_dp == 0
+        assert image_batch % train_dp == 0
 
 
 def test_bagel_per_track_micro_batches_preserve_ar_sequence_objective() -> None:

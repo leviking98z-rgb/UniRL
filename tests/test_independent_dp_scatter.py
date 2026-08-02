@@ -12,6 +12,7 @@ from unirl.distributed.group.dispatch import (  # noqa: E402
     resolve_backward_dispatch_mode,
 )
 from unirl.train.unified_model_stack import UnifiedModelTrainStack  # noqa: E402
+from unirl.trainer.unified_model import _validate_unified_track_dp_geometry  # noqa: E402
 from unirl.types.rollout_resp import RolloutTrack  # noqa: E402
 
 
@@ -103,3 +104,20 @@ def test_independent_dp_scatter_rejects_auto_backward() -> None:
 def test_unified_train_track_opts_into_independent_dp_scatter() -> None:
     config = getattr(UnifiedModelTrainStack.train_track, DISTRIBUTED_CONFIG_ATTR)
     assert config["dispatch_mode"] is Dispatch.DP_SCATTER_INDEPENDENT
+
+
+def test_unified_track_geometry_fails_before_non_divisible_dp_scatter() -> None:
+    assert _validate_unified_track_dp_geometry(
+        prompt_batch_size=8,
+        ar_samples_per_prompt=2,
+        image_samples_per_prompt=2,
+        dp_size=8,
+    ) == (16, 32)
+
+    with pytest.raises(ValueError, match=r"ar=4, image=8, dp_size=8.*non-divisible tracks=\['ar'\]"):
+        _validate_unified_track_dp_geometry(
+            prompt_batch_size=2,
+            ar_samples_per_prompt=2,
+            image_samples_per_prompt=2,
+            dp_size=8,
+        )
