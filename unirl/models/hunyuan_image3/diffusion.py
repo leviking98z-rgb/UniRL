@@ -989,14 +989,17 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
             tiled_items = [item for group in groups for _ in range(repeats) for item in group]
             return tuple(tiled_items) if isinstance(value, tuple) else tiled_items
 
-        rope_cache = fused.rope_cache
-        if rope_cache is not None:
-            rope_cache = tuple(_tile_value(t, field_name=f"fused.rope_cache[{i}]") for i, t in enumerate(rope_cache))
         tiled_fused = type(fused)(
             input_ids=_tile_value(fused.input_ids, field_name="fused.input_ids"),
             attention_mask=_tile_value(fused.attention_mask, field_name="fused.attention_mask"),
             position_ids=_tile_value(fused.position_ids, field_name="fused.position_ids"),
-            rope_cache=rope_cache,
+            # ``rope_cache`` is a SHARED tuple field.  After the multi-engine
+            # rollout merge its leading dimension belongs to replica 0 rather
+            # than to this rank's replay batch, so it must not be interpreted
+            # as a batch axis.  HI3's stateless diffusion replay rebuilds its
+            # native 2-D RoPE from ``gen_image_mask`` and the latent shape and
+            # does not consume this cached tuple; preserve it verbatim.
+            rope_cache=fused.rope_cache,
             gen_image_mask=_tile_value(fused.gen_image_mask, field_name="fused.gen_image_mask"),
             gen_timestep_scatter_index=_tile_value(
                 fused.gen_timestep_scatter_index,

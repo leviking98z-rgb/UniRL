@@ -59,13 +59,17 @@ class _FakeStep:
 def _conditions() -> HunyuanImage3DiffusionConditions:
     input_ids = torch.tensor([[2, 3, 4], [7, 8, 9]], dtype=torch.long)
     batch, length = input_ids.shape
+    # The real multi-engine rollout keeps rope_cache as a SHARED tuple field.
+    # Its leading dimension therefore need not match the per-rank replay
+    # batch (the first real 8-GPU run observed 32 here with local B=1).
+    rope_rows = 32
     fused = HunyuanImage3FusedMultimodalCondition(
         input_ids=input_ids,
         attention_mask=torch.ones(batch, 1, length, length, dtype=torch.bool),
         position_ids=torch.arange(length).expand(batch, -1),
         rope_cache=(
-            torch.arange(batch * length * 2, dtype=torch.float32).view(batch, length, 2),
-            torch.arange(batch * length * 2, dtype=torch.float32).view(batch, length, 2) + 1,
+            torch.arange(rope_rows * length * 2, dtype=torch.float32).view(rope_rows, length, 2),
+            torch.arange(rope_rows * length * 2, dtype=torch.float32).view(rope_rows, length, 2) + 1,
         ),
         gen_image_mask=torch.tensor([[False, True, True], [False, True, True]]),
         gen_timestep_scatter_index=torch.zeros(batch, 1, dtype=torch.long),
@@ -174,7 +178,7 @@ def test_hi3_batch_replay_tiles_every_batched_condition_in_step_major_order() ->
     tiled = stage._tile_conditions(conditions, 2, sample_batch_size=2)
 
     assert torch.equal(tiled.fused.input_ids, torch.cat([conditions.fused.input_ids] * 2))
-    assert torch.equal(tiled.fused.rope_cache[0], torch.cat([conditions.fused.rope_cache[0]] * 2))
+    assert tiled.fused.rope_cache is conditions.fused.rope_cache
     assert torch.equal(tiled.cond_vae.latents, torch.cat([conditions.cond_vae.latents] * 2))
     assert torch.equal(tiled.cond_vit.embeds, torch.cat([conditions.cond_vit.embeds] * 2))
     assert tiled.cond_vit.spatial_shapes == conditions.cond_vit.spatial_shapes * 2
