@@ -59,17 +59,13 @@ is via review / test.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-from typing import ClassVar, Dict, List, Optional, Set, Tuple
+from typing import Any, ClassVar, Mapping, Optional, Tuple
 
 import torch
 
-from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
-from unirl.models.types.replay_result import ReplayResult
+from unirl.models.diffusion import DiffusionLatentSpec, DiffusionStep, VideoDiffusionRunner
 from unirl.sde.kernels import StepStrategy
-from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
-from unirl.types.segments.latent import LatentSegment, make_video_segment
-from unirl.utils.dtypes import parse_torch_dtype
+from unirl.types.sampling import DiffusionSamplingParams
 
 from .bundle import HunyuanVideo15Bundle
 from .conditions import HunyuanVideo15Conditions
@@ -317,7 +313,7 @@ class HunyuanVideo15DiffusionStep(DiffusionStep[HunyuanVideo15Bundle, HunyuanVid
         )
 
 
-class HunyuanVideo15DiffusionStage(DiffusionStage[HunyuanVideo15Conditions]):
+class HunyuanVideo15DiffusionStage(VideoDiffusionRunner[HunyuanVideo15Bundle, HunyuanVideo15Conditions]):
     """HunyuanVideo-1.5 rollout-level diffusion stage.
 
     Owns the SDE ``strategy`` (stateful strategies like ``DPM2Strategy``
@@ -379,12 +375,14 @@ class HunyuanVideo15DiffusionStage(DiffusionStage[HunyuanVideo15Conditions]):
         temporal_compression_ratio: Optional[int] = None,
         latent_channels: Optional[int] = None,
     ) -> None:
-        self.model = model
-        self.step = step
-        self.strategy = strategy
-        self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
-        self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
-        self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
+        super().__init__(
+            model=model,
+            step=step,
+            strategy=strategy,
+            autocast_precision=autocast_precision,
+            trajectory_precision=trajectory_precision,
+            logprob_precision=logprob_precision,
+        )
         self.vision_num_semantic_tokens = int(vision_num_semantic_tokens)
         self.vision_states_dim = int(vision_states_dim)
 
@@ -426,261 +424,39 @@ class HunyuanVideo15DiffusionStage(DiffusionStage[HunyuanVideo15Conditions]):
         latent_w = max(1, int(width) // self.spatial_compression_ratio)
         return latent_t, latent_h, latent_w
 
-    def diffuse(
+    def _latent_spec(
         self,
         conditions: HunyuanVideo15Conditions,
-        *,
-        schedule: torch.Tensor,
         params: DiffusionSamplingParams,
-        initial_latents: Optional[torch.Tensor] = None,
-    ) -> LatentSegment:
-        """Run full HunyuanVideo-1.5 T2V sampling. Returns a ``LatentSegment``
-        with 6D trajectory storage and ``modality=VIDEO``.
-
-        ``initial_latents`` (optional) — x_T resolved from the request
-        ``Sample``'s diffusion generation Part; see
-        :class:`SD3DiffusionStage.diffuse` for the contract.
-        """
-        from unirl.sde.noise import generate_latents
-
+    ) -> DiffusionLatentSpec:
         if conditions.text_mllm is None or conditions.text_mllm.embeds is None:
-            raise ValueError("HunyuanVideo15DiffusionStage.diffuse: conditions.text_mllm.embeds is None")
-        prompt_embeds = conditions.text_mllm.embeds
-        device = prompt_embeds.device
-        batch_size = int(prompt_embeds.shape[0])
-        T = int(params.num_inference_steps)
-        if int(schedule.shape[0]) != T + 1:
-            raise ValueError(
-                f"HunyuanVideo15DiffusionStage.diffuse: schedule length {schedule.shape[0]} != T+1={T + 1}"
-            )
-        schedule = schedule.to(device)
-        self.strategy.init_schedule(schedule)
-
+            raise ValueError("HunyuanVideo15DiffusionStage: conditions.text_mllm.embeds is None")
+        embeds = conditions.text_mllm.embeds
         latent_t, latent_h, latent_w = self._latent_shape(
             height=params.height, width=params.width, num_frames=params.num_frames
         )
-        expected_latent_shape = (self.latent_channels, latent_t, latent_h, latent_w)
-        if initial_latents is not None:
-            if int(initial_latents.shape[0]) != batch_size:
-                raise ValueError(
-                    f"HunyuanVideo15DiffusionStage.diffuse: initial_latents.shape[0]="
-                    f"{int(initial_latents.shape[0])} != batch_size={batch_size}."
-                )
-            if tuple(initial_latents.shape[1:]) != expected_latent_shape:
-                raise ValueError(
-                    f"HunyuanVideo15DiffusionStage.diffuse: initial_latents.shape[1:]="
-                    f"{tuple(initial_latents.shape[1:])} != expected {expected_latent_shape} "
-                    f"for num_frames={int(params.num_frames)}, "
-                    f"height={int(params.height)}, width={int(params.width)}."
-                )
-            latents = initial_latents.to(device=device, dtype=self.trajectory_dtype)
-        else:
-            latents = generate_latents(
-                batch_size=batch_size,
-                latent_shape=expected_latent_shape,
-                device=device,
-                dtype=self.trajectory_dtype,
-                init_same_noise=bool(params.init_same_noise),
-                samples_per_prompt=int(params.samples_per_prompt),
-                noise_group_ids=params.noise_group_ids,
-                base_seed=int(params.seed),
-            )
-
-        sde_set: Set[int] = set(int(i) for i in (params.sde_indices or []))
-        sde_sorted: List[int] = sorted(sde_set)
-
-        needed: Set[int] = set(compute_trajectory_positions(sde_set, T))
-        needed.add(T)
-
-        stored_pairs: List[Tuple[int, torch.Tensor]] = []
-        if 0 in needed:
-            stored_pairs.append((0, latents.detach().clone()))
-        sde_logp_list: List[torch.Tensor] = []
-
-        autocast_ctx = (
-            torch.autocast("cuda", self.autocast_dtype)
-            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
-            else nullcontext()
-        )
-        sigma_max = float(schedule[1].item()) if int(schedule.shape[0]) > 1 else 0.99
-
-        step_kwargs: Dict = {
-            "vision_num_semantic_tokens": self.vision_num_semantic_tokens,
-            "vision_states_dim": self.vision_states_dim,
-        }
-
-        for i in range(T):
-            sigma = schedule[i].to(device)
-            sigma_next = schedule[i + 1].to(device)
-            step_eta = float(params.eta) if i in sde_set else 0.0
-
-            with torch.no_grad(), autocast_ctx:
-                new_latents, log_prob, _ = self.step.step_with_logp(
-                    self.model,
-                    conditions,
-                    strategy=self.strategy,
-                    sample=latents,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    guidance_scale=float(params.guidance_scale),
-                    eta=step_eta,
-                    sigma_max=sigma_max,
-                    step_index=i,
-                    **step_kwargs,
-                )
-            latents = new_latents.to(dtype=self.trajectory_dtype)
-
-            if (i + 1) in needed:
-                stored_pairs.append((i + 1, latents.detach().clone()))
-
-            if log_prob is not None:
-                sde_logp_list.append(log_prob.to(dtype=self.logprob_dtype))
-
-        # 6D stacked storage: [B, K, C, T_lat, H_lat, W_lat].
-        positions_collected = [p for p, _ in stored_pairs]
-        latents_stacked = torch.stack([t for _, t in stored_pairs], dim=1)
-
-        sde_logp = torch.stack(sde_logp_list, dim=1) if sde_logp_list else None
-        sde_indices_tensor = torch.tensor(sde_sorted, dtype=torch.long, device=device) if sde_sorted else None
-
-        indices_tensor = torch.tensor(positions_collected, dtype=torch.long, device=device)
-
-        # Stamp modality=VIDEO via the factory so downstream
-        # ``segment.modality``-based routing doesn't mistake video latents
-        # for image latents.
-        return make_video_segment(
-            latents=latents_stacked,
-            sigmas=schedule,
-            indices=indices_tensor,
-            sde_logp=sde_logp,
-            sde_indices=sde_indices_tensor,
+        return DiffusionLatentSpec(
+            device=embeds.device,
+            batch_size=int(embeds.shape[0]),
+            shape=(self.latent_channels, latent_t, latent_h, latent_w),
         )
 
-    # ------------------------------------------------------------------
-    # Replay
-    # ------------------------------------------------------------------
-
-    def replay(
+    def _step_kwargs(
         self,
         conditions: HunyuanVideo15Conditions,
-        *,
-        segment: LatentSegment,
         params: DiffusionSamplingParams,
-        step_indices: Optional[List[int]] = None,
-    ) -> ReplayResult:
-        """Segment-based log-prob replay over the rollout's SDE transitions.
-
-        Caller is responsible for ``.train()`` mode + grad scope; this
-        method only manages the autocast scope.
-        """
-        if segment.sde_indices is None or segment.latents is None:
-            raise ValueError("HunyuanVideo15DiffusionStage.replay: segment.sde_indices / latents missing")
-        if segment.sigmas is None:
-            raise ValueError("HunyuanVideo15DiffusionStage.replay: segment.sigmas missing")
-        if segment.latents.ndim != 6:
-            raise ValueError(
-                f"HunyuanVideo15DiffusionStage.replay: expected latents "
-                f"[B, K, C, T_lat, H_lat, W_lat], got {tuple(segment.latents.shape)}"
-            )
-
-        sde_set = set(int(i) for i in segment.sde_indices.tolist())
-        target = (
-            [int(i) for i in step_indices]
-            if step_indices is not None
-            else [int(i) for i in segment.sde_indices.tolist()]
-        )
-        bad = [i for i in target if i not in sde_set]
-        if bad:
-            raise ValueError(
-                f"HunyuanVideo15DiffusionStage.replay: step_indices {bad} not in segment.sde_indices={sorted(sde_set)}"
-            )
-
-        device = segment.latents.device
-        sigmas = segment.sigmas.to(device)
-        sigma_max = float(sigmas[1].item()) if int(sigmas.shape[0]) > 1 else 0.99
-
-        autocast_ctx = (
-            torch.autocast("cuda", self.autocast_dtype)
-            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
-            else nullcontext()
-        )
-
-        step_kwargs: Dict = {
-            "vision_num_semantic_tokens": self.vision_num_semantic_tokens,
-            "vision_states_dim": self.vision_states_dim,
-        }
-
-        log_probs: List[torch.Tensor] = []
-        prev_sample_means: List[torch.Tensor] = []
-        with autocast_ctx:
-            for step_idx in target:
-                sigma = sigmas[step_idx].to(dtype=torch.float32)
-                sigma_next = sigmas[step_idx + 1].to(dtype=torch.float32)
-                sample = segment.latents_at(step_idx)
-                prev_sample = segment.latents_at(step_idx + 1)
-                _, log_prob, prev_mean = self.step.step_with_logp(
-                    self.model,
-                    conditions,
-                    strategy=self.strategy,
-                    sample=sample,
-                    prev_sample=prev_sample,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    guidance_scale=float(params.guidance_scale),
-                    eta=float(params.eta),
-                    sigma_max=sigma_max,
-                    step_index=step_idx,
-                    **step_kwargs,
-                )
-                if log_prob is None:
-                    raise RuntimeError(
-                        f"HunyuanVideo15DiffusionStage.replay: strategy returned "
-                        f"None log-prob at step_index={step_idx} (deterministic mode); "
-                        f"replay requires a stochastic SDE strategy."
-                    )
-                log_probs.append(log_prob)
-                if prev_mean is not None:
-                    prev_sample_means.append(prev_mean)
-
-        log_probs_t = torch.stack(log_probs, dim=1).to(dtype=self.logprob_dtype)
-        means_t = torch.stack(prev_sample_means, dim=1).to(dtype=self.trajectory_dtype) if prev_sample_means else None
-        return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
-
-    # ------------------------------------------------------------------
-    # Single-step noise prediction (forward-process algorithms: DiffusionNFT et al.)
-    # ------------------------------------------------------------------
-
-    def predict_noise_at_step(
-        self,
-        conditions: HunyuanVideo15Conditions,
         *,
         sample: torch.Tensor,
-        sigma: torch.Tensor,
-        params: DiffusionSamplingParams,
-    ) -> torch.Tensor:
-        """Single ``(xt, sigma)`` model forward — no scheduler iteration.
-
-        ``vision_num_semantic_tokens`` / ``vision_states_dim`` come from
-        the Stage construction (model-architecture constants), not from
-        ``params`` (per-request data).
-        """
-        return self.step.predict_noise(
-            self.model,
-            sample,
-            sigma,
-            conditions,
-            guidance_scale=float(params.guidance_scale),
-            vision_num_semantic_tokens=self.vision_num_semantic_tokens,
-            vision_states_dim=self.vision_states_dim,
-        )
-
-    # ------------------------------------------------------------------
-    # Trainable surface for FSDPPolicy
-    # ------------------------------------------------------------------
-
-    def trainable_module(self) -> "torch.nn.Module":
-        """Return the FSDP wrap target — the bundle's transformer."""
-        return self.model.transformer
+        step_index: int,
+        num_steps: int,
+        mode: str,
+        state: Any,
+    ) -> Mapping[str, Any]:
+        del conditions, params, sample, step_index, num_steps, mode, state
+        return {
+            "vision_num_semantic_tokens": self.vision_num_semantic_tokens,
+            "vision_states_dim": self.vision_states_dim,
+        }
 
 
 __all__ = [

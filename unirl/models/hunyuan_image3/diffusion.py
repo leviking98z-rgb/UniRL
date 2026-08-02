@@ -35,18 +35,14 @@ from __future__ import annotations
 
 import logging
 import sys
-from contextlib import nullcontext
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import torch
 
-from unirl.models.types.diffusion import DiffusionStage, DiffusionStep
-from unirl.models.types.replay_result import ReplayResult
+from unirl.models.diffusion import DiffusionLatentSpec, DiffusionRunner, DiffusionStep
 from unirl.sde.kernels import StepStrategy
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
-from unirl.types.segments.latent import LatentSegment
-from unirl.utils.dtypes import parse_torch_dtype
+from unirl.types.sampling import DiffusionSamplingParams
 
 from .bundle import HunyuanImage3Bundle
 from .conditions import HunyuanImage3DiffusionConditions
@@ -521,7 +517,7 @@ def _conditions_device_and_batch(
     return fused.input_ids.device, n // cfg
 
 
-class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionConditions]):
+class HunyuanImage3DiffusionStage(DiffusionRunner[HunyuanImage3Bundle, HunyuanImage3DiffusionConditions]):
     """HunyuanImage3 rollout-level diffusion stage.
 
     Owns the SDE ``strategy``, bundle, kernel, and precision policy. The
@@ -539,6 +535,8 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
     subset). Used by GRPO-style training.
     """
 
+    SIGMA_MAX_AS_FLOAT = True
+
     def __init__(
         self,
         *,
@@ -551,51 +549,23 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
         vae_scale_factor: int = 16,
         latent_channels: int = 32,
     ) -> None:
-        self.model = model
-        self.step = step
-        self.strategy = strategy
-        self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
-        self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
-        self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
+        super().__init__(
+            model=model,
+            step=step,
+            strategy=strategy,
+            autocast_precision=autocast_precision,
+            trajectory_precision=trajectory_precision,
+            logprob_precision=logprob_precision,
+        )
         self.vae_scale_factor = vae_scale_factor
         self.latent_channels = latent_channels
 
-    # ------------------------------------------------------------------
-    # Sampling
-    # ------------------------------------------------------------------
-
-    def diffuse(
+    def _latent_spec(
         self,
         conditions: HunyuanImage3DiffusionConditions,
-        *,
-        schedule: torch.Tensor,
         params: DiffusionSamplingParams,
-    ) -> LatentSegment:
-        """Run full HunyuanImage3 DiT sampling. Returns a ``LatentSegment``.
-
-        Shape contract for the returned segment (with ``B`` = number of
-        prompts, ``T`` = ``params.num_inference_steps``,
-        ``C = self.latent_channels``,
-        ``H = params.height // self.vae_scale_factor``,
-        ``W = params.width  // self.vae_scale_factor``,
-        ``K`` = number of stored trajectory positions including the clean
-        latent at position ``T``):
-
-            latents      : [B, K, C, H, W]
-            sde_logp     : [B, S]    where S = len(params.sde_indices)
-            sde_indices  : [S]       long
-            indices      : [K]       long (positions of the stored snapshots)
-            sigmas       : [T+1]     float (the schedule)
-        """
-        from unirl.sde.noise import generate_latents
-
+    ) -> DiffusionLatentSpec:
         device, batch_size = _conditions_device_and_batch(conditions, guidance_scale=float(params.guidance_scale))
-        T = int(params.num_inference_steps)
-        if int(schedule.shape[0]) != T + 1:
-            raise ValueError(f"HunyuanImage3DiffusionStage.diffuse: schedule length {schedule.shape[0]} != T+1={T + 1}")
-        schedule = schedule.to(device)
-        self.strategy.init_schedule(schedule)
-
         # HI3 snaps any requested H×W to the nearest preset at base_size² area
         # (image_base_size=1024 → ~1MP) — the text-embed stage's
         # build_gen_image_info does this, so the <img> placeholder span it
@@ -630,221 +600,61 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
         else:
             latent_h = int(params.height) // int(self.vae_scale_factor)
             latent_w = int(params.width) // int(self.vae_scale_factor)
-        per_sample_shape = (int(self.latent_channels), latent_h, latent_w)
-        # latents: [B, C, H, W]. Driver-authoritative x_T via the shared
-        # ``NoiseRecipe`` — the SAME ``for_batch(...).resolve(...)`` path the
-        # vLLM worker (RLHunyuanImage3Pipeline) takes, so trainside and rollout
-        # regenerate a BYTE-IDENTICAL x_T from the recipe (gids + seed) on
-        # CPU-fp32. The shape is AR-known only here, so it's filled via
-        # ``for_batch``. Falls back to engine-drawn noise when no recipe gids
-        # were shipped (e.g. DISABLE_DRIVER_XT).
-        latents = None
+        return DiffusionLatentSpec(
+            device=device,
+            batch_size=batch_size,
+            shape=(int(self.latent_channels), latent_h, latent_w),
+        )
+
+    def _prepare_initial_latents(
+        self,
+        spec: DiffusionLatentSpec,
+        params: DiffusionSamplingParams,
+        initial_latents: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if initial_latents is not None:
+            return super()._prepare_initial_latents(spec, params, initial_latents)
+
+        # HI3's latent shape resolves only after its AR image-info pass. Build
+        # the shared recipe here so train-side and rollout engines regenerate
+        # the same CPU-fp32 x_T before the final device/dtype conversion.
         if params.noise_group_ids:
-            latents = (
+            resolved = (
                 NoiseRecipe(
                     noise_group_ids=[str(g) for g in params.noise_group_ids],
                     base_seed=int(params.seed),
                 )
-                .for_batch(batch_size, latent_shape=per_sample_shape)
-                .resolve(device=device, dtype=self.trajectory_dtype)
+                .for_batch(spec.batch_size, latent_shape=spec.shape)
+                .resolve(device=spec.device, dtype=self.trajectory_dtype)
             )
-        if latents is None:
-            latents = generate_latents(
-                batch_size=batch_size,
-                latent_shape=per_sample_shape,
-                device=device,
-                dtype=self.trajectory_dtype,
-                init_same_noise=bool(params.init_same_noise),
-                samples_per_prompt=int(params.samples_per_prompt),
-                noise_group_ids=params.noise_group_ids,
-                base_seed=params.seed,
-            )
+            if resolved is not None:
+                return resolved
+        return super()._prepare_initial_latents(spec, params, None)
 
-        sde_set: Set[int] = set(int(i) for i in (params.sde_indices or []))
-        sde_sorted: List[int] = sorted(sde_set)
-
-        needed: Set[int] = set(compute_trajectory_positions(sde_set, T))
-        needed.add(T)
-
-        stored_pairs: List[Tuple[int, torch.Tensor]] = []
-        if 0 in needed:
-            stored_pairs.append((0, latents.detach().clone()))
-        sde_logp_list: List[torch.Tensor] = []
-
-        autocast_ctx = (
-            torch.autocast("cuda", self.autocast_dtype)
-            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
-            else nullcontext()
-        )
-        sigma_max = float(schedule[1].item()) if int(schedule.shape[0]) > 1 else 0.99
-
-        # Per-rollout KV-cache state. Step 0 fills it; steps 1..T-1
-        # consume + update. Replay() does NOT use this — each replay step
-        # starts from a stored intermediate latent so prior-step cache is
-        # meaningless.
-        state = HunyuanImage3DiffusionState()
-
-        for i in range(T):
-            sigma = schedule[i].to(device)
-            sigma_next = schedule[i + 1].to(device)
-            step_eta = float(params.eta) if i in sde_set else 0.0
-
-            with torch.no_grad(), autocast_ctx:
-                new_latents, log_prob, _ = self.step.step_with_logp(
-                    self.model,
-                    conditions,
-                    strategy=self.strategy,
-                    sample=latents,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    guidance_scale=float(params.guidance_scale),
-                    eta=step_eta,
-                    sigma_max=sigma_max,
-                    step_index=i,
-                    state=state,
-                )
-            latents = new_latents.to(dtype=self.trajectory_dtype)
-
-            if (i + 1) in needed:
-                stored_pairs.append((i + 1, latents.detach().clone()))
-
-            if log_prob is not None:
-                sde_logp_list.append(log_prob.to(dtype=self.logprob_dtype))
-
-        positions_collected = [p for p, _ in stored_pairs]
-        # latents_stacked: [B, K, C, H, W]
-        latents_stacked = torch.stack([t for _, t in stored_pairs], dim=1)
-
-        # sde_logp: [B, S]
-        sde_logp = torch.stack(sde_logp_list, dim=1) if sde_logp_list else None
-        # sde_indices_tensor: [S] long
-        sde_indices_tensor = torch.tensor(sde_sorted, dtype=torch.long, device=device) if sde_sorted else None
-
-        indices_tensor = torch.tensor(positions_collected, dtype=torch.long, device=device)
-
-        return LatentSegment(
-            latents=latents_stacked,
-            sigmas=schedule,
-            indices=indices_tensor,
-            sde_logp=sde_logp,
-            sde_indices=sde_indices_tensor,
-        )
-
-    # ------------------------------------------------------------------
-    # Replay
-    # ------------------------------------------------------------------
-
-    def replay(
+    def _sampling_state(
         self,
         conditions: HunyuanImage3DiffusionConditions,
-        *,
-        segment: LatentSegment,
         params: DiffusionSamplingParams,
-        step_indices: Optional[List[int]] = None,
-    ) -> ReplayResult:
-        """Segment-based log-prob replay over the rollout's SDE transitions.
+        *,
+        schedule: torch.Tensor,
+        spec: DiffusionLatentSpec,
+    ) -> HunyuanImage3DiffusionState:
+        del conditions, params, schedule, spec
+        return HunyuanImage3DiffusionState()
 
-        Mirrors ``SD3DiffusionStage.replay``: loop the per-step replay
-        primitive (``step.step_with_logp`` with ``prev_sample`` set) over
-        the segment's SDE indices (or the ``step_indices`` subset, which
-        must be a subset of ``segment.sde_indices``). Returns a
-        :class:`ReplayResult` with ``log_probs`` shape ``[B, len(target)]``
-        aligned with the corresponding slice of ``segment.sde_logp``
-        (cast to ``logprob_precision``) and ``prev_sample_means`` shape
-        ``[B, len(target), *latent_shape]`` carrying the SDE Gaussian
-        means μ_θ for KL-penalty consumption.
-        """
-        if segment.sde_indices is None or segment.latents is None:
-            raise ValueError("HunyuanImage3DiffusionStage.replay: segment.sde_indices / latents missing")
-        if segment.sigmas is None:
-            raise ValueError("HunyuanImage3DiffusionStage.replay: segment.sigmas missing")
-
-        sde_set = set(int(i) for i in segment.sde_indices.tolist())
-        target = (
-            [int(i) for i in step_indices]
-            if step_indices is not None
-            else [int(i) for i in segment.sde_indices.tolist()]
-        )
-        bad = [i for i in target if i not in sde_set]
-        if bad:
-            raise ValueError(
-                f"HunyuanImage3DiffusionStage.replay: step_indices {bad} not in segment.sde_indices={sorted(sde_set)}"
-            )
-
-        device = segment.latents.device
-        sigmas = segment.sigmas.to(device)
-        sigma_max = float(sigmas[1].item()) if int(sigmas.shape[0]) > 1 else 0.99
-
-        autocast_ctx = (
-            torch.autocast("cuda", self.autocast_dtype)
-            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
-            else nullcontext()
-        )
-        log_probs: List[torch.Tensor] = []
-        prev_sample_means: List[torch.Tensor] = []
-        with autocast_ctx:
-            for step_idx in target:
-                sigma = sigmas[step_idx].to(dtype=torch.float32)
-                sigma_next = sigmas[step_idx + 1].to(dtype=torch.float32)
-                # sample, prev_sample: [B, C, H, W]
-                sample = segment.latents_at(step_idx)
-                prev_sample = segment.latents_at(step_idx + 1)
-                _, log_prob, prev_mean = self.step.step_with_logp(
-                    self.model,
-                    conditions,
-                    strategy=self.strategy,
-                    sample=sample,
-                    prev_sample=prev_sample,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    guidance_scale=float(params.guidance_scale),
-                    eta=float(params.eta),
-                    sigma_max=sigma_max,
-                    step_index=step_idx,
-                )
-                if log_prob is None:
-                    raise RuntimeError(
-                        f"HunyuanImage3DiffusionStage.replay: strategy "
-                        f"returned None log-prob at step_index={step_idx} "
-                        f"(deterministic mode); replay requires a stochastic "
-                        f"SDE strategy."
-                    )
-                log_probs.append(log_prob)
-                if prev_mean is not None:
-                    prev_sample_means.append(prev_mean)
-
-        # log_probs: [B, len(target)] float, in logprob_precision
-        log_probs_t = torch.stack(log_probs, dim=1).to(dtype=self.logprob_dtype)
-        # prev_sample_means: [B, len(target), *latent_shape] in trajectory dtype.
-        # None if the strategy didn't produce them at any step.
-        means_t = torch.stack(prev_sample_means, dim=1).to(dtype=self.trajectory_dtype) if prev_sample_means else None
-        return ReplayResult(log_probs=log_probs_t, prev_sample_means=means_t)
-
-    # ------------------------------------------------------------------
-    # Single-step noise prediction (forward-process algorithms: DiffusionNFT et al.)
-    # ------------------------------------------------------------------
-
-    def predict_noise_at_step(
+    def _step_kwargs(
         self,
         conditions: HunyuanImage3DiffusionConditions,
+        params: DiffusionSamplingParams,
         *,
         sample: torch.Tensor,
-        sigma: torch.Tensor,
-        params: DiffusionSamplingParams,
-    ) -> torch.Tensor:
-        """Single ``(xt, sigma)`` model forward — no scheduler iteration.
-
-        Stateless mode (``state=None``, ``step_index=0``); HI3's stateful
-        cache is only meaningful inside an SDE trajectory, which DiffusionNFT-style
-        forward-process algorithms don't traverse.
-        """
-        return self.step.predict_noise(
-            self.model,
-            sample,
-            sigma,
-            conditions,
-            guidance_scale=float(params.guidance_scale),
-        )
+        step_index: int,
+        num_steps: int,
+        mode: str,
+        state: Any,
+    ) -> Mapping[str, Any]:
+        del conditions, params, sample, step_index, num_steps
+        return {"state": state} if mode == "sample" else {}
 
     # ------------------------------------------------------------------
     # Trainable surface for FSDPPolicy

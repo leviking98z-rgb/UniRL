@@ -14,6 +14,8 @@ torch/Ray/engine packages:
   rollout, reward, and train;
 * model bundles and pipelines declare package-local plugin ownership so recipes
   cannot silently compose different model families;
+* ordinary image/video diffusion stages reuse the shared denoising runner while
+  transition-kernel exceptions stay explicit and reviewable;
 * advantage estimators own reward normalization/value-target policy instead of
   growing methods on the ``Part`` wire type;
 * trainer variants select explicit loop programs instead of copying ``train``;
@@ -381,6 +383,77 @@ def check_model_plugin_contracts(errors: list[str], simple: dict[str, list[Class
     return len(expected)
 
 
+def check_diffusion_runners(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
+    expected = {
+        "DiffusionLatentSpec": {
+            "fields": ("device", "batch_size", "shape"),
+        },
+        "DiffusionRunner": {
+            "methods": (
+                "_latent_spec",
+                "_prepare_initial_latents",
+                "_sampling_state",
+                "_step_kwargs",
+                "_guidance_scale",
+                "_make_segment",
+                "_validate_replay_segment",
+                "_replay_batched",
+                "diffuse",
+                "replay",
+                "predict_noise_at_step",
+                "trainable_module",
+            ),
+        },
+        "VideoDiffusionRunner": {
+            "methods": ("_validate_replay_segment",),
+        },
+    }
+    for name, contract in expected.items():
+        module = (
+            "unirl.models.diffusion.contracts" if name == "DiffusionLatentSpec" else "unirl.models.diffusion.runner"
+        )
+        matches = [info for info in simple.get(name, ()) if info.module == module]
+        if len(matches) != 1:
+            path = module.replace(".", "/") + ".py"
+            errors.append(f"{path}: expected one {name} class, found {len(matches)}")
+            continue
+        _require_members(
+            errors,
+            matches[0],
+            kind="diffusion runner contract",
+            methods=contract.get("methods", ()),
+            fields=contract.get("fields", ()),
+            simple=simple,
+        )
+
+    exceptions = {
+        "unirl.models.bagel.diffusion.BagelDiffusionStage",
+        "unirl.models.ltx2.diffusion.LTX2DiffusionStage",
+    }
+    stages = [
+        info
+        for infos in simple.values()
+        for info in infos
+        if info.name.endswith("DiffusionStage")
+        and info.name != "DiffusionStage"
+        and "/models/" in info.path.as_posix()
+        and info.path.name == "diffusion.py"
+    ]
+    discovered_exceptions = {
+        info.qualified_name for info in stages if not _descends_from(info, "DiffusionRunner", simple)
+    }
+    unexpected = sorted(discovered_exceptions - exceptions)
+    missing = sorted(exceptions - discovered_exceptions)
+    if unexpected:
+        errors.append(
+            "ordinary diffusion stages must inherit DiffusionRunner; "
+            f"unreviewed transition-kernel exceptions: {unexpected}"
+        )
+    if missing:
+        errors.append(f"diffusion runner exception list is stale; remove migrated/deleted entries: {missing}")
+    return len(stages)
+
+
 def check_train_backends(errors: list[str], simple: dict[str, list[ClassInfo]]) -> int:
     required = (
         "weight_sync_dtype",
@@ -579,6 +652,7 @@ def main() -> int:
         "model bundles": check_model_bundles(errors, simple),
         "model pipelines": check_model_pipelines(errors, simple),
         "model plugin contracts": check_model_plugin_contracts(errors, simple),
+        "diffusion stages": check_diffusion_runners(errors, simple),
         "train backends": check_train_backends(errors, simple),
         "wire types": check_sample_contract(errors, simple),
         "advantage contracts": check_advantage_estimators(errors, simple),
