@@ -175,8 +175,8 @@ class UnifiedModelTrainer(BaseTrainer):
         self.eval_cfg_text_scale = float(eval_cfg_text_scale)
         self.eval_eta = float(eval_eta)
 
-        # W&B logging (logging_cfg, wandb_logger, optimizer-step counter) is owned
-        # by BaseTrainer + UniRLWandBLogger now — see super().__init__ above.
+        # Observability (configuration, observer, optimizer-step counter) is owned
+        # by BaseTrainer + Observer now — see super().__init__ above.
 
         # Intrusive debug dump: per rollout, write original prompt + AR output
         # text (= the think/recaption that conditions DiT) + decoded images +
@@ -565,7 +565,7 @@ class UnifiedModelTrainer(BaseTrainer):
 
         Returns ``(per_track_results, mean_reward)`` — ``mean_reward`` is the
         mean unnormalized image reward (for the log line). ``rollout_id`` keys
-        the wandb panels (see :meth:`UniRLWandBLogger.log_rollout_step`).
+        the observer panels (see :meth:`Observer.log_rollout_step`).
         """
         t0 = time.perf_counter()
         if self._single_engine:
@@ -646,7 +646,7 @@ class UnifiedModelTrainer(BaseTrainer):
             sample,
             training_progress=float(training_progress),
         )
-        self.wandb_logger.log_rollout_step(
+        self.observer.log_rollout_step(
             rollout_id,
             results,
             sample,
@@ -802,7 +802,7 @@ class UnifiedModelTrainer(BaseTrainer):
             self.eval_eta,
             "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()),
         )
-        self.wandb_logger.log_eval(step, metrics)
+        self.observer.log_eval(step, metrics)
         return metrics["reward"]
 
     def _eval_pass(

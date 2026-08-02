@@ -273,7 +273,7 @@ class AgenticTrainer(ARTrainer):
         }
         if extra_metrics:
             metrics.update(extra_metrics)
-        self.wandb_logger.log_rollout_step(
+        self.observer.log_rollout_step(
             rollout_id,
             result,
             log_sample,

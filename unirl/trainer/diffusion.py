@@ -461,7 +461,7 @@ class DiffusionTrainer(BaseTrainer):
         ``training_progress`` in ``[0, 1]`` drives clip-range / LR schedules
         inside the algorithm. The reference trainer is stateless — the
         outer training loop owns step counting; ``rollout_id`` only keys the
-        wandb panels (see :meth:`UniRLWandBLogger.log_rollout_step`).
+        observer panels (see :meth:`Observer.log_rollout_step`).
 
         ``sync_weights`` pushes the latest LoRA into the engine between
         ``wake_up`` and ``generate`` — one wake/sleep instead of two, with this
@@ -519,7 +519,7 @@ class DiffusionTrainer(BaseTrainer):
 
         self._drop_decoded(sample, rollout_id=rollout_id)
         result = self.stack.train_track(sample.parts[-1], training_progress=float(training_progress))
-        self.wandb_logger.log_rollout_step(rollout_id, result, sample, step_time_s=time.perf_counter() - t0)
+        self.observer.log_rollout_step(rollout_id, result, sample, step_time_s=time.perf_counter() - t0)
         return result, mean_reward
 
     def evaluate(
@@ -587,7 +587,7 @@ class DiffusionTrainer(BaseTrainer):
             self.eval_eta,
             "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()),
         )
-        self.wandb_logger.log_eval(step, metrics)
+        self.observer.log_eval(step, metrics)
         return metrics["reward"]
 
     def _eval_pass(

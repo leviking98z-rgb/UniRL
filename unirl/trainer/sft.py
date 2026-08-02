@@ -140,7 +140,7 @@ class SFTTrainer(BaseTrainer):
             batches,
             self.eval_batch_size,
         )
-        self.wandb_logger.log_eval(step + 1, {"loss": eval_loss})
+        self.observer.log_eval(step + 1, {"loss": eval_loss})
         return eval_loss
 
     def _pad_to_dp(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

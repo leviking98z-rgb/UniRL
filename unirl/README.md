@@ -22,9 +22,10 @@ As source, the package falls into four groups:
 - **Entrypoints** (`train_diffusion.py`, `train_ar.py`, `train_pe.py`,
   `train_unified_model.py`, plus the `train_agentic*.py` multi-turn variants)
   — each composes and validates a Hydra recipe, then hands off to its trainer.
-- **Orchestration** (`trainer/`) — the per-domain `<Domain>Trainer` owns GPU
-  placement, builds the rollout and train workers, and runs the
-  rollout→reward→advantage→train loop.
+- **Orchestration** (`trainer/`, `observability/`) — the per-domain
+  `<Domain>Trainer` owns GPU placement, builds the rollout and train workers,
+  and runs the rollout→reward→advantage→train loop through provider-neutral
+  lifecycle and telemetry contracts.
 - **Training loop** (`rollout/`, `reward/`, `algorithms/`, `train/`) — the four
   pluggable components of one rollout, plus what they share: `models/`
   (per-model bundles), `sde/` (step kernels / σ schedule), and `data/` (sources).
@@ -66,6 +67,7 @@ cross-layer imports there.
 |---|---|
 | `train_*.py` | Hydra entrypoints for diffusion, AR, prompt enhancement, unified models, and synchronous/partial/asynchronous agentic workflows |
 | `trainer/` | Orchestration (`base.py`, explicit loop programs, and domain trainers): owns placement, worker wiring, resume/cadence/teardown, and the rollout→reward→advantage→train sequence |
+| `observability/` | Provider-neutral `Observer` contract, lifecycle factory, checkpointed run state, and phase instrumentation; provider adapters stay outside trainers |
 | `config/` | `require` + `validate_*` cross-component validators over the flat Hydra recipe (instantiation itself is `_target_`-driven, not in this module) |
 | `distributed/` | Ray worker base (`Remote`) + placement/dispatch (`group/`), tensor transport (`tensor/`), and weight sync (`weight_sync/`) |
 | `rollout/` | Rollout engine contracts and implementations (`engine/`: trainside, sglang, sglang_diffusion, vllm_omni, composed) |
@@ -118,6 +120,7 @@ before applying the same reward, advantage, and train-stack contracts.
 ## Deeper Module Docs
 
 - `trainer/README.md`: the orchestration hub — how a `<Domain>Trainer` places workers and drives the loop.
+- `observability/README.md`: the provider-neutral metrics/media/progress contract and backward-compatible logging configuration.
 - `types/README.md`: the `Sample` / `Part` contract and migration from the retired request/response API.
 - `config/README.md`: bounded-composition recipes — `require`/precision validators, `_target_` instantiation, cross-component contracts.
 - `rollout/README.md`: rollout modes, engines, and the `Sample` / `Part` generation flow.

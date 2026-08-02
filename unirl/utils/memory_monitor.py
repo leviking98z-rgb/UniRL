@@ -1,6 +1,6 @@
 """Driver-side GPU memory monitoring — verl-parity observability for UniRL.
 
-Reuses the ``install_phase_timing`` pattern (wandb_logger.py): monkey-patch the
+Reuses the phase-instrumentation pattern: monkey-patch the
 step collaborators' methods once at startup so every trainer gets memory
 probes at the train/rollout hand-off boundaries with zero per-trainer edits.
 Where the timing wrapper adds a stopwatch, this one brackets each phase with a
@@ -9,7 +9,7 @@ on a CUDA-less Ray driver, so readings must come from the workers.
 
 Outputs (granularity mirrors verl):
 
-* wandb, once per step via :meth:`MemoryMonitor.step_summary` (consumed by
+* observer metrics, once per step via :meth:`MemoryMonitor.step_summary` (consumed by
   ``log_rollout_step``): ``perf/max_memory_allocated_gb`` /
   ``perf/max_memory_reserved_gb`` / ``perf/cpu_memory_used_gb`` (verl's trio)
   plus ``perf/device_memory_used_gb`` — the device-level view that still sees
@@ -43,7 +43,7 @@ from unirl.utils.memory_utils import _cpu_rss_gb, _truthy
 logger = logging.getLogger(__name__)
 
 #: Memory-probe phase specs: ``(trainer attr path, method, phase name)``.
-#: Deliberately separate from wandb_logger's ``_STEP_PHASE_SPECS`` (timing) so
+#: Deliberately separate from timing's ``_STEP_PHASE_SPECS`` so
 #: the two systems evolve independently; dotted paths reach nested handles
 #: (PE's per-track stacks). Missing/uncallable attrs are skipped, so one table
 #: covers all five trainers.
@@ -62,7 +62,7 @@ _MEM_PHASE_SPECS: Tuple[Tuple[str, str, str], ...] = (
     ("ar.stack", "train_track", "ar_train"),  # pe
 )
 
-#: worker-probe key → wandb key (fold = running max across probes and ranks)
+#: worker-probe key → observer metric key (fold = running max across probes and ranks)
 _FOLD_KEYS = {
     "max_allocated_gb": "max_memory_allocated_gb",
     "max_reserved_gb": "max_memory_reserved_gb",
@@ -96,7 +96,7 @@ def _parse_step_range(spec: Optional[str]) -> Optional[Tuple[int, int]]:
 
 
 class MemoryMonitor:
-    """Orchestrates worker memory probes; aggregates per step for wandb."""
+    """Orchestrates worker memory probes; aggregates metrics per observer step."""
 
     def __init__(
         self,
@@ -185,9 +185,9 @@ class MemoryMonitor:
             setattr(handle, method, self._wrap(handle, fn, phase))
 
     def install(self, trainer: Any) -> None:
-        """Register with the live logger now; defer collaborator wrapping to step 1.
+        """Register with the live observer now; defer collaborator wrapping to step 1.
 
-        Called from ``BaseTrainer._init_wandb``. Wrapping is deferred until after
+        Called from ``BaseTrainer._init_observability``. Wrapping is deferred until after
         the first ``train_step`` so it lands OUTSIDE ``install_phase_timing``'s
         wrappers (which install lazily on step 1) — the memory probes then stay
         out of ``perf/<phase>_time_s`` (step 1 itself is unmonitored).
@@ -199,7 +199,7 @@ class MemoryMonitor:
             if handle is not None and callable(getattr(handle, "get_memory_stats", None)):
                 self._fallback = handle
                 break
-        trainer.wandb_logger.memory_monitor = self
+        trainer.observer.bind_memory_monitor(self)
         self._installed = True
 
         inner = getattr(trainer, "train_step", None)
@@ -221,7 +221,7 @@ class MemoryMonitor:
     # ── per-step summary (consumed by log_rollout_step) ──────────────────
 
     def step_summary(self, step: Optional[int] = None) -> Dict[str, float]:
-        """Fold the step's probes into verl-parity wandb keys; re-arm for the next step."""
+        """Fold the step's probes into verl-parity metric keys; re-arm for the next step."""
         if self._fallback is not None:
             dump_tag = None
             if (

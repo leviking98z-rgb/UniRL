@@ -391,7 +391,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
 
     def _log_tail_metrics(self, rollout_step: int) -> None:
         """Emit tail counters after abort/policy, including the final step."""
-        self.wandb_logger.log_rollout(
+        self.observer.log_rollout(
             rollout_step,
             {
                 "async/carried_tail_trajectories": self._carried_tail_trajectories,

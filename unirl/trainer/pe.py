@@ -34,6 +34,7 @@ from omegaconf import DictConfig
 from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.distributed.group.placement import placement, remote
 from unirl.models.pe.pipeline import PEPipeline
+from unirl.observability import observer_state_dict
 from unirl.reward.ops import propagate_rewards, score_frontier
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict, prepare_input_sample
@@ -308,7 +309,7 @@ class PETrainer(BaseTrainer):
         ``sync_weights`` pushes each track's freshly-trained adapter into the
         engine between ``wake_up`` and ``generate`` — no-op trainside (the
         rollout shares the live FSDP modules, so the bridges are ``None``).
-        ``rollout_id`` only keys the wandb panels (see :meth:`UniRLWandBLogger.log_rollout_step`).
+        ``rollout_id`` only keys the observer panels (see :meth:`Observer.log_rollout_step`).
         """
         t0 = time.perf_counter()
         self.rollout.wake_up()
@@ -381,7 +382,7 @@ class PETrainer(BaseTrainer):
             )
             for name in self._train_tracks
         }
-        self.wandb_logger.log_rollout_step(rollout_id, results, sample, step_time_s=time.perf_counter() - t0)
+        self.observer.log_rollout_step(rollout_id, results, sample, step_time_s=time.perf_counter() - t0)
         return results, mean_reward
 
     def evaluate(self, step: int) -> float:
@@ -434,7 +435,7 @@ class PETrainer(BaseTrainer):
             self.eval_eta,
             "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()),
         )
-        self.wandb_logger.log_eval(step, metrics)
+        self.observer.log_eval(step, metrics)
         return metrics["reward"]
 
     def _eval_pass(
@@ -506,7 +507,7 @@ class PETrainer(BaseTrainer):
         PE has no single ``self.backend`` (it owns ``self.diffusion.backend`` +
         ``self.ar.backend``), so this overrides the BaseTrainer single-backend
         version: each side writes ``<save_dir>/checkpoint-<step>/<side>/`` and the
-        driver-owned ``trainer_state.json`` (wandb run id + step axis) sits beside
+        driver-owned ``trainer_state.json`` (observer run id + step axis) sits beside
         them, mirroring the base method's semantics.
         """
         if save_interval <= 0:
@@ -522,7 +523,7 @@ class PETrainer(BaseTrainer):
         trainer_state_path = os.path.join(path, "trainer_state.json")
         trainer_state_tmp = f"{trainer_state_path}.tmp"
         with open(trainer_state_tmp, "w") as f:
-            json.dump({"wandb_run_id": self.wandb_logger.run_id, "optimizer_step": self.wandb_logger.optimizer_step}, f)
+            json.dump(observer_state_dict(self.observer), f)
         os.replace(trainer_state_tmp, trainer_state_path)
         if step >= num_rollouts:
             self._wait_for_checkpoints()
@@ -532,8 +533,8 @@ class PETrainer(BaseTrainer):
 
         Returns 0 for a fresh run (``load_dir`` empty). Each trained side loads
         from its subdir; both advance in lockstep so either side's returned step
-        is the resume point. Restores the driver-side ``_resume_state`` (wandb run
-        id / step axis) so a resume appends to the same wandb run.
+        is the resume point. Restores the driver-side ``_resume_state`` (observer run
+        id / step axis) so a resume appends to the same observer run.
         """
         if not load_dir:
             return 0

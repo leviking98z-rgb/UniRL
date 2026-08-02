@@ -1,7 +1,7 @@
-"""MediaPreview — per-rollout wandb-agnostic media payload.
+"""MediaPreview — per-rollout provider-agnostic media payload.
 
 Carries PIL images and raw 4D video tensors keyed to per-sample prompts /
-rewards for wandb logging. Lives in its own module so the type survives
+rewards for observer adapters. Lives in its own module so the type survives
 independently of the legacy ``RolloutSamples`` container (which used to
 own it). Consumed via ``Part.media_preview``.
 """
@@ -22,16 +22,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class MediaPreview(Batch):
-    """Per-rollout wandb media preview payload that stays wandb-agnostic.
+    """Per-rollout media preview payload that stays provider-agnostic.
 
     ``images`` carries PIL images (one per sample; image models or
     middle-frame extraction for video models that want still previews).
     ``videos`` carries raw 4D ``(C, T, H, W)`` CPU tensors with values in
-    ``[0, 1]`` — NOT pre-built ``wandb.Video`` objects. The wandb-side
-    encoding (mp4 / fps / caption) is owned by
-    :func:`unirl.utils.wandb_logger.UniRLWandBLogger.log_generated_media`
-    so this dataclass + the ``utils/media.py`` helpers carry zero wandb
-    dependency.
+    ``[0, 1]`` — not provider-specific media objects. Encoding (mp4 / fps /
+    caption) belongs to the selected observer adapter, so this dataclass and
+    the ``utils/media.py`` helpers carry zero provider dependency.
 
     Declaring the four parallel lists as ``concat_field`` lets
     ``Batch.concat`` auto-merge per-shard previews (lists extended) and
@@ -141,7 +139,7 @@ def build_media_preview_for_part(
     prompts: Optional[List[str]] = None,
     input_image: Optional[Images] = None,
 ) -> Optional[MediaPreview]:
-    """Build a wandb-bound :class:`MediaPreview` from one gen Part's decoded media.
+    """Build an observer-bound :class:`MediaPreview` from one gen Part's decoded media.
 
     ``prompts`` is a per-sample caption list aligned 1:1 with this Part's samples
     (the original prompt texts); ``None`` yields empty captions. ``input_image``
@@ -153,13 +151,13 @@ def build_media_preview_for_part(
     - **Image path** (``isinstance(part.primitives["image"], Images)``): unbinds
       ``Images.pixels`` along batch dim into per-sample 3D ``[C, H, W]``
       tensors and converts each to PIL via ``tensor_frame_to_pil`` (the
-      wandb boundary). Slices to the first 3 channels first — drops
-      alpha / model-specific 4th channel so wandb gets RGB.
+      observer boundary). Slices to the first 3 channels first — drops
+      alpha / model-specific 4th channel so adapters get RGB.
     - **Video path** (``isinstance(part.primitives["video"], Videos)``): reads
       per-sample 4D ``[C, T, H, W]`` CPU ``float32`` tensors via
       ``Videos.to_list()`` + ``permute(1, 0, 2, 3)``; keeps them raw,
-      NOT pre-built ``wandb.Video`` (encoding is owned by
-      ``UniRLWandBLogger.log_generated_media``).
+      not pre-built provider media objects (encoding is owned by the observer
+      adapter's ``log_generated_media`` implementation).
 
     Returns ``None`` when the Part's primitive map contains neither ``Images``
     nor ``Videos`` (e.g. a text Part) or when nothing is selected.

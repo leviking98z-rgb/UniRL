@@ -142,7 +142,7 @@ class AsyncDiffusionTrainer(DiffusionTrainer):
         part = estimate_part_advantages(part, self.advantage_estimator)
         sample = sample.replace_frontier(part)
         result = self.stack.train_track(sample.parts[-1], training_progress=float(training_progress))
-        self.wandb_logger.log_rollout_step(rollout_id, result, sample, step_time_s=time.perf_counter() - t0)
+        self.observer.log_rollout_step(rollout_id, result, sample, step_time_s=time.perf_counter() - t0)
         # train_step is bypassed, so BaseTrainer's per-step reset hook never fires;
         # reclaim transport buffers here (no-op for colocate_store/gpu).
         self._reset_transport_buffers()

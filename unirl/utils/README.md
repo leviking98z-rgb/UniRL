@@ -23,9 +23,9 @@ the GPUs), orchestration on the CUDA-less Ray driver.
 **Opt-in (off by default), observation-only** (no cache clears, no syncs) — each
 wrapped phase spends two blocking BROADCAST probes, so you turn it on when you
 want it: `+logging.memory.enabled=true` (or `UNIRL_MEM_MONITOR=1`, or just
-`UNIRL_MEMSNAP=1` which auto-enables it). Once on, every step it logs four peak
-metrics to wandb on the `rollout/step` axis, **max-across-ranks** (OOM dies on
-the worst rank):
+`UNIRL_MEMSNAP=1` which auto-enables it). Once on, every step it emits four peak
+metrics through the configured observer on the `rollout/step` axis,
+**max-across-ranks** (OOM dies on the worst rank):
 
 | Metric | Meaning |
 |---|---|
@@ -107,4 +107,4 @@ byte-identical to an unpatched run.
   (`reserved − allocated` large) or the colocated engine (`device_used ≫ reserved`).
 - `cpu_memory_used` climbing = host-side leak (data loading/caching, not the model).
 - One rank ≫ the rest (Level-1 `min`/`max` spread) = imbalance; investigate it.
-- **Check the y-axis range first** — wandb auto-zooms a flat 40 MB wobble into a mountain.
+- **Check the y-axis range first** — dashboards may auto-zoom a flat 40 MB wobble into a mountain.

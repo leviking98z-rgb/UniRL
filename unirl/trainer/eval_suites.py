@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 class EvalRewardSuite:
     """One extra eval reward: a sibling reward remote + (optionally) its own eval set."""
 
-    name: str  # wandb key: eval/<name>
+    name: str  # observer metric key: eval/<name>
     reward: Any  # reward remote, placed next to the training reward
     data_source: Optional[Any] = None  # None → scores the default eval pass
     num_prompts: Optional[int] = None  # own-pass size; None → eval_num_prompts
