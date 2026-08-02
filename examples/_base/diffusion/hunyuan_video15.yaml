@@ -1,0 +1,119 @@
+# @package _global_
+# Shared HunyuanVideo 1.5 fields; public recipes add experiment-specific overrides.
+adv_use_global_std: true
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-grpo-t2v}
+  entity: ${oc.env:WANDB_ENTITY,null}
+bundle:
+  _target_: unirl.models.hunyuan_video15.bundle.HunyuanVideo15Bundle.from_config
+  config:
+    _target_: unirl.models.hunyuan_video15.config.HunyuanVideo15PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v}
+    model_precision: bf16
+    shift: 5.0
+pipeline:
+  _target_: unirl.models.hunyuan_video15.pipeline.HunyuanVideo15Pipeline
+  shift: 5.0
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+  strategy:
+    _target_: unirl.sde.kernels.FlowSDEStrategy
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names:
+    - "HunyuanVideo15TransformerBlock"
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 1.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 1.0e-4
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 64
+    alpha: 64
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - attn.to_q
+      - attn.to_k
+      - attn.to_v
+      - attn.to_out.0
+      - attn.add_q_proj
+      - attn.add_k_proj
+      - attn.add_v_proj
+      - attn.to_add_out
+      - ff.net.0.proj
+      - ff.net.2
+      - ff_context.net.0.proj
+      - ff_context.net.2
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.video_pickscore.VideoPickScoreScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.video_pickscore.VideoPickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+      model_id: yuvalkirstain/PickScore_v1
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.hunyuan_video15.conditions.HunyuanVideo15Conditions
+  params: ${sampling}
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 2
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+      seed: ${sampling.seed}
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 16
+  guidance_scale: 0.0
+  height: 480
+  width: 480
+  num_frames: 5
+  eta: 0.25
+  seed: 42
+  init_same_noise: false
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    timestep_fraction:
+      - 0.0
+      - 0.6
+    num_sde_steps: 8

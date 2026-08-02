@@ -1,0 +1,90 @@
+# @package _global_
+# Shared Qwen3 text RL fields; public recipes add experiment-specific overrides.
+weight_sync_interval: 1
+eval_interval: 10
+adv_normalization_scope: group
+logging:
+  entity: ${oc.env:WANDB_ENTITY,null}
+bundle:
+  config:
+    _target_: unirl.models.qwen3.config.Qwen3PipelineConfig
+    use_gradient_checkpointing: true
+pipeline:
+  _target_: unirl.models.qwen3.pipeline.Qwen3Pipeline.from_bundle
+  enable_thinking: true
+  autocast_precision: bf16
+  logprob_precision: fp32
+backend:
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 1.0e-6
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.01
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+rollout:
+  _target_: unirl.rollout.engine.sglang.engine.SGLangRolloutEngine
+  config:
+    _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
+    backend: native
+    temperature: 1.0
+    top_p: 1.0
+    concurrency: 16
+    samples_pre_expanded: true
+    chat_template_kwargs:
+      enable_thinking: true
+    engine_kwargs:
+      skip_server_warmup: true
+      attention_backend: triton
+      disable_cuda_graph: false
+      cuda_graph_max_bs: 16
+      enable_lora: false
+reward:
+  _target_: unirl.reward.service.RewardService
+  truncated_reward: keep
+  backend:
+    _target_: unirl.reward.local.mathverify.MathVerifyRewardScorer
+    base_device: cpu
+    config:
+      _target_: unirl.reward.local.mathverify.MathVerifySpec
+algorithm:
+  stage_attr: ar
+  sampling_temperature: 1.0
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.qwen3.conditions.Qwen3ARConditions
+sync:
+  lora_merged: false
+  flush_cache: true
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 4
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+      seed: 42
+sampling:
+  _target_: unirl.types.sampling.ARSamplingParams
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 0

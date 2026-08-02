@@ -1,0 +1,82 @@
+# @package _global_
+# Shared Qwen-VL fields; public recipes add experiment-specific overrides.
+num_devices: 32
+batch_size: 32
+weight_sync_interval: 1
+adv_normalization_scope: global
+logging:
+  report_to_wandb: true
+  project_name: unirl-flowgrpo-newstac
+bundle:
+  _target_: unirl.models.qwen_vl.bundle.QwenVLBundle.from_config
+  config:
+    _target_: unirl.models.qwen_vl.config.QwenVLPipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,Qwen/Qwen2.5-VL-7B-Instruct}
+    model_precision: bf16
+    attn_implementation: flash_attention_2
+    freeze_vision_tower: true
+    use_gradient_checkpointing: true
+    max_prompt_length: 2048
+pipeline:
+  _target_: unirl.models.qwen_vl.pipeline.QwenVLPipeline.from_bundle
+  max_prompt_length: 2048
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names:
+    - "Qwen2_5_VLDecoderLayer"
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    forward_prefetch: true
+    activation_checkpointing: false
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.mc_exact_match.MCExactMatchRewardScorer
+    base_device: cpu
+    config:
+      _target_: unirl.reward.local.mc_exact_match.MCExactMatchSpec
+algorithm:
+  _target_: unirl.algorithms.grpo.GRPO
+  stage_attr: ar
+  clip_range: 1.0e-2
+  clip_schedule: constant
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.qwen_vl.conditions.QwenVLARConditions
+  sampling_temperature: 0.7
+stack:
+  _target_: unirl.train.stack.TrainStack
+  max_grad_norm: 1.0
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: 32
+sampling:
+  _target_: unirl.types.sampling.ARSamplingParams
+  samples_per_prompt: 16
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 1024
+  max_new_tokens: 512

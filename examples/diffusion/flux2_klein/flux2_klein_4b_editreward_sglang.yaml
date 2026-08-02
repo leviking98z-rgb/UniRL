@@ -38,9 +38,10 @@
 #                    export DATA_PATH=... EVAL_DATA_PATH=...
 #                    bash examples/run_experiment_single_node.sh diffusion/flux2_klein/flux2_klein_4b_editreward_sglang
 
-num_devices: 8
+defaults:
+  - /_base/diffusion/flux2_klein
+  - _self_
 batch_size: 64                # prompts_per_rollout (64 x 16 samples = 1024 global)
-num_rollouts: 10000
 weight_sync_interval: 1       # LoRA sync cadence: every rollout push adapter into the engine
 
 logging:
@@ -81,57 +82,16 @@ strategy:
   _target_: unirl.sde.kernels.DanceSDEStrategy
 
 bundle:
-  _target_: unirl.models.flux2_klein.bundle.Flux2KleinBundle.from_config
   config: ${model_config}
 
 pipeline:
-  _target_: unirl.models.flux2_klein.pipeline.Flux2KleinPipeline
-  shift: 1.0
-  autocast_precision: bf16
-  trajectory_precision: fp16
-  logprob_precision: fp32
-  max_sequence_length: 512
-  qwen3_extraction_layers: [9, 18, 27]
   strategy: ${strategy}
 
 backend:
-  _target_: unirl.train.backend.fsdp.FSDPBackend
-  block_class_names: ["Flux2TransformerBlock", "Flux2SingleTransformerBlock"]
-  trainable_attr: transformer
   fsdp_cfg:
-    _target_: unirl.train.configs.FSDPConfig
-    # fp32 → bf16 forced by the synced LoRA wire dtype; master_dtype restores
-    # the proven recipe's fp32 optimizer precision.
     param_dtype: bf16
     master_dtype: fp32
-    cpu_offload: false
-    mixed_precision: true
-    fsdp_mode: full
-    reshard_after_forward: true
-    # Memory, not math: 8 colocated SGLang engines + ti2i source tokens on the
-    # noise sequence during replay.
     activation_checkpointing: true
-    use_torch_compile: false
-  optimizer_cfg:
-    _target_: unirl.train.backend.base.OptimizerConfig
-    learning_rate: 5.0e-5
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
-    weight_decay: 0.0
-  scheduler_cfg:
-    _target_: unirl.train.backend.base.LrSchedulerConfig
-    type: constant
-    warmup_steps: 0
-    total_steps: 10000
-  lora_cfg:
-    _target_: unirl.train.configs.LoraConfig
-    rank: 16
-    alpha: 32
-    dropout: 0.0
-    bias: none
-    task_type: FEATURE_EXTRACTION
-    target_modules: *lora_targets
 
 rollout:
   _target_: unirl.rollout.engine.sglang_diffusion.engine.SGLangDiffusionRolloutEngine
@@ -163,7 +123,6 @@ sync:
 # Remote EditReward service. The 2-turn history (source + generated) is built by
 # RemoteRewardBackend automatically when the request Sample carries an image.
 reward:
-  _target_: unirl.reward.service.RewardService
   backend:
     _target_: unirl.reward.remote.RemoteRewardBackend
     base_device: cpu
@@ -173,54 +132,16 @@ reward:
       required_rewards: [editreward]
       reward_weights:
         editreward: 1.0
-      batch_size: 8
       timeout: 300.0
       sub_metric_reduce: mean
       aggregation_method: weighted_sum
 
-algorithm:
-  _target_: unirl.algorithms.flowgrpo.FlowGRPO
-  stage_attr: diffusion
-  clip_range: 5.0e-3
-  clip_schedule: constant
-  old_logp_source: replay
-  conditions_cls:
-    _target_: hydra.utils.get_class
-    path: unirl.models.flux2_klein.conditions.Flux2KleinConditions
-  params: ${sampling}
-
-stack:
-  _target_: unirl.train.stack.TrainStack
-  micro_batch_size: 1
-  max_grad_norm: 1.0
-  num_updates_per_batch: 2
-
 data_source:
-  _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
       # REQUIRED. datasets/image_edit/*.jsonl ships PLACEHOLDER uris that do not
       # resolve; point these at a real, pod-local edit dataset.
       data_path: ${oc.env:DATA_PATH,???}
       eval_data_path: ${oc.env:EVAL_DATA_PATH,???}
-      seed: 42
-    algorithm:
-      prompts_per_rollout: ${batch_size}
-
 sampling:
-  _target_: unirl.types.sampling.DiffusionSamplingParams
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
-  eta: 0.7
-  samples_per_prompt: 16
-  seed: 42
-  # FORCED false: the engine's init_same_noise=true path mis-sizes FLUX.2 latent
-  # channels. GRPO does not require shared init noise (variance reduction only).
   init_same_noise: false
-  scheduler:
-    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
-    num_timesteps: ${..num_inference_steps}
-    num_sde_steps: 3
-    timestep_fraction: [0, 0.5]

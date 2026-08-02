@@ -1,0 +1,40 @@
+# @package _global_
+# Shared SFT training fields; public recipes add experiment-specific overrides.
+num_devices: 8
+eval_interval: 20
+eval_num_samples: -1
+save_interval: 0
+save_mode: auto
+logging:
+  report_to_wandb: false
+  project_name: unirl-sft
+  entity:
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    total_steps: ${num_steps}
+algorithm:
+  conditions_cls:
+    _target_: hydra.utils.get_class
+stack:
+  _target_: unirl.train.stack.TrainStack
+  max_grad_norm: 1.0
+data_source:
+  _target_: unirl.data.sft.SupervisedDataSource
+  manifest_path: ${oc.env:SFT_DATA}
+  eval_manifest_path: ${oc.env:SFT_EVAL_DATA,${oc.env:SFT_DATA}}
+  seed: 42
