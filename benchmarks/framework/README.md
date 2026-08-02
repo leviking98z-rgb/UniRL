@@ -3,6 +3,7 @@
 This directory turns UniRL's common trainer telemetry into a repeatable
 candidate gate:
 
+0. Find out what is even worth optimizing (`hotspots.py`, below).
 1. Run a baseline and candidate with the same workload. Set
    `UNIRL_EXPERIMENT_OUTPUT=/path/to/experiment.jsonl` (or
    `logging.experiment_output=...`) to retain step-level metrics without WandB.
@@ -48,6 +49,34 @@ only after the node lifecycle has been handled.
 
 The checked-in `.yaml` policy and matrix use JSON syntax (a YAML subset), so
 these control-plane tools need only the Python standard library.
+
+## Picking a target before spending cluster time
+
+```bash
+python -m benchmarks.framework.hotspots experiment.jsonl
+```
+
+Ranks every duration metric by share of step time, marks anything whose share is
+under 5% as *not worth a run* (removing it outright could not clear the effect
+gate), and reports structural findings a per-phase table hides. On the HI3
+learning workload it prints:
+
+```text
+| perf/train_time_s               | 107.10 | 34.6% | yes                |
+| perf/image_generate_time_s      | 101.97 | 32.9% | yes                |
+| perf/ar_generate_time_s         |  85.74 | 27.7% | yes                |
+| perf/reward_time_s              |   3.04 |  1.0% | no (below 5% gate) |
+
+structural findings:
+  - serial_disjoint_devices: ar_generate + image_generate run serially (187.7s)
+    but could not fall below 102.0s; up to 85.7s = 27.7% of step is recoverable
+```
+
+The AR engine is pinned to GPUs 0-3 and the DiT engine to 4-7, so running them
+serially idles half the cluster for the whole rollout — a larger number than
+anything left inside the train phase, and invisible in a flat metric dump. The
+same tool also rules candidates out: reward is 1.0% of the step, so no reward
+optimization can produce a measurable result here.
 
 ## Deciding whether a speedup is real
 
