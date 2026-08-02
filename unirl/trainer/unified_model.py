@@ -57,6 +57,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -193,6 +194,7 @@ class UnifiedModelTrainer(BaseTrainer):
         dump_dir: Optional[str] = None,
         logging_cfg: Optional[DictConfig] = None,
         enable_fsdp_offload: bool = True,
+        rollout_pipeline_chunks: int = 1,
         eval_interval: int = 0,
         eval_num_prompts: int = 32,
         eval_cfg_text_scale: float = 4.0,
@@ -205,6 +207,15 @@ class UnifiedModelTrainer(BaseTrainer):
         # optimizer) to CPU during rollout so the awake engines fit, onload
         # before the train backward. HI3's ~150GB base needs this → default True.
         self._enable_fsdp_offload = bool(enable_fsdp_offload)
+        # Stage-pipelined rollout: split the prompt batch into this many chunks so
+        # chunk i+1's AR generation overlaps chunk i's DiT generation on the other
+        # engine's GPUs. 1 (default) keeps the serial path byte-identical. See
+        # :meth:`_run_rollout_pipelined` for why this is opt-in.
+        self._rollout_pipeline_chunks = int(rollout_pipeline_chunks)
+        if self._rollout_pipeline_chunks < 1:
+            raise ValueError(
+                f"UnifiedModelTrainer.rollout_pipeline_chunks must be >= 1; got {rollout_pipeline_chunks}."
+            )
         self._detailed_timing = os.environ.get("UNIRL_DETAILED_TIMING", "").strip().lower() in {
             "1",
             "true",
@@ -476,7 +487,7 @@ class UnifiedModelTrainer(BaseTrainer):
         prompts = list(texts.texts)
         n = len(prompts)
         if self.dp <= 1 or n <= 1:
-            return self._run_rollout_one(self.ar_rollouts[0], self.dit_rollouts[0], req)
+            return self._run_rollout_pipelined(self.ar_rollouts[0], self.dit_rollouts[0], req)
 
         # Contiguous near-equal prompt bounds across the dp replicas.
         with self._phase("rollout_assemble"):
@@ -498,7 +509,7 @@ class UnifiedModelTrainer(BaseTrainer):
                     sampling_params=req.sampling_params,
                     metadata=list(req.metadata[lo:hi]) if req.metadata else [],
                 )
-            shards.append(self._run_rollout_one(self.ar_rollouts[r], self.dit_rollouts[r], sub_req))
+            shards.append(self._run_rollout_pipelined(self.ar_rollouts[r], self.dit_rollouts[r], sub_req))
         # Merge per-replica tracks via the default Batch.concat per-field
         # merge; segment rows are 1:1 with track samples, so the AR/image
         # segments stay globally consistent across replicas.
@@ -514,6 +525,85 @@ class UnifiedModelTrainer(BaseTrainer):
         # dp>1 would SILENTLY feed replica-0 rope to every sample (wrong gradient,
         # no crash, reward unaffected); make rope_cache a tuple-aware CONCAT field
         # before relying on it.
+        with self._phase("rollout_assemble"):
+            return RolloutResp(
+                tracks={name: RolloutTrack.concat([s.tracks[name] for s in shards]) for name in (AR_TRACK, IMAGE_TRACK)}
+            )
+
+    def _pipeline_chunk_bounds(self, n_prompts: int) -> List[Tuple[int, int]]:
+        """Contiguous prompt ranges for stage-pipelined rollout, or [] to stay serial.
+
+        Returns near-equal chunks so chunk ``i+1``'s AR generation overlaps chunk
+        ``i``'s DiT generation. Empty means "run the whole batch serially" — the
+        byte-identical prior path.
+        """
+        chunks = int(self._rollout_pipeline_chunks)
+        if chunks <= 1 or n_prompts <= 1:
+            return []
+        # More chunks than prompts would create empty ranges; a chunk must also
+        # stay large enough that the engines are not starved of batch parallelism.
+        chunks = min(chunks, n_prompts)
+        bounds = [(n_prompts * i) // chunks for i in range(chunks + 1)]
+        return [(bounds[i], bounds[i + 1]) for i in range(chunks) if bounds[i] < bounds[i + 1]]
+
+    def _run_rollout_pipelined(self, ar_engine: Any, dit_engine: Any, req: RolloutReq) -> RolloutResp:
+        """Overlap the AR and DiT stages across prompt chunks.
+
+        The AR engine and the DiT engine own DISJOINT GPU sets (the HI3 recipe
+        pins AR to 0-3 and DiT to 4-7 via each stage YAML's ``runtime.devices``),
+        yet the serial path awaits all of AR before starting any of DiT — so each
+        engine's cards idle for the other's whole duration. Measured on the HI3
+        learning workload: 85.7s AR + 102.0s DiT where the lower bound is 102.0s,
+        i.e. ~27.7% of the step is idle-GPU time.
+
+        The AR->DiT data dependency is real (DiT consumes the recaption text), so
+        the stages cannot overlap for the SAME samples. They can overlap for
+        DIFFERENT samples: split the prompts into chunks and run one independent
+        ``_run_rollout_one`` per chunk in its own thread. Each engine is a separate
+        Ray actor group with ``max_concurrency=1``, so per-engine work still
+        serializes in submission order while the two engines run concurrently —
+        chunk 1's AR proceeds on GPUs 0-3 while chunk 0's DiT runs on 4-7.
+
+        Correctness: chunks partition the prompts, each chunk builds its own
+        lineage from its own ``sample_ids``, and the responses are concatenated in
+        chunk order — so sample identity, lineage ids and row order match the
+        serial path exactly. Per-step SDE noise is keyed by seed and step index
+        rather than batch position, and ``init_noise_group_ids`` is derived from
+        ``sample_id``, so x_T is unchanged by chunking.
+
+        Cost: smaller per-engine batches. If a chunk is small enough that the
+        engine loses more to reduced batch parallelism than the overlap wins, this
+        is a net loss — which is why it is opt-in and gated on a measured A/B.
+        """
+        texts = req.primitives.get("text")
+        if not isinstance(texts, Texts):
+            raise TypeError("UnifiedModelTrainer._run_rollout_pipelined: req.primitives['text'] must be Texts.")
+        prompts = list(texts.texts)
+        spans = self._pipeline_chunk_bounds(len(prompts))
+        if not spans:
+            return self._run_rollout_one(ar_engine, dit_engine, req)
+
+        with self._phase("rollout_assemble"):
+            sub_reqs = [
+                RolloutReq(
+                    sample_ids=list(req.sample_ids[lo:hi]),
+                    group_ids=list(req.group_ids[lo:hi]),
+                    primitives={"text": Texts(texts=prompts[lo:hi])},
+                    request_conditions=dict(req.request_conditions),
+                    sampling_params=req.sampling_params,
+                    metadata=list(req.metadata[lo:hi]) if req.metadata else [],
+                )
+                for lo, hi in spans
+            ]
+
+        # Threads, not processes: the work is a blocking ``ray.get`` on a remote
+        # actor, so the GIL is released for its entire duration.
+        with ThreadPoolExecutor(max_workers=len(sub_reqs), thread_name_prefix="hi3-rollout") as pool:
+            futures = [pool.submit(self._run_rollout_one, ar_engine, dit_engine, sub) for sub in sub_reqs]
+            # Index order, not completion order: the concat below defines row
+            # order, which must stay aligned with the prompt order.
+            shards = [f.result() for f in futures]
+
         with self._phase("rollout_assemble"):
             return RolloutResp(
                 tracks={name: RolloutTrack.concat([s.tracks[name] for s in shards]) for name in (AR_TRACK, IMAGE_TRACK)}
