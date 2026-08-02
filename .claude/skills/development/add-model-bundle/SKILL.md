@@ -7,7 +7,9 @@ description: Add or update UniRL model package support. Use when adding diffusio
 
 ## Start Here
 
-When adding a diffusion or autoregressive model, first inspect `unirl/models/README.md`, `unirl/models/types/`, and the closest package under `unirl/models/`:
+When adding a diffusion or autoregressive model, first inspect `unirl/models/README.md`,
+`unirl/models/diffusion/`, `unirl/models/types/`, and the closest package under
+`unirl/models/`:
 
 - `unirl/models/sd3/`: image diffusion with text embeddings, CFG, VAE decode, and driver-provided initial latents.
 - `unirl/models/wan21/`: text/image-to-video diffusion with image latent and CLIP-vision conditioning.
@@ -55,7 +57,10 @@ Model packages are wired into recipes by `_target_` dotpath (no ConfigStore):
 - Add new shared condition types under `unirl/types/conditions/` only when existing slots cannot express the semantics; export them from `unirl/types/conditions/__init__.py`.
 - Add or update rollout-engine model-family enums only when the model is served through an engine that explicitly enumerates families, such as SGLang or vLLM-Omni configs.
 
-Keep package-specific logic under `unirl/models/<model_name>/`. Put only cross-model protocols or reusable condition abstractions under `unirl/models/types/` or `unirl/types/conditions/`.
+Keep package-specific logic under `unirl/models/<model_name>/`. Put
+diffusion-specific cross-family contracts and loop control under
+`unirl/models/diffusion/`; put other cross-model protocols or reusable condition
+abstractions under `unirl/models/types/` or `unirl/types/conditions/`.
 
 ## Meta-Init (avoid the per-rank full-model load)
 
@@ -128,7 +133,7 @@ CFG belongs in the diffusion step, with the pipeline and embed stages preparing 
 ## DiffusionStage Rules
 
 Ordinary `<Model>DiffusionStage` implementations inherit
-`unirl.models.types.diffusion_runner.DiffusionRunner`; the runner owns the
+`unirl.models.diffusion.DiffusionRunner`; the runner owns the
 rollout/replay loops and `LatentSegment` assembly:
 
 - Use `schedule=params.sigmas` from the generation Part; diffusion pipelines should raise if it is `None`.

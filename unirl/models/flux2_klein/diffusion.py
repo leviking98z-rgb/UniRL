@@ -54,8 +54,7 @@ from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
-from unirl.models.types.diffusion import DiffusionStep
-from unirl.models.types.diffusion_runner import DiffusionLatentSpec, DiffusionRunner, temporary_eval
+from unirl.models.diffusion import DiffusionLatentSpec, DiffusionRunner, DiffusionStep, temporary_eval
 from unirl.sde.kernels import StepStrategy
 from unirl.types.segments.latent import LatentSegment
 

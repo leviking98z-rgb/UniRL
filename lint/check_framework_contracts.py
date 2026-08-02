@@ -409,9 +409,13 @@ def check_diffusion_runners(errors: list[str], simple: dict[str, list[ClassInfo]
         },
     }
     for name, contract in expected.items():
-        matches = [info for info in simple.get(name, ()) if info.module == "unirl.models.types.diffusion_runner"]
+        module = (
+            "unirl.models.diffusion.contracts" if name == "DiffusionLatentSpec" else "unirl.models.diffusion.runner"
+        )
+        matches = [info for info in simple.get(name, ()) if info.module == module]
         if len(matches) != 1:
-            errors.append(f"unirl/models/types/diffusion_runner.py: expected one {name} class, found {len(matches)}")
+            path = module.replace(".", "/") + ".py"
+            errors.append(f"{path}: expected one {name} class, found {len(matches)}")
             continue
         _require_members(
             errors,

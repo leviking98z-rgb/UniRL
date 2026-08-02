@@ -47,8 +47,7 @@ from typing import ClassVar, Dict, Optional, Tuple
 
 import torch
 
-from unirl.models.types.diffusion import DiffusionStep
-from unirl.models.types.diffusion_runner import DiffusionLatentSpec, VideoDiffusionRunner
+from unirl.models.diffusion import DiffusionLatentSpec, DiffusionStep, VideoDiffusionRunner
 from unirl.sde.kernels import StepStrategy
 from unirl.types.sampling import DiffusionSamplingParams
 

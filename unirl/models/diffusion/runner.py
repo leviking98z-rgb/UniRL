@@ -1,4 +1,4 @@
-"""Reusable diffusion sampling and replay loop.
+"""Reusable diffusion model sampling and replay loop.
 
 Model packages own transformer adaptation, conditioning, latent geometry, and
 small per-step kwargs.  This runner owns the invariant control flow shared by
@@ -21,12 +21,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Generic, List, Mapping, Optional, Tuple, TypeVar
+from typing import Any, Callable, ClassVar, Generic, List, Mapping, Optional, TypeVar
 
 import torch
 
-from unirl.models.types.replay_result import ReplayResult
+from unirl.models.diffusion.contracts import DiffusionLatentSpec, ReplayResult
 from unirl.sde.kernels import StepStrategy
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment, make_video_segment
@@ -45,22 +44,6 @@ def temporary_eval(module: torch.nn.Module):
         yield
     finally:
         module.train(was_training)
-
-
-@dataclass(frozen=True)
-class DiffusionLatentSpec:
-    """Device, batch, and per-sample latent shape for one diffusion request."""
-
-    device: torch.device
-    batch_size: int
-    shape: Tuple[int, ...]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "device", torch.device(self.device))
-        if self.batch_size <= 0:
-            raise ValueError(f"DiffusionLatentSpec.batch_size must be positive; got {self.batch_size}.")
-        if not self.shape or any(int(size) <= 0 for size in self.shape):
-            raise ValueError(f"DiffusionLatentSpec.shape must contain positive dimensions; got {self.shape!r}.")
 
 
 class DiffusionRunner(ABC, Generic[B, C]):
@@ -465,7 +448,6 @@ class VideoDiffusionRunner(DiffusionRunner[B, C], ABC):
 
 
 __all__ = [
-    "DiffusionLatentSpec",
     "DiffusionRunner",
     "VideoDiffusionRunner",
     "temporary_eval",

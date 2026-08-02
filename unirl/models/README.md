@@ -16,6 +16,9 @@
 `hunyuan_image3/`, `pe/`, …). Each implements the shared **bundle / pipeline /
 stage / conditions** contract so the same model code, on the same weights, serves
 *both* the rollout engine (generate) and the train stack (replay).
+Diffusion-specific cross-family contracts and loop control live in
+`unirl/models/diffusion/`; concrete transformer and conditioning behavior stays
+inside each model-family package.
 
 > Not to be confused with the repository-root `models/` directory, which only holds
 > local checkpoint and reward-model symlinks.
