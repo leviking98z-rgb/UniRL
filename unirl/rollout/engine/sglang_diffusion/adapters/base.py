@@ -14,6 +14,7 @@ methods don't thread them.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from importlib import import_module
 from typing import Any, Dict, List, Optional, Tuple
 
 from unirl.config.require import require
@@ -25,6 +26,7 @@ from unirl.types.sample import Sample
 # --------------------------------------------------------------------------- #
 
 _REGISTRY: Dict[str, type["ModelAdapter"]] = {}
+_LAZY_REGISTRY: Dict[str, str] = {}
 
 
 def register_adapter(key: str):
@@ -35,6 +37,12 @@ def register_adapter(key: str):
             key not in _REGISTRY,
             f"adapter key {key!r} already registered by {_REGISTRY.get(key)!r}",
         )
+        expected = _LAZY_REGISTRY.get(key)
+        actual = f"{cls.__module__}:{cls.__name__}"
+        require(
+            expected is None or expected == actual,
+            f"adapter key {key!r} is declared as {expected!r}, but {actual!r} tried to register it",
+        )
         _REGISTRY[key] = cls
         cls.model_family = key
         return cls
@@ -42,17 +50,59 @@ def register_adapter(key: str):
     return deco
 
 
-def get_adapter(key: str) -> type["ModelAdapter"]:
-    """Look up the adapter class for a ``model_family`` key."""
+def register_lazy_adapter(key: str, dotpath: str) -> None:
+    """Declare an adapter without importing its implementation module.
+
+    ``dotpath`` uses ``"package.module:ClassName"`` syntax. Importing the
+    module must fire the matching :func:`register_adapter` decorator.
+    Repeating an identical declaration is harmless so compatibility modules
+    can share the same registry specification.
+    """
+    require(bool(key), "lazy adapter key must be non-empty")
+    module_name, separator, class_name = dotpath.partition(":")
     require(
-        key in _REGISTRY,
-        f"unknown model_family {key!r}; registered: {sorted(_REGISTRY)}",
+        bool(module_name) and separator == ":" and bool(class_name),
+        f"adapter {key!r} has invalid lazy dotpath {dotpath!r}; expected 'package.module:ClassName'",
     )
-    return _REGISTRY[key]
+    previous = _LAZY_REGISTRY.get(key)
+    require(
+        previous is None or previous == dotpath,
+        f"adapter key {key!r} already points to lazy adapter {previous!r}",
+    )
+    require(
+        key not in _REGISTRY,
+        f"adapter key {key!r} is already registered by {_REGISTRY.get(key)!r}",
+    )
+    _LAZY_REGISTRY[key] = dotpath
+
+
+def get_adapter(key: str) -> type["ModelAdapter"]:
+    """Look up an adapter, importing only the selected implementation."""
+    require(
+        key in _REGISTRY or key in _LAZY_REGISTRY,
+        f"unknown model_family {key!r}; registered: {list(registered_adapters())}",
+    )
+    adapter = _REGISTRY.get(key)
+    if adapter is not None:
+        return adapter
+
+    dotpath = _LAZY_REGISTRY[key]
+    module_name, _, class_name = dotpath.partition(":")
+    module = import_module(module_name)
+    adapter = _REGISTRY.get(key)
+    require(
+        adapter is not None,
+        f"lazy adapter module {module_name!r} did not register key {key!r}",
+    )
+    require(
+        getattr(module, class_name, None) is adapter,
+        f"lazy adapter {dotpath!r} does not resolve to the class registered under {key!r}",
+    )
+    return adapter
 
 
 def registered_adapters() -> Tuple[str, ...]:
-    return tuple(sorted(_REGISTRY))
+    return tuple(sorted(_REGISTRY.keys() | _LAZY_REGISTRY.keys()))
 
 
 # --------------------------------------------------------------------------- #
@@ -158,6 +208,7 @@ class ModelAdapter(ABC):
 __all__ = [
     "ModelAdapter",
     "register_adapter",
+    "register_lazy_adapter",
     "get_adapter",
     "registered_adapters",
 ]
