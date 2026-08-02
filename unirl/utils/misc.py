@@ -142,29 +142,50 @@ def flatten_dict(d: dict, parent_key: str = "", sep: str = "/") -> dict:
     return dict(items)
 
 
-def aggregate_numeric_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
-    """Average numeric metric keys across repeated metric dictionaries."""
+def aggregate_numeric_metrics(
+    metrics_list: List[Dict[str, Any]],
+    *,
+    weights: Optional[List[float]] = None,
+) -> Dict[str, float]:
+    """Average numeric metric keys across repeated metric dictionaries.
+
+    ``weights`` is an optional per-dictionary weight vector. For a key missing
+    from some dictionaries, only weights belonging to dictionaries that emit
+    the key participate in its normalization. Omitting ``weights`` preserves
+    the historical equal-average behavior.
+    """
     aggregated: Dict[str, float] = {}
     if not metrics_list:
         return aggregated
+    if weights is None:
+        resolved_weights = [1.0] * len(metrics_list)
+    else:
+        if len(weights) != len(metrics_list):
+            raise ValueError(
+                f"aggregate_numeric_metrics: weights length {len(weights)} != metrics length {len(metrics_list)}"
+            )
+        resolved_weights = [float(weight) for weight in weights]
 
     all_keys = set()
     for metrics in metrics_list:
         all_keys.update(metrics.keys())
 
     for key in all_keys:
-        values: List[float] = []
-        for metrics in metrics_list:
+        weighted_values: List[tuple[float, float]] = []
+        for metrics, weight in zip(metrics_list, resolved_weights):
             if key not in metrics:
                 continue
             value = metrics[key]
             if isinstance(value, torch.Tensor):
                 value = value.item() if value.numel() == 1 else value.mean().item()
             if isinstance(value, bool):
-                values.append(float(value))
+                weighted_values.append((float(value), weight))
             elif isinstance(value, (int, float)):
-                values.append(float(value))
-        if values:
-            aggregated[key] = sum(values) / len(values)
+                weighted_values.append((float(value), weight))
+        if weighted_values:
+            total_weight = sum(weight for _, weight in weighted_values)
+            if total_weight == 0.0:
+                raise ValueError(f"aggregate_numeric_metrics: weights for key {key!r} sum to zero")
+            aggregated[key] = sum(value * weight for value, weight in weighted_values) / total_weight
 
     return aggregated

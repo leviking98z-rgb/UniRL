@@ -25,7 +25,21 @@ def test_hi3_pickscore_uses_clip_processor_default() -> None:
     examples = Path(__file__).parents[1] / "examples" / "unified_model"
     for config_name in ("hi3_vllmomni.yaml", "hi3_vllmomni_veomni_ep.yaml"):
         config_text = (examples / config_name).read_text()
-        assert (
-            "processor_id: "
-            "${oc.env:PICKSCORE_PROCESSOR,laion/CLIP-ViT-H-14-laion2B-s32B-b79K}"
-        ) in config_text
+        assert ("processor_id: ${oc.env:PICKSCORE_PROCESSOR,laion/CLIP-ViT-H-14-laion2B-s32B-b79K}") in config_text
+
+
+def test_hi3_per_track_micro_batches_preserve_ar_sequence_objective() -> None:
+    examples = Path(__file__).parents[1] / "examples" / "unified_model"
+    for config_name in ("hi3_vllmomni.yaml", "hi3_vllmomni_veomni_ep.yaml"):
+        config = yaml.safe_load((examples / config_name).read_text())
+        assert config["stack"]["ar_micro_batch_size"] is None
+        assert config["stack"]["image_micro_batch_size"] is None
+        assert config["algorithm"]["ar"]["loss_agg_mode"] == "seq-mean-token-mean"
+
+
+def test_bagel_per_track_micro_batches_preserve_ar_sequence_objective() -> None:
+    config_path = Path(__file__).parents[1] / "examples" / "unified_model" / "bagel_trainside_unigrpo.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    assert config["stack"]["ar_micro_batch_size"] is None
+    assert config["stack"]["image_micro_batch_size"] is None
+    assert config["algorithm"]["ar"]["loss_agg_mode"] == "seq-mean-token-mean"

@@ -157,6 +157,8 @@ algorithm:
     stage_attr: ar
     clip_range: 1.0e-2                 # text/LLM trust region
     clip_schedule: constant
+    # Keep every response equally weighted if ar_micro_batch_size is increased.
+    loss_agg_mode: seq-mean-token-mean
     conditions_cls:
       _target_: hydra.utils.get_class
       path: unirl.models.bagel.conditions.BagelARConditions
@@ -191,6 +193,9 @@ algorithm:
 stack:
   _target_: unirl.train.unified_model_stack.UnifiedModelTrainStack
   micro_batch_size: 1
+  # Optional per-track overrides; null inherits micro_batch_size.
+  ar_micro_batch_size: null
+  image_micro_batch_size: null
   max_grad_norm: 1.0
   num_updates_per_batch: 2
 

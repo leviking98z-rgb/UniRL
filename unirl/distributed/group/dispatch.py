@@ -10,7 +10,7 @@ Design:
   - dispatch/collect functions take (wg, args, kwargs, batch_size) to access rank_info, dp_size, etc.
   - @distributed decorator marks Remote methods with their dispatch/execute modes
 
-DP-aware dispatch (DP_SCATTER, DP_SCATTER_HEAD):
+DP-aware dispatch (DP_SCATTER, DP_SCATTER_INDEPENDENT, DP_SCATTER_HEAD):
   - Input is split by dp_size (not world_size) using recursive pytree_chunk
   - Workers in the same DP group (varying TP/PP/SP rank) receive the SAME shard
   - Collect filters: only tp_rank==0, pp_last_stage, sp_rank==0 results are kept
@@ -23,7 +23,7 @@ from enum import Enum, auto
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypeAlias
 
-from unirl.distributed.tensor.pytree import pytree_cat, pytree_chunk
+from unirl.distributed.tensor.pytree import infer_batch_size, pytree_cat, pytree_chunk
 from unirl.distributed.utils import Broadcast
 
 if TYPE_CHECKING:
@@ -65,6 +65,8 @@ class Dispatch(Enum):
     SCATTER = auto()  # Split N ways across world (one shard per worker)
     DP_SCATTER = auto()  # Chunk by dp_size; all ranks in DP group get the same shard; collect merge
     DP_SCATTER_HEAD = auto()  # Chunk by dp_size; only DP head gets shard, others empty; collect merge
+    # Independently infer and chunk every top-level arg/kwarg by dp_size.
+    DP_SCATTER_INDEPENDENT = auto()
 
 
 class Execute(Enum):
@@ -146,6 +148,45 @@ def _dispatch_dp_scatter(
     return [dp_shards[wg.rank_infos[i].dp_rank] for i in range(wg.world_size)]
 
 
+def _dispatch_dp_scatter_independent(
+    wg: "Handle",
+    args: Tuple[Any, ...],
+    kwargs: Dict[str, Any],
+    batch_size: Optional[int],
+) -> List[Shard]:
+    """DP-shard each top-level argument by its own inferred batch axis.
+
+    ``DP_SCATTER`` intentionally uses one canonical batch size and broadcasts
+    values whose leading dimension differs. This opt-in mode is for methods
+    that accept multiple independent batches, such as unified training over an
+    AR lineage level with ``P*N`` rows and an image level with ``P*N*M`` rows.
+    Nested fields within each top-level value still follow the normal
+    same-batch-or-broadcast contract.
+    """
+    del batch_size  # The handle's canonical first batch is not used in this mode.
+    dp_size = wg.dp_size
+
+    def _chunk(value: Any, *, label: str) -> List[Any]:
+        own_batch_size = infer_batch_size((value,), {})
+        if own_batch_size is not None and own_batch_size % dp_size != 0:
+            raise ValueError(
+                f"{label} batch_size={own_batch_size} not divisible by dp_size={dp_size} under DP_SCATTER_INDEPENDENT"
+            )
+        # Broadcast/scalar values ignore batch_size inside pytree_chunk. Zero is
+        # only a sentinel for the pure-broadcast case.
+        return pytree_chunk(value, dp_size, own_batch_size or 0)
+
+    split_args = tuple(_chunk(value, label=f"arg[{index}]") for index, value in enumerate(args))
+    split_kwargs = {key: _chunk(value, label=f"kwarg[{key!r}]") for key, value in kwargs.items()}
+
+    dp_shards = []
+    for dp_rank in range(dp_size):
+        shard_args = tuple(split_args[index][dp_rank] for index in range(len(args)))
+        shard_kwargs = {key: split_kwargs[key][dp_rank] for key in kwargs}
+        dp_shards.append((shard_args, shard_kwargs))
+    return [dp_shards[wg.rank_infos[index].dp_rank] for index in range(wg.world_size)]
+
+
 def _dispatch_dp_scatter_head(
     wg: "Handle",
     args: Tuple[Any, ...],
@@ -218,6 +259,10 @@ DISPATCH_MODE_REGISTRY: Dict[Dispatch, Dict[str, Callable]] = {
     Dispatch.BROADCAST: {"dispatch_fn": _dispatch_broadcast, "collect_fn": _collect_passthrough},
     Dispatch.SCATTER: {"dispatch_fn": _dispatch_scatter, "collect_fn": _collect_passthrough},
     Dispatch.DP_SCATTER: {"dispatch_fn": _dispatch_dp_scatter, "collect_fn": _collect_dp_merge},
+    Dispatch.DP_SCATTER_INDEPENDENT: {
+        "dispatch_fn": _dispatch_dp_scatter_independent,
+        "collect_fn": _collect_dp_merge,
+    },
     Dispatch.DP_SCATTER_HEAD: {"dispatch_fn": _dispatch_dp_scatter_head, "collect_fn": _collect_dp_merge},
 }
 
@@ -235,6 +280,7 @@ def resolve_backward_dispatch_mode(
     Rules:
       DP_SCATTER      + pp_size==1 → DP_SCATTER (grad shards align with output shards)
       DP_SCATTER_HEAD + pp_size==1 → DP_SCATTER (all ranks must participate in backward)
+      DP_SCATTER_INDEPENDENT        → Error (multiple unrelated batch axes)
       DP_SCATTER / DP_SCATTER_HEAD + pp_size>1 → Error (autograd graph broken across PP)
       BROADCAST → Error
       SCATTER   → Error
@@ -243,7 +289,7 @@ def resolve_backward_dispatch_mode(
     Update this function to decide whether DP_SCATTER backward is correct,
     or a hard error is needed.  Also check Remote._auto_backward's dispatch_mode.
     """
-    if fwd_dispatch_mode in (Dispatch.BROADCAST, Dispatch.SCATTER):
+    if fwd_dispatch_mode in (Dispatch.BROADCAST, Dispatch.SCATTER, Dispatch.DP_SCATTER_INDEPENDENT):
         raise ValueError(
             f"Method '{method_name}' uses dispatch_mode={fwd_dispatch_mode.name}, "
             f"which does not support auto-backward (no shared batch dimension). "
