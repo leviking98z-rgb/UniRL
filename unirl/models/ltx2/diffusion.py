@@ -24,12 +24,12 @@ from typing import ClassVar, List, Optional, Set, Tuple
 
 import torch
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.models.diffusion import DiffusionStage, DiffusionStep, ReplayResult
 from unirl.sde.kernels import StepStrategy
 from unirl.sde.noise import make_denoise_step_generators
 from unirl.types.sampling import DiffusionSamplingParams, compute_trajectory_positions
 from unirl.types.segments.latent import LatentSegment, make_video_segment
-from unirl.utils.dtypes import parse_torch_dtype
 
 from .bundle import LTX2Bundle
 from .conditions import LTX2Conditions

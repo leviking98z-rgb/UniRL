@@ -191,7 +191,7 @@ def build_media_preview_for_part(
     selected_indices: List[int] = []
 
     if isinstance(decoded, Images):
-        from unirl.utils.media import hstack_pils, tensor_frame_to_pil
+        from unirl.types.media_conversion import hstack_pils, tensor_frame_to_pil
 
         pixels = decoded.pixels
         if pixels is None:

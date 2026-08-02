@@ -16,10 +16,10 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "get_sigma_schedule": ("unirl.sde", "get_sigma_schedule"),
     # reward
     "RewardBackend": ("unirl.reward.base", "RewardBackend"),
-    # utils
-    "load_function": ("unirl.utils", "load_function"),
-    "set_seed": ("unirl.utils", "set_seed"),
-    "configure_logger": ("unirl.utils", "configure_logger"),
+    # compatibility-facing runtime helpers with explicit internal owners
+    "load_function": ("unirl.config.imports", "load_function"),
+    "set_seed": ("unirl.runtime", "set_seed"),
+    "configure_logger": ("unirl.observability.logging", "configure_logger"),
 }
 
 __all__ = ["__version__", *_LAZY_ATTRS.keys()]

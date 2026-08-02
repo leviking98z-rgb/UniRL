@@ -10,7 +10,7 @@
 # (set_lora_from_tensors -> /load_lora_adapter_from_tensors, {name}_v{N}).
 #
 # Data prep + paths: same as qwen_vl_grpo_geo3k_mc_4x8.yaml — build the local
-# jsonl once with `python -m unirl.utils.prepare_geo3k_mc --out-dir data/geo3k_mc`,
+# jsonl once with `python -m unirl.data.prepare.geo3k_mc --out-dir data/geo3k_mc`,
 # then set DATA_PATH=data/geo3k_mc/train.jsonl (QWEN_VL_PATH defaults to the HF id).
 
 defaults:

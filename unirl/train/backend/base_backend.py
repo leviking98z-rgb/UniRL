@@ -554,7 +554,7 @@ class BaseFSDP2Backend(Remote):
             # hand it a lazily-created, memoized gloo group. None when not
             # distributed (single process) — async_save then runs no_dist.
             if dist.is_available() and dist.is_initialized():
-                from unirl.utils.distributed_utils import init_gloo_group
+                from unirl.distributed.collectives import init_gloo_group
 
                 pg = init_gloo_group()
         _prepare_dcp_directory(path, meta, process_group=pg)
@@ -838,10 +838,10 @@ class BaseFSDP2Backend(Remote):
         names: List[str],
         prefix: str = "",
     ) -> Dict[str, str]:
+        from unirl.distributed.peft import raw_state_dict
         from unirl.distributed.weight_sync.transfer.checksum import (
             fingerprint_tensor,
         )
-        from unirl.utils.peft_merge import raw_state_dict
 
         target = set(names)
         out: Dict[str, str] = {}

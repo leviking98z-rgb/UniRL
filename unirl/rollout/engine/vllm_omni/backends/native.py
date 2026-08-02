@@ -37,13 +37,13 @@ import os
 from pprint import pformat
 from typing import Any, Dict, List, Optional, Sequence
 
+from unirl.distributed.process import terminate_descendants
 from unirl.rollout.engine.vllm_omni.backends.base import (
     STAGE_KIND_AR,
     GenerateCall,
     OmniRawResult,
     StageSampling,
 )
-from unirl.utils.graceful_shutdown import terminate_descendants
 
 logger = logging.getLogger(__name__)
 
@@ -719,7 +719,7 @@ class VLLMOmniBackend:
         ``PEFTHelper`` expects ``base_model.model.<...>``. Idempotent check on
         the first key.
         """
-        from unirl.utils.peft_merge import adapt_lora_for_vllm
+        from unirl.distributed.peft import adapt_lora_for_vllm
 
         first_key = next(iter(lora_tensors), "")
         if lora_tensors and not first_key.startswith("base_model.model."):

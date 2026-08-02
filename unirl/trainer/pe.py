@@ -32,6 +32,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
+from unirl.config.remote import parse_hydra_cfg, remote_hydra
 from unirl.distributed.group.placement import placement, remote
 from unirl.models.pe.pipeline import PEPipeline
 from unirl.observability import observer_state_dict
@@ -41,7 +42,6 @@ from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sam
 from unirl.trainer.eval_suites import build_eval_suites
 from unirl.types.sample import Sample
 from unirl.types.sampling import ARSamplingParams, BaseSamplingParams, DiffusionSamplingParams
-from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
 

@@ -70,7 +70,7 @@ sampling:
   eta: 0.7
   init_same_noise: false
   scheduler:
-    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.sde.scheduler.AllSDEScheduler
     num_sde_steps: 3
     # SDE-step window: [0,0.5] confines SDE noise to the early high-σ steps
     # (the validated reproduce setting); [0,1] spreads it across all steps.

@@ -112,7 +112,7 @@ class NCCLWeightSync(FullWeightSync):
         """
         import ray
 
-        from unirl.utils.distributed_utils import init_process_group
+        from unirl.distributed.collectives import init_process_group
 
         if self._rollout_role is None:
             raise RuntimeError("NCCLWeightSync.connect: call set_rollout_targets() first")

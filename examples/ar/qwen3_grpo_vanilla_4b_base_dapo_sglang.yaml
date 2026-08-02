@@ -22,7 +22,7 @@
 # penalty).
 #
 # Data prep (one-time) — build the local jsonl from the raw DAPO-Math-17k dataset:
-#   python -m unirl.utils.prepare_dapo_math --out-dir data/dapo_math
+#   python -m unirl.data.prepare.dapo_math --out-dir data/dapo_math
 #   → data/dapo_math/{train.jsonl, aime_eval.jsonl}
 #
 # Run (32 GPU). The model defaults to the HF id `Qwen/Qwen3-4B-Base`; set QWEN3_PATH

@@ -10,7 +10,7 @@
 # reward SOURCE as the baseline; only the trainer/placement/sync differ.
 #
 # Prerequisites (on the pod): QWEN3_INSTRUCT_PATH, ALFWORLD_DATA (alfworld-download),
-#   DATA_PATH (python -m unirl.utils.prepare_alfworld --out-dir data/alfworld).
+#   DATA_PATH (python -m unirl.data.prepare.alfworld --out-dir data/alfworld).
 #
 # Run (single node, whole 8-GPU node; train_fraction=0.5 -> 4 train + 4 rollout):
 #   QWEN3_INSTRUCT_PATH=... ALFWORLD_DATA=... DATA_PATH=data/alfworld/train.jsonl \

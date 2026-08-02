@@ -40,6 +40,7 @@ from omegaconf import DictConfig
 
 from unirl.algorithms.advantage import GroupedAdvantageEstimator, estimate_part_advantages
 from unirl.config.execution import Capability, LoopKind, PlacementMode
+from unirl.config.remote import parse_hydra_cfg, remote_hydra
 from unirl.distributed.group.placement import placement, remote
 from unirl.reward.ops import attach_frontier, materialize_reward
 from unirl.rollout.async_runtime import InflightGeneration
@@ -48,7 +49,6 @@ from unirl.trainer.ar import ARTrainer
 from unirl.trainer.base import BaseTrainer, build_advantage_estimator, build_sampling_dict
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
-from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
 

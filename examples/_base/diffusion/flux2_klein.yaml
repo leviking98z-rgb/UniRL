@@ -98,7 +98,7 @@ sampling:
   samples_per_prompt: 16
   seed: 42
   scheduler:
-    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.sde.scheduler.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
     num_sde_steps: 3
     timestep_fraction:

@@ -52,7 +52,7 @@ def create_observer(
             media_max_items=media_max_items,
         )
 
-    from unirl.utils.wandb_logger import init_logger
+    from unirl.observability.wandb import init_logger
 
     return init_logger(
         project=str(project) if project else None,

@@ -38,8 +38,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.models.types.bundle import Bundle
-from unirl.utils.dtypes import parse_torch_dtype
 
 from .config import HunyuanImage3PipelineConfig
 

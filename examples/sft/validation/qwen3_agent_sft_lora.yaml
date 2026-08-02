@@ -2,7 +2,7 @@
 # Qwen3-8B LoRA SFT on multi-turn tool-calling trajectories.
 #
 # Prepare:
-#   python -m unirl.utils.prepare_sft_agent \
+#   python -m unirl.data.prepare.sft_agent \
 #     --out-dir datasets/sft_agent_toolcall_12k
 #
 # Launch (1x8):

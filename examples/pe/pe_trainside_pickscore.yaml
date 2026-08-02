@@ -121,7 +121,7 @@ sampling:
     samples_per_prompt: 8       # M images per rewrite
     guidance_scale: 1.0
     scheduler:
-      _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+      _target_: unirl.sde.scheduler.AllSDEScheduler
       num_timesteps: ${..num_inference_steps}
       timestep_fraction: [0.0, 0.5]   # SDE steps drawn from the first half
       num_sde_steps: 3

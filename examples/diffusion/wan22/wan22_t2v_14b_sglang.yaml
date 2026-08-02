@@ -104,7 +104,7 @@ sampling:
   samples_per_prompt: 8
   init_same_noise: false
   scheduler:
-    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.sde.scheduler.AllSDEScheduler
     timestep_fraction: [0.0, 0.5]
     num_sde_steps:
 

@@ -26,8 +26,8 @@ from typing import Any, Optional
 import torch
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.models.types.bundle import Bundle
-from unirl.utils.dtypes import parse_torch_dtype
 
 from .config import BagelPipelineConfig
 from .vendor.data.data_utils import add_special_tokens

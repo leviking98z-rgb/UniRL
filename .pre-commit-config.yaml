@@ -87,3 +87,11 @@ repos:
         language: python
         pass_filenames: false
         always_run: true
+      # ``unirl.utils`` is a closed compatibility namespace: implementations
+      # live with their owning component and framework code uses canonical paths.
+      - id: check-utils-ownership
+        name: utility ownership stays explicit
+        entry: python lint/check_utils_ownership.py
+        language: python
+        pass_filenames: false
+        always_run: true

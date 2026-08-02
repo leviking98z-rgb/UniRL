@@ -51,10 +51,10 @@ from unirl.algorithms import AlgorithmStepResult, StageAlgorithm
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.distributed.tensor.batch import _move_value
+from unirl.observability.metrics import aggregate_numeric_metrics
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack.planner import CountPlanner, MicroPlanner, Plan, UpdatePlan, _positive_int
 from unirl.types.sample import Part
-from unirl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -500,7 +500,7 @@ class TrainStack(Remote):
         )
         # Opt-in profiler (UNIRL_PROFILE=train profiles this whole step; one-update is
         # handled in _run_updates). See unirl/train/readme.md.
-        from unirl.utils.profiling import profile_scope
+        from unirl.observability.profiling import profile_scope
 
         profiler = self._train_step_profiler() if profile_scope() == "train" else None
         with profiler.record("train_track") if profiler is not None else nullcontext():
@@ -516,7 +516,7 @@ class TrainStack(Remote):
         """Lazily build the per-worker train-step profiler (None unless UNIRL_PROFILE)."""
         cached = getattr(self, "_profiler_cache", "unset")
         if cached == "unset":
-            from unirl.utils.profiling import maybe_build_train_profiler
+            from unirl.observability.profiling import maybe_build_train_profiler
 
             cached = maybe_build_train_profiler(int(getattr(self.fsdp_backend, "_rank", 0)))
             self._profiler_cache = cached
@@ -544,7 +544,7 @@ class TrainStack(Remote):
         # UNIRL_PROFILE=one-update: wrap each optimizer update in a one-shot profiler
         # (fires once, on rank0, past warmup) so the trace captures ONLY one update
         # (forward + backward + cross-GPU comm + optimizer) — the compute/comm overlap window.
-        from unirl.utils.profiling import maybe_profile_update, profile_scope
+        from unirl.observability.profiling import maybe_profile_update, profile_scope
 
         scope_update = profile_scope() == "one-update"
         results = []

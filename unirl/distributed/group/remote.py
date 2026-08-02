@@ -199,11 +199,11 @@ class Remote:
 
         Reads always happen BEFORE any reset so peaks survive; optional chores
         (log line, empty_cache, peak reset, snapshot dump) are bundled so a
-        hand-off costs one RPC. See ``utils.memory_monitor`` for orchestration.
+        hand-off costs one RPC. See ``observability.memory`` for orchestration.
         """
         if not torch.cuda.is_available():
             return {}
-        from unirl.utils.memory_utils import (
+        from unirl.distributed.memory import (
             aggressive_empty_cache,
             get_memory_info,
             get_process_snapshot_sampler,

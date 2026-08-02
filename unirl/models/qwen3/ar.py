@@ -30,9 +30,9 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.models.types.ar import ARSamplingParams, ARStage, ARStep, left_pad_prompt
 from unirl.types.segments import TextSegment
-from unirl.utils.dtypes import parse_torch_dtype
 
 from .bundle import Qwen3Bundle
 from .conditions import Qwen3ARConditions

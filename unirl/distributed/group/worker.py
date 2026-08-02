@@ -72,7 +72,7 @@ class Worker:
 
         # Snapshot recording (UNIRL_MEMSNAP=1) must start in this process; dumps
         # fire later via Remote.get_memory_stats.
-        from unirl.utils.memory_utils import init_process_snapshot_sampler
+        from unirl.distributed.memory import init_process_snapshot_sampler
 
         init_process_snapshot_sampler(rank=nccl_rank if nccl_rank is not None else device_id)
 

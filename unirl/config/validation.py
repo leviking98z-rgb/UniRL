@@ -20,9 +20,9 @@ from typing import Any
 import torch
 from omegaconf import DictConfig
 
+from unirl.config.dtypes import parse_torch_dtype
 from unirl.config.execution import Capability, component_capabilities
 from unirl.config.require import require
-from unirl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def is_direct_sampling(cfg: DictConfig) -> bool:
 
 def validate_dynamic_dotpaths(cfg: DictConfig) -> None:
     """Fail-fast import of every dynamic dotpath the driver will later resolve."""
-    from unirl.utils import load_function
+    from unirl.config.imports import load_function
 
     dotpath = str(cfg.run.data_source_dotpath or "").strip()
     require(
@@ -230,7 +230,7 @@ def validate_lora_target_modules(cfg: DictConfig) -> None:
         return
 
     try:
-        from unirl.utils.misc import load_function
+        from unirl.config.imports import load_function
 
         model_cls = load_function(target_dotpath)
     except (ImportError, AttributeError, KeyError, ValueError) as exc:

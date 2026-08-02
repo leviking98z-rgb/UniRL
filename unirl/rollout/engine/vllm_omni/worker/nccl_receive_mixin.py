@@ -99,7 +99,7 @@ class NcclBroadcastReceiveMixin:
         directly) to create a *separate* main-style group via TCPStore
         rendezvous, leaving the worker's default TP group alone.
         """
-        from unirl.utils.distributed_utils import (
+        from unirl.distributed.collectives import (
             init_process_group as _diffrl_init_pg,
         )
 

@@ -56,7 +56,7 @@ them wrong and GRPO/FlowDPPO optimize noise.
 deterministic ODE solver) in `kernels.py`, wired under `pipeline.strategy`. A
 per-model σ override subclasses `FlowMatchSchedulePolicy` and overrides only
 `compute_mu`. A new SDE-index schedule is *not* here — it's a `TimestepScheduler`
-in `utils/scheduler_utils.py`, wired under `sampling.scheduler`. DanceGRPO/MixGRPO
+in `sde/scheduler.py`, wired under `sampling.scheduler`. DanceGRPO/MixGRPO
 add no kernel: DanceGRPO swaps in `DanceSDEStrategy` under `pipeline.strategy`,
 MixGRPO keeps `FlowSDEStrategy` and adds a `WindowScheduler` under
 `sampling.scheduler`.

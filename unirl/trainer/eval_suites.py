@@ -49,7 +49,7 @@ from typing import Any, List, Optional
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from unirl.utils.hydra import remote_hydra
+from unirl.config.remote import remote_hydra
 
 logger = logging.getLogger(__name__)
 

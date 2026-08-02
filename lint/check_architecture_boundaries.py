@@ -7,6 +7,7 @@ The repository has three logical layers:
   distributed actor/tensor substrate);
 * loop components (data, models, algorithms, reward, train, rollout, and
   weight-sync);
+* cross-cutting services (observability);
 * orchestration (trainer and the thin ``train_*.py`` entrypoints).
 
 This guard intentionally checks source imports, including imports below
@@ -65,7 +66,7 @@ BOUNDARIES = (
             "unirl/distributed/group",
             "unirl/distributed/tensor",
         ),
-        forbidden=_UPPER_PACKAGES,
+        forbidden=(*_UPPER_PACKAGES, "unirl.observability"),
         reason="kernel code defines contracts/substrate and cannot know a loop component or trainer",
     ),
     Boundary(
@@ -128,6 +129,20 @@ BOUNDARIES = (
             "unirl.trainer",
         ),
         reason="weight-sync is a transport component, not a model/engine/trainer integration point",
+    ),
+    Boundary(
+        name="observability service",
+        roots=("unirl/observability",),
+        forbidden=(
+            "unirl.algorithms",
+            "unirl.data",
+            "unirl.models",
+            "unirl.reward",
+            "unirl.rollout",
+            "unirl.train",
+            "unirl.trainer",
+        ),
+        reason="observability consumes stable contracts and cannot depend on a loop implementation",
     ),
 )
 

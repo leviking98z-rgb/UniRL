@@ -45,10 +45,10 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Type
 
 import torch
 
+from unirl.observability.metrics import aggregate_numeric_metrics
+from unirl.sde.scheduler import normalize_timestep_fraction
 from unirl.types.conditions import Condition
 from unirl.types.segments.latent import LatentSegment
-from unirl.utils.misc import aggregate_numeric_metrics
-from unirl.utils.scheduler_utils import normalize_timestep_fraction
 
 from .base import AlgorithmStepResult, BaseAlgorithmConfig, StageAlgorithm
 

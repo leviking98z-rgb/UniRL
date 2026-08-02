@@ -43,13 +43,13 @@ import torch
 from unirl.algorithms import AlgorithmStepResult, StageAlgorithm
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
+from unirl.observability.metrics import aggregate_numeric_metrics
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack import TrainStepResult, _build_micro_batch_slices
 from unirl.train.stack.base import _aggregate_update_results
 from unirl.train.stack.planner.types import _positive_int, _update_ranges
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
-from unirl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +276,7 @@ class UnifiedModelTrainStack(Remote):
         """Lazily build the per-worker train-step profiler (None unless UNIRL_PROFILE)."""
         cached = getattr(self, "_profiler_cache", "unset")
         if cached == "unset":
-            from unirl.utils.profiling import maybe_build_train_profiler
+            from unirl.observability.profiling import maybe_build_train_profiler
 
             cached = maybe_build_train_profiler(int(getattr(self.fsdp_backend, "_rank", 0)))
             self._profiler_cache = cached
@@ -325,7 +325,7 @@ class UnifiedModelTrainStack(Remote):
 
         # Only UNIRL_PROFILE=train applies here (one-update lives in TrainStack._run_updates);
         # warn if one-update was set so it isn't silently ignored.
-        from unirl.utils.profiling import profile_scope
+        from unirl.observability.profiling import profile_scope
 
         scope = profile_scope()
         if scope == "one-update" and not getattr(self, "_warned_one_update", False):

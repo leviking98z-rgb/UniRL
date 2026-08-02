@@ -37,7 +37,7 @@ from unirl.types.primitives import Audios, Images, Texts, Videos, primitive_moda
 from unirl.types.sample_id import ancestor_id, child_id, parent_id
 from unirl.types.sampling import BaseSamplingParams
 from unirl.types.segments import Segment
-from unirl.utils.shard_balance import lpt_shard_permutation, shard_token_spread
+from unirl.types.sharding import lpt_shard_permutation, shard_token_spread
 
 logger = logging.getLogger(__name__)
 

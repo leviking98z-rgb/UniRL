@@ -20,7 +20,7 @@
 # validated numbers. The ALGORITHM block is the faithful, validated part.
 #
 # Data prep (one-time) — build the local jsonl from the raw DAPO-Math-17k dataset:
-#   python -m unirl.utils.prepare_dapo_math --out-dir data/dapo_math
+#   python -m unirl.data.prepare.dapo_math --out-dir data/dapo_math
 #   → data/dapo_math/{train.jsonl, aime_eval.jsonl}
 #
 # Run. The model defaults to the HF id `Qwen/Qwen3-30B-A3B-Base`; set QWEN3_PATH to a
