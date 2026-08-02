@@ -82,10 +82,7 @@ def check_run(
     steady_steps = steps[warmup:]
     expected = policy.get("expected_steps")
     if expected is not None and len(steady_steps) != int(expected):
-        raise ValueError(
-            f"unexpected steady-state step count: found={len(steady_steps)}, "
-            f"expected={int(expected)}"
-        )
+        raise ValueError(f"unexpected steady-state step count: found={len(steady_steps)}, expected={int(expected)}")
     if len(steady_steps) < minimum:
         raise ValueError(f"not enough steady-state steps: found={len(steady_steps)}, required={minimum}")
     if bool(policy.get("require_complete_run", True)) and not complete:

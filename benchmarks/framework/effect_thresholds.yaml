@@ -1,0 +1,29 @@
+{
+  "warmup_steps": 0,
+  "metrics": {
+    "perf/train_time_s": {
+      "reducer": "median",
+      "direction": "lower",
+      "min_effect_pct": 5.0,
+      "alpha": 0.05,
+      "min_replicates": 3,
+      "gating": true
+    },
+    "perf/step_time_s": {
+      "reducer": "median",
+      "direction": "lower",
+      "min_effect_pct": 5.0,
+      "alpha": 0.05,
+      "min_replicates": 3,
+      "gating": false
+    },
+    "perf/max_memory_allocated_gb": {
+      "reducer": "max",
+      "direction": "lower",
+      "min_effect_pct": 10.0,
+      "alpha": 0.05,
+      "min_replicates": 3,
+      "gating": false
+    }
+  }
+}
