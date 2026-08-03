@@ -56,6 +56,9 @@ bundle:
     autocast_precision: bf16
     trajectory_precision: fp16
     logprob_precision: fp32
+    # One step-major replay forward instead of one per SDE step; see
+    # hi3_vllmomni.yaml. Log-probs are unchanged, so the ratio stays exactly 1.
+    batch_replay_steps: true
     shift: 3.0
     guidance_scale: 1.0
 

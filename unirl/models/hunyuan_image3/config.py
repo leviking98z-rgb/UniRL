@@ -38,6 +38,9 @@ class HunyuanImage3PipelineConfig:
     autocast_precision: str = "bf16"
     trajectory_precision: str = "fp16"
     logprob_precision: str = "fp32"
+    # See HunyuanImage3DiffusionStage.batch_replay_steps; exposed here so
+    # non-trainside recipes can opt in via HunyuanImage3Pipeline.from_config.
+    batch_replay_steps: bool = False
 
     shift: float = 3.0
 

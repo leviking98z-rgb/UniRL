@@ -56,6 +56,12 @@ bundle:
     autocast_precision: bf16
     trajectory_precision: fp16
     logprob_precision: fp32
+    # Replay the selected SDE steps in ONE step-major transformer forward instead
+    # of one forward per step. With num_sde_steps=2 that removes one of the two
+    # serial replay forwards; the win scales with num_sde_steps. Log-probs are
+    # unchanged (verified equal to the serial path), so the on-policy ratio stays
+    # exactly 1. Set false for a serial-replay baseline.
+    batch_replay_steps: true
     shift: 3.0
     guidance_scale: 1.0
 
