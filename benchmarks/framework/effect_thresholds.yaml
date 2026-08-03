@@ -1,7 +1,7 @@
 {
   "warmup_steps": 0,
   "metrics": {
-    "perf/train_time_s": {
+    "perf/step_time_s": {
       "reducer": "median",
       "direction": "lower",
       "min_effect_pct": 5.0,
@@ -9,7 +9,23 @@
       "min_replicates": 3,
       "gating": true
     },
-    "perf/step_time_s": {
+    "perf/train_time_s": {
+      "reducer": "median",
+      "direction": "lower",
+      "min_effect_pct": 5.0,
+      "alpha": 0.05,
+      "min_replicates": 3,
+      "gating": false
+    },
+    "perf/ar_generate_time_s": {
+      "reducer": "median",
+      "direction": "lower",
+      "min_effect_pct": 5.0,
+      "alpha": 0.05,
+      "min_replicates": 3,
+      "gating": false
+    },
+    "perf/image_generate_time_s": {
       "reducer": "median",
       "direction": "lower",
       "min_effect_pct": 5.0,
@@ -24,6 +40,15 @@
       "alpha": 0.05,
       "min_replicates": 3,
       "gating": false
+    },
+    "rollout/image_reward_mean": {
+      "reducer": "mean",
+      "direction": "higher",
+      "min_effect_pct": 1.0,
+      "alpha": 0.05,
+      "min_replicates": 3,
+      "gating": true,
+      "role": "guard"
     }
   }
 }

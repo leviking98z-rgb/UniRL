@@ -25,13 +25,15 @@ batch_size: 4
 weight_sync_interval: 1
 
 # Stage-pipelined rollout. The AR engine owns GPUs 0-3 and the DiT engine 4-7, so
-# running the stages serially idles half the node for the whole rollout (measured:
-# 85.7s AR + 102.0s DiT, floor 102.0s -> ~27.7% of the step is idle-GPU time).
-# >1 splits the prompt batch into that many chunks so chunk i+1's AR overlaps
-# chunk i's DiT. 1 = the serial path, byte-identical. Chunks shrink each engine's
-# batch, so this only pays when the overlap beats the lost batch parallelism —
-# validate with benchmarks/framework/effect_size.py before raising it.
-rollout_pipeline_chunks: 1
+# running the stages serially idles half the node for the whole rollout. Splitting
+# the prompt batch into N chunks lets chunk i+1's AR overlap chunk i's DiT.
+# Validated default (2 chunks, 3 replicates per arm, 8xH20, same commit/host):
+#   step_time 302.6s -> 261.4s = -13.6% [CI -14.2%, -13.1%], p=7e-06
+#   reward guard held (+0.07%, CI spans zero) and train_time unchanged (-0.6%, ns)
+# Set to 1 for the serial baseline. Higher N shrinks each engine's batch, so it
+# only pays while the overlap beats the lost batch parallelism — re-validate with
+# benchmarks/framework/effect_size.py before raising it further.
+rollout_pipeline_chunks: 2
 
 # Intrusive debug dump (UnifiedModelTrainer._dump_rollout): per rollout, dump original
 # prompt + AR output text (the think/recaption fed into DiT) + decoded images +

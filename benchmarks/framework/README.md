@@ -117,6 +117,28 @@ delta, and accepts only when the CI's near side still clears
 - **A 20% point estimate whose CI spans zero is not a win.** This is what
   rejects the kind of single-run number that reads as a result and is not one.
 
+### Metric roles
+
+A policy metric plays one of three roles:
+
+| role | meaning | blocks acceptance when |
+|---|---|---|
+| `objective` (default when `gating: true`) | the thing being optimized | it regresses, is undetermined, or none improved |
+| `guard` | expected to stay FLAT | it regresses or is undetermined |
+| report (`gating: false`) | context only | never |
+
+Reward is a `guard`, not an objective — a speed change that moves reward is
+suspect, and demanding that reward *improve* would reject every honest speed
+optimization. Pick the objective to match what the change actually targets: a
+rollout-side optimization leaves `perf/train_time_s` flat by construction, so
+gating on train time would reject it. `perf/step_time_s` is end-to-end and is
+the default objective for that reason.
+
+Phase metrics that can overlap (`ar_generate`, `image_generate` under stage
+pipelining) are report-only: with concurrent phases each name accumulates the SUM
+of every thread's span, so a *rising* phase number alongside a *falling* step
+time is the signature of successful overlap, not a regression.
+
 Replicates are separate directories, never separate steps in one file: steps
 inside a run share caches, allocator state and a compile, so they are not
 independent samples of a config's speed. Runs are the replicate unit.

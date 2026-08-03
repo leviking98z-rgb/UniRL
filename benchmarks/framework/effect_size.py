@@ -420,10 +420,28 @@ def main() -> None:
 
     print(render_markdown(results))
 
-    gating = [r for r in results if bool(policy.get("metrics", {}).get(r.metric, {}).get("gating", True))]
-    regressions = [r for r in gating if r.verdict == "regression"]
-    undetermined = [r for r in gating if r.verdict == "undetermined"]
-    improvements = [r for r in gating if r.verdict == "improvement"]
+    # Two distinct roles, previously conflated under one "gating" flag:
+    #   role=objective — at least one must improve, or there is nothing to accept.
+    #   role=guard     — must not regress, but is EXPECTED to stay flat. Reward is
+    #                    the canonical guard: a speed change that moves reward is
+    #                    suspect, and requiring reward to IMPROVE would reject
+    #                    every honest speed optimization.
+    # Default role is "objective" when gating is on, so existing policies behave
+    # as before.
+    def role_of(metric: str) -> str:
+        rule = policy.get("metrics", {}).get(metric, {})
+        if not bool(rule.get("gating", True)):
+            return "report"
+        return str(rule.get("role", "objective"))
+
+    objectives = [r for r in results if role_of(r.metric) == "objective"]
+    guards = [r for r in results if role_of(r.metric) == "guard"]
+
+    regressions = [r for r in objectives + guards if r.verdict == "regression"]
+    # An undetermined GUARD is a real blocker (we cannot show it stayed flat);
+    # an undetermined objective means the win itself is unproven.
+    undetermined = [r for r in objectives + guards if r.verdict == "undetermined"]
+    improvements = [r for r in objectives if r.verdict == "improvement"]
     # Comparability blocks acceptance by default: an effect measured across two
     # commits or two hosts is not attributable to the knob under test, however
     # clean its statistics look.
@@ -434,6 +452,7 @@ def main() -> None:
     print(f"improvements={[r.metric for r in improvements]}")
     print(f"regressions={[r.metric for r in regressions]}")
     print(f"undetermined={[r.metric for r in undetermined]}")
+    print(f"guards_held={[r.metric for r in guards if r.verdict in ('neutral', 'improvement')]}")
     if blocked:
         print("BLOCKED: arms are not comparable (pass --allow-mismatched-arms to override)")
     print(f"ACCEPT={accepted}")
