@@ -198,6 +198,8 @@ class SFTTrainer(BaseTrainer):
         start_step = self.maybe_load_checkpoint(load_dir, num_rollouts=num_steps)
         self._load_data_state(load_dir, start_step)
         self._init_wandb(num_rollouts=num_steps)
+        loss_ema: Optional[float] = None
+        loss_ema_decay = 0.98
         try:
             if self.eval_interval > 0:
                 self.evaluate(step=-1)
@@ -207,6 +209,11 @@ class SFTTrainer(BaseTrainer):
                 records = self.data_source.get_samples(self.batch_size)
                 result = self.train_step(records, training_progress=training_progress)
                 dt = time.perf_counter() - t0
+                loss_ema = (
+                    float(result.loss)
+                    if loss_ema is None
+                    else loss_ema_decay * loss_ema + (1.0 - loss_ema_decay) * float(result.loss)
+                )
                 logger.info(
                     "step %d/%d  loss=%.5f grad_norm=%.4f lr=%.2e epoch=%.3f  %.1fs",
                     step + 1,
@@ -221,6 +228,7 @@ class SFTTrainer(BaseTrainer):
                     step + 1,
                     {
                         "train/loss": result.loss,
+                        "train/loss_ema_50": loss_ema,
                         "train/grad_norm": result.grad_norm,
                         "train/lr": result.lr,
                         "train/epoch": self.data_source.epoch,
