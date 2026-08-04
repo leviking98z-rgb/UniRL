@@ -1,0 +1,150 @@
+# @package _global_
+# SFT — WAN 2.1 T2V-1.3B flow-matching finetune on (caption, target video) pairs.
+#
+# The worker-side VideoDiffusionSupervisedTrackBuilder decodes each target MP4;
+# WANVideoLatentEncodeStage uniformly samples 17 frames, resizes to 256x448,
+# and VAE-encodes the clean x0 latent. FlowMatchSFT then trains the WAN
+# transformer with velocity MSE at a sampled sigma (shift=5.0, matching WAN).
+#
+# Env:
+#   PRETRAINED_MODEL  HF id or local checkpoint
+#   SFT_DATA          train manifest (.jsonl rows: {"prompt",
+#                     "media": [{"modality": "video", "role": "target", "uri": ...}]})
+#   SFT_EVAL_DATA     eval manifest (defaults to SFT_DATA — supply a real split!)
+#
+# Prepare a 512-video MSR-VTT smoke set:
+#   hf download friedrichor/MSR-VTT \
+#       msrvtt_train_7k.json msrvtt_test_1k.json MSRVTT_Videos.zip \
+#       --repo-type dataset \
+#       --local-dir /path/to/MSR-VTT
+#   unzip /path/to/MSR-VTT/MSRVTT_Videos.zip \
+#       -d /path/to/MSR-VTT/MSRVTT_Videos
+#   python -m unirl.utils.prepare_sft_t2v_msrvtt \
+#       --data-root /path/to/MSR-VTT --out-dir data/sft_msrvtt \
+#       --max-train-samples 512 --max-val-samples 64
+#
+# Launch:
+#   ENTRY=train_sft SFT_DATA=data/sft_msrvtt/train.jsonl \
+#   SFT_EVAL_DATA=data/sft_msrvtt/val.jsonl \
+#   bash examples/run_experiment_single_node.sh sft/wan21_t2v_sft
+
+num_devices: 8
+batch_size: 8
+num_steps: 300
+eval_interval: 20
+eval_batch_size: 8
+eval_num_samples: -1
+save_interval: 0
+save_mode: auto
+transport_kind: colocate_store
+workers_per_device: 1
+
+logging:
+  report_to_wandb: false
+  project_name: unirl-sft
+  run_name: wan21_t2v_sft_msrvtt
+  entity: null
+  tags: [sft, wan21, t2v, video, msrvtt]
+
+bundle:
+  _target_: unirl.models.wan21.bundle.WAN21Bundle.from_config
+  config:
+    _target_: unirl.models.wan21.config.WAN21PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Wan-AI/Wan2.1-T2V-1.3B-Diffusers}
+    model_precision: bf16
+    shift: 5.0
+    max_sequence_length: 512
+    load_vae: true
+
+pipeline:
+  _target_: unirl.models.wan21.pipeline.WAN21Pipeline
+  shift: 5.0
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+  max_sequence_length: 512
+  video_encode:
+    num_frames: 17
+    height: 256
+    width: 448
+    max_decode_frames: 256
+  strategy:
+    _target_: unirl.sde.kernels.FlowSDEStrategy
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["WanTransformerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    master_dtype: fp32
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: ${num_steps}
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 32
+    alpha: 64
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - attn1.to_q
+      - attn1.to_k
+      - attn1.to_v
+      - attn1.to_out.0
+      - attn2.to_q
+      - attn2.to_k
+      - attn2.to_v
+      - attn2.to_out.0
+
+algorithm:
+  _target_: unirl.algorithms.sft.FlowMatchSFT
+  stage_attr: diffusion
+  timestep_sampling: logit_normal
+  timestep_shift: 5.0
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.wan21.conditions.WAN21Conditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+
+track_builder:
+  _target_: unirl.train.sft.track_builder.VideoDiffusionSupervisedTrackBuilder
+  guidance_scale: 1.0
+
+data_source:
+  _target_: unirl.data.sft.SupervisedDataSource
+  manifest_path: ${oc.env:SFT_DATA}
+  eval_manifest_path: ${oc.env:SFT_EVAL_DATA,${oc.env:SFT_DATA}}
+  seed: 42
+
+# FlowMatchSFT only reads guidance_scale; the geometry mirrors the VAE encoder
+# and is useful when running post-training samples with this same checkpoint.
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 14
+  guidance_scale: 1.0
+  height: 256
+  width: 448
+  num_frames: 17
