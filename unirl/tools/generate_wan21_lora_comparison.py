@@ -166,6 +166,12 @@ def main() -> None:
     parser.add_argument("--adapter", default="default")
     parser.add_argument("--adapter-scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed-stride",
+        type=int,
+        default=0,
+        help="increment the seed by this amount per prompt; default 0 keeps every prompt on the same seed",
+    )
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=832)
     parser.add_argument("--num-frames", type=int, default=49)
@@ -221,7 +227,8 @@ def main() -> None:
     }
     for index, prompt in enumerate(prompts):
         slug = _slug(prompt, index)
-        generator = torch.Generator(device="cpu").manual_seed(args.seed + index)
+        prompt_seed = args.seed + index * args.seed_stride
+        generator = torch.Generator(device="cpu").manual_seed(prompt_seed)
         latents = pipe.prepare_latents(
             batch_size=1,
             num_channels_latents=int(pipe.transformer.config.in_channels),
@@ -257,6 +264,7 @@ def main() -> None:
         manifest["prompts"].append(
             {
                 "prompt": prompt,
+                "seed": prompt_seed,
                 "base": os.path.basename(base_path),
                 "lora": os.path.basename(lora_path),
                 "comparison": os.path.basename(comparison_path),
