@@ -201,7 +201,7 @@ def main() -> None:
         "task_type": str(recorded.get("task_type", "FEATURE_EXTRACTION")),
     }
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
-    pipe = WanPipeline.from_pretrained(args.base, dtype=dtype)
+    pipe = WanPipeline.from_pretrained(args.base, torch_dtype=dtype)
     pipe.load_lora_weights(lora_state, adapter_name="unirl", low_cpu_mem_usage=True)
     pipe.set_adapters("unirl", adapter_weights=float(args.adapter_scale))
     if args.cpu_offload:
