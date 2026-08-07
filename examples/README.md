@@ -68,6 +68,35 @@ trainers; the hi3 meta-init recipe is not yet supported) — the full
 train → resume → export → upload lifecycle is in
 [Checkpointing](../unirl/trainer/README.md#checkpointing).
 
+## WAN2.1 target-video SFT showcases
+
+The WAN2.1 SFT path supports both adapter and full-transformer training from
+caption/target-video manifests:
+
+- [`sft/wan21_t2v_sft`](sft/wan21_t2v_sft.yaml): general-purpose LoRA recipe,
+  demonstrated on MSR-VTT.
+- [`sft/wan21_t2v_ucf101_full`](sft/wan21_t2v_ucf101_full.yaml): full
+  transformer finetuning on an 18-class UCF-101 sports/action subset.
+
+The UCF-101 run used 2,367 training videos and 128 held-out videos, 17 frames at
+256x448, global batch 8, learning rate `2e-6`, and 300 optimizer steps on one
+8xH20 node. Deterministic held-out eval loss improved from `0.21981` at initialization
+to a best `0.16230` at step 260 (-26.2%), finishing at `0.16264` at step 300.
+The matched-seed samples below compare the untouched WAN2.1 base model with the
+step-300 full checkpoint at START / MIDDLE / END.
+
+<p align="center">
+  <img src="../assets/wan21_ucf101_full/00-archery-base-vs-full300.jpg" alt="WAN2.1 Base vs UCF-101 Full SFT: archery" width="900"><br>
+  <img src="../assets/wan21_ucf101_full/01-surfing-base-vs-full300.jpg" alt="WAN2.1 Base vs UCF-101 Full SFT: surfing" width="900"><br>
+  <img src="../assets/wan21_ucf101_full/02-basketballdunk-base-vs-full300.jpg" alt="WAN2.1 Base vs UCF-101 Full SFT: basketball dunk" width="900"><br>
+  <img src="../assets/wan21_ucf101_full/03-horseriding-base-vs-full300.jpg" alt="WAN2.1 Base vs UCF-101 Full SFT: horse riding" width="900"><br>
+  <img src="../assets/wan21_ucf101_full/04-diving-base-vs-full300.jpg" alt="WAN2.1 Base vs UCF-101 Full SFT: diving" width="900">
+</p>
+
+These are qualitative distribution-adaptation examples, not reconstruction
+claims. The two rows use the same prompt and seed; the generated clips are not
+held-out source videos.
+
 ## Reading a recipe name
 
 A recipe filename is a fixed-order, `_`-joined chain of segments. Every segment
