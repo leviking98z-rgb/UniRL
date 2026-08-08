@@ -1,0 +1,31 @@
+{
+  "kind": "checkpoint-grid",
+  "output": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-step300-vs-step1000.jpg",
+  "steps": [
+    "300",
+    "1000"
+  ],
+  "subjects": [
+    "ARCHERY",
+    "SURFING",
+    "BASKETBALL DUNK",
+    "HORSE RIDING",
+    "DIVING"
+  ],
+  "size": [
+    2725,
+    304
+  ],
+  "cells": {
+    "300:ARCHERY": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step300-sheets/00-archery-self-forcing-step100.jpg",
+    "300:SURFING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step300-sheets/01-surfing-self-forcing-step100.jpg",
+    "300:BASKETBALL DUNK": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step300-sheets/02-basketballdunk-self-forcing-step100.jpg",
+    "300:HORSE RIDING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step300-sheets/03-horseriding-self-forcing-step100.jpg",
+    "300:DIVING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step300-sheets/04-diving-self-forcing-step100.jpg",
+    "1000:ARCHERY": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/00-archery-self-forcing-step1000.jpg",
+    "1000:SURFING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/01-surfing-self-forcing-step1000.jpg",
+    "1000:BASKETBALL DUNK": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/02-basketballdunk-self-forcing-step1000.jpg",
+    "1000:HORSE RIDING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/03-horseriding-self-forcing-step1000.jpg",
+    "1000:DIVING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/04-diving-self-forcing-step1000.jpg"
+  }
+}

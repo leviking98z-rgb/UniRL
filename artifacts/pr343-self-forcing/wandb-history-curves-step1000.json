@@ -1,0 +1,51 @@
+{
+  "kind": "wandb-history-curves",
+  "input": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/self-forcing-v2-step1000-wandb.json",
+  "output": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/self-forcing-v2-step1000-wandb-curves.png",
+  "source_run_id": "u2sw12d0",
+  "x_key": "train/step",
+  "smoothing": 0.75,
+  "identity_fields_in_image": [],
+  "metrics": {
+    "train/generator_loss": {
+      "count": 1000,
+      "first": 0.052272605476900935,
+      "final": 0.06803946243599057,
+      "min": 0.047578436555340886,
+      "max": 0.08349314611405134,
+      "mean": 0.06574707265413599
+    },
+    "train/fake_score_loss": {
+      "count": 1000,
+      "first": 0.18004541099071503,
+      "final": 0.11683251950889825,
+      "min": 0.06579666137695313,
+      "max": 0.21546707535162568,
+      "mean": 0.12441096591311507
+    },
+    "train/generator_grad_norm": {
+      "count": 1000,
+      "first": 0.2409815639257431,
+      "final": 0.43436747789382935,
+      "min": 0.10343444347381592,
+      "max": 1.1442757844924927,
+      "mean": 0.3471957677155733
+    },
+    "train/fake_score_grad_norm": {
+      "count": 1000,
+      "first": 1.3280522346496582,
+      "final": 0.5400272816419601,
+      "min": 0.21982542276382447,
+      "max": 2.8710237979888915,
+      "mean": 0.6355873302415014
+    },
+    "train/generator/real_fake_x0_gap": {
+      "count": 1000,
+      "first": 0.1117359388154,
+      "final": 0.11957849841564894,
+      "min": 0.04464969411492348,
+      "max": 0.2290201741270721,
+      "mean": 0.10635017203586176
+    }
+  }
+}
