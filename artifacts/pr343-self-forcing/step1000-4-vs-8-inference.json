@@ -1,0 +1,31 @@
+{
+  "kind": "checkpoint-grid",
+  "output": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-step1000-4-vs-8.jpg",
+  "steps": [
+    "4",
+    "8"
+  ],
+  "subjects": [
+    "ARCHERY",
+    "SURFING",
+    "BASKETBALL DUNK",
+    "HORSE RIDING",
+    "DIVING"
+  ],
+  "size": [
+    2725,
+    304
+  ],
+  "cells": {
+    "4:ARCHERY": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/00-archery-self-forcing-step1000.jpg",
+    "4:SURFING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/01-surfing-self-forcing-step1000.jpg",
+    "4:BASKETBALL DUNK": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/02-basketballdunk-self-forcing-step1000.jpg",
+    "4:HORSE RIDING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/03-horseriding-self-forcing-step1000.jpg",
+    "4:DIVING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-v2-step1000-sheets/04-diving-self-forcing-step1000.jpg",
+    "8:ARCHERY": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-step1000-8step-sheets/00-archery-self-forcing-step1000-8step.jpg",
+    "8:SURFING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-step1000-8step-sheets/01-surfing-self-forcing-step1000-8step.jpg",
+    "8:BASKETBALL DUNK": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-step1000-8step-sheets/02-basketballdunk-self-forcing-step1000-8step.jpg",
+    "8:HORSE RIDING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-step1000-8step-sheets/03-horseriding-self-forcing-step1000-8step.jpg",
+    "8:DIVING": "/apdcephfs_fsgm3/share_305110755/hunyuan/jinlw/.clusters/.tmp/pr343-self-forcing-step1000-8step-sheets/04-diving-self-forcing-step1000-8step.jpg"
+  }
+}
