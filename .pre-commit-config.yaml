@@ -53,6 +53,15 @@ repos:
         language: python
         pass_filenames: false
         files: \.(ya?ml|py)$
+      # Canonical composed recipes are a reviewed finite set. Resolve those
+      # entries in CI without expanding every internal overlay combination.
+      - id: check-canonical-recipes
+        name: canonical recipes compose and resolve
+        entry: python lint/check_canonical_recipes.py
+        language: python
+        additional_dependencies: ["hydra-core==1.3.2"]
+        pass_filenames: false
+        files: ^(examples/diffusion/.*\.ya?ml|lint/check_canonical_recipes\.py|\.pre-commit-config\.yaml)$
       # Experimental-tier boundaries: core never imports experimental,
       # packages never import each other, requirements stay additive-only.
       - id: check-experimental-boundaries

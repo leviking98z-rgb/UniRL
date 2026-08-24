@@ -1,0 +1,14 @@
+# @package _global_
+# DanceGRPO swaps the SDE kernel while retaining the FlowGRPO schedule.
+
+pipeline:
+  strategy:
+    _target_: unirl.sde.kernels.DanceSDEStrategy
+
+sampling:
+  init_same_noise: false
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: null
