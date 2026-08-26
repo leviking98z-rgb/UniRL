@@ -211,6 +211,7 @@ class MiniMaxH3DiffusionStage(DiffusionStage[MiniMaxH3Conditions]):
         sde_sorted = sorted(sde_indices) if sde_indices is not None else list(range(num_steps))
         sde_set = set(sde_sorted)
         needed = set(compute_trajectory_positions(sde_sorted, num_steps))
+        needed.add(num_steps)
 
         stored_pairs: List[Tuple[int, torch.Tensor]] = []
         stored_audio: List[torch.Tensor] = []
