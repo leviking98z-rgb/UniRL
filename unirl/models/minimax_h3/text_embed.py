@@ -120,16 +120,28 @@ class MiniMaxH3TextEmbedStage:
             if prompt in self._cache:
                 self._cache.move_to_end(prompt)
         self._synchronize_embedding_ranks()
+        elapsed_s = time.perf_counter() - started
         log_embed_timing = str(os.environ.get("UNIRL_MINIMAX_H3_LOG_EMBED_TIMING", "")).strip().lower()
-        log_fn = logger.info if log_embed_timing in {"1", "true", "yes", "on"} else logger.debug
-        log_fn(
-            "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f",
-            len(prompts),
-            len(unique_prompts) - len(missing),
-            len(missing),
-            self._onload_for_embed,
-            time.perf_counter() - started,
-        )
+        if log_embed_timing in {"1", "true", "yes", "on"}:
+            import torch.distributed as dist
+
+            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+            print(
+                "H3_EMBED_TIMING "
+                f"rank={rank} prompts={len(prompts)} "
+                f"cache_hits={len(unique_prompts) - len(missing)} misses={len(missing)} "
+                f"onload={self._onload_for_embed} elapsed_s={elapsed_s:.3f}",
+                flush=True,
+            )
+        else:
+            logger.debug(
+                "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f",
+                len(prompts),
+                len(unique_prompts) - len(missing),
+                len(missing),
+                self._onload_for_embed,
+                elapsed_s,
+            )
         embeds = [resolved[prompt].to(device=self.device, dtype=self.dtype) for prompt in prompts]
 
         lengths = {int(e.shape[1]) for e in embeds}
