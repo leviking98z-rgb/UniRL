@@ -1,0 +1,28 @@
+# @package _global_
+# MiniMax-H3 systems/ROI harness — two H20 nodes, 8-way shard groups.
+#
+# This is the weak-scaling counterpart of minimax_h3_t2va_roi_warm_cache:
+# each node owns one eight-rank HSDP replica, so batch size grows from 8 to 16
+# while the per-rank workload stays fixed.  Use a pre-populated, read-only
+# prompt_embedding_cache_dir when measuring distributed scaling; otherwise the
+# 32B frozen conditioner dominates the short systems run.
+
+defaults:
+  - minimax_h3_t2va_roi_warm_cache
+  - _self_
+
+num_devices: 16
+batch_size: 16
+num_rollouts: 3
+
+logging:
+  tags: [minimax-h3, roi, systems, trainside, hsdp, 2x8, warm-cache]
+
+bundle:
+  config:
+    text_encoder_onload_for_embed: false
+
+backend:
+  fsdp_cfg:
+    fsdp_mode: hybrid
+    hsdp_shard_size: 8
