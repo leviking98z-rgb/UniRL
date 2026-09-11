@@ -72,6 +72,10 @@ in `backend/base.py`; a multi-update-capable algorithm sets
   away (the policy drifts into a degenerate reward-hack). An fp32-loaded model gets an
   fp32 master for free; a bf16 load needs `master_dtype: fp32` set explicitly. The
   ctor never warns.
+- **Torch 2.7.0/2.7.1 FSDP2 rejects a valid fp32 adapter master beside a frozen
+  bf16 base at first forward** — `backend/fsdp/compat.py` carries the exact
+  fail-closed backport of PyTorch #154103. Delete it when Torch 2.7 support is
+  dropped; Torch 2.8 and newer already contain the upstream fix.
 - **The EP fused-expert layout registry is keyed by `config.model_type`, never by
   parameter-name suffix** (`backend/veomni/ep/experts.py`). HunyuanImage3's fused
   params end in `.experts.down_proj` too, but its `gate_and_up` halves are stored

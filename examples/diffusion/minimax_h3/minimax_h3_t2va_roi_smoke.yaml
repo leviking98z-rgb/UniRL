@@ -37,14 +37,6 @@ reward:
 stack:
   num_updates_per_batch: 1
 
-backend:
-  fsdp_cfg:
-    # This harness runs at lr=0 and measures systems cost, not optimizer
-    # numerics. Torch 2.7 FSDP2 requires every parameter in a wrapped block to
-    # have one original dtype; the production fp32 LoRA master mixed with the
-    # bf16 frozen base trips that assertion before the first forward.
-    master_dtype: bf16
-
 sampling:
   num_inference_steps: 2
   sde_indices: [0]

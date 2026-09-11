@@ -64,6 +64,10 @@ def fsdp_wrap(
     root_wrap: bool = True,
 ) -> None:
     """Apply FSDP2 wrapping to the model.  No handle returned — DTensors"""
+    from unirl.train.backend.fsdp.compat import install_torch27_mixed_dtype_no_grad_compat
+
+    install_torch27_mixed_dtype_no_grad_compat()
+
     from torch.distributed.fsdp import (
         CPUOffloadPolicy,
         FSDPModule,
