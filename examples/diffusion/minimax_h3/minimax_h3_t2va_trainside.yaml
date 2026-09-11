@@ -58,6 +58,12 @@ bundle:
     # are embedded once per rollout (measured: 0.8s on CPU), so the transfer
     # cost is negligible against a 22k-row denoising loop.
     aux_components_on_cpu: true
+    # Optional persistent CPU cache for the frozen conditioner's layer-50
+    # outputs. Leave null for the historical in-process-only LRU behavior.
+    # A shared cache turns repeated prompts in later worker processes/runs into
+    # disk hits and avoids re-running the 32B Qwen3-VL conditioner.
+    prompt_embedding_cache_dir: null
+    prompt_embedding_cache_read_only: false
     # The VAEs stay on the train device. They are only ~10 GB fp32 together
     # against a 7.75 GB/rank DiT shard, and decoding 124 frames of 768x768 on
     # CPU takes MINUTES per sample — it would dominate a rollout that spends
