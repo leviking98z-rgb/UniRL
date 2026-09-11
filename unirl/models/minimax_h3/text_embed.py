@@ -120,7 +120,9 @@ class MiniMaxH3TextEmbedStage:
             if prompt in self._cache:
                 self._cache.move_to_end(prompt)
         self._synchronize_embedding_ranks()
-        logger.debug(
+        log_embed_timing = str(os.environ.get("UNIRL_MINIMAX_H3_LOG_EMBED_TIMING", "")).strip().lower()
+        log_fn = logger.info if log_embed_timing in {"1", "true", "yes", "on"} else logger.debug
+        log_fn(
             "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f",
             len(prompts),
             len(unique_prompts) - len(missing),
