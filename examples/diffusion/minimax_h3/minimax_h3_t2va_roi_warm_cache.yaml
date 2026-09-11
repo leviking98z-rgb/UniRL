@@ -1,0 +1,17 @@
+# @package _global_
+
+defaults:
+  - minimax_h3_t2va_roi_smoke_onload
+  - _self_
+
+num_rollouts: 3
+
+data_source:
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH}
+      shuffle: false
+
+logging:
+  run_name: ${oc.env:WANDB_RUN_NAME,minimax-h3-roi-warm-cache}
+  tags: [minimax-h3, roi, systems, trainside, conditioner-onload, warm-cache]

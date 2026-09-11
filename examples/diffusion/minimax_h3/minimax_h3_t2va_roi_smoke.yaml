@@ -1,0 +1,38 @@
+# @package _global_
+# Short MiniMax-H3 systems benchmark derived from the validated trainside recipe.
+#
+# Keeps the checkpoint-valid 768x768x124 geometry and one replay transition,
+# but replaces the external reward models with a deterministic no-load scorer.
+# This isolates model/conditioner/decode/train systems costs.
+
+defaults:
+  - minimax_h3_t2va_trainside
+  - _self_
+
+num_devices: 8
+batch_size: 8
+num_rollouts: 1
+
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-minimax-h3-roi}
+  run_name: ${oc.env:WANDB_RUN_NAME,minimax-h3-roi-smoke}
+  tags: [minimax-h3, roi, systems, trainside]
+  log_media: false
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.constant.ConstantVideoRewardScorer
+    base_device: cpu
+    config:
+      _target_: unirl.reward.local.constant.ConstantVideoRewardSpec
+      value: 0.0
+
+stack:
+  num_updates_per_batch: 1
+
+sampling:
+  num_inference_steps: 2
+  sde_indices: [0]
+  samples_per_prompt: 1

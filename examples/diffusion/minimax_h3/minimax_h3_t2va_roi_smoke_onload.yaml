@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - minimax_h3_t2va_roi_smoke
+  - _self_
+
+bundle:
+  config:
+    text_encoder_onload_for_embed: true
+
+logging:
+  run_name: ${oc.env:WANDB_RUN_NAME,minimax-h3-roi-smoke-onload}
+  tags: [minimax-h3, roi, systems, trainside, conditioner-onload]
