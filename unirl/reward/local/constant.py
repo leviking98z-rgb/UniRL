@@ -34,6 +34,11 @@ class ConstantVideoRewardScorer(RewardBackend):
 @dataclass
 class ConstantVideoRewardSpec(BaseRewardComponentSpec):
     value: float = 0.0
+    # The systems benchmark overrides a production composite reward in-place.
+    # Hydra merges mappings recursively, so retain nullable compatibility
+    # fields after the benchmark config clears the inherited mappings.
+    weights: object | None = None
+    scorers: object | None = None
 
 
 __all__ = ["ConstantVideoRewardScorer", "ConstantVideoRewardSpec"]

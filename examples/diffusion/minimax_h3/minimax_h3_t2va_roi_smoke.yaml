@@ -27,6 +27,11 @@ reward:
     base_device: cpu
     config:
       _target_: unirl.reward.local.constant.ConstantVideoRewardSpec
+      # Clear the composite reward fields inherited from the production
+      # recipe.  Setting them to null replaces the nested mappings, so Hydra's
+      # remote resolver does not instantiate the heavyweight scorers.
+      weights: null
+      scorers: null
       value: 0.0
 
 stack:
