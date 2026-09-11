@@ -58,6 +58,24 @@ def _serialize_node_residency() -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+@cache
+def _conditioner_compute_lock_path() -> str:
+    """Return the per-user node-local conditioner compute lock path."""
+    digest = hashlib.sha256(f"{os.getuid()}:minimax-h3-conditioner-compute".encode()).hexdigest()[:16]
+    return os.path.join(tempfile.gettempdir(), f"unirl_minimax_h3_compute_{digest}.lock")
+
+
+@contextmanager
+def _serialize_node_conditioner_compute() -> Iterator[None]:
+    """Admit one rank at a time to a CPU or GPU conditioner forward on this node."""
+    with open(_conditioner_compute_lock_path(), "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class MiniMaxH3TextEmbedStage:
     """Encode prompts into the conditioning MiniMax-H3 was trained on."""
 
@@ -208,37 +226,37 @@ class MiniMaxH3TextEmbedStage:
 
         cache_dir = self._require_disk_cache_dir()
         os.makedirs(cache_dir, exist_ok=True)
-        with ExitStack() as locks:
-            locked = []
+        with _serialize_node_conditioner_compute(), ExitStack() as residency:
+            residency_entered = False
+            encoder_device = self._encoder_device
             for entry_prompts, token_ids, path in sorted(pending, key=lambda entry: entry[2]):
-                locks.enter_context(self._disk_cache_lock(path))
-                cached = self._load_disk_cache(path, token_ids)
-                if cached is None:
-                    locked.append((entry_prompts, token_ids, path))
-                    continue
-                disk_hits += len(entry_prompts)
-                for prompt in entry_prompts:
-                    self._remember(prompt, cached, resolved)
-            if locked:
-                misses = len(locked)
-                with self._embedding_residency():
-                    encoder_device = self._encoder_device
-                    for entry_prompts, token_ids, path in locked:
-                        cached = (
-                            self._encode_prompt(entry_prompts[0], encoder_device, token_ids=token_ids)
-                            .detach()
-                            .to("cpu")
-                            .contiguous()
-                        )
-                        self._validate_cached_tensor(cached, token_ids)
-                        self._write_disk_cache(path, cached)
+                with self._disk_cache_lock(path):
+                    cached = self._load_disk_cache(path, token_ids)
+                    if cached is not None:
+                        disk_hits += len(entry_prompts)
                         for prompt in entry_prompts:
                             self._remember(prompt, cached, resolved)
+                        continue
+                    if not residency_entered:
+                        residency.enter_context(self._embedding_residency())
+                        residency_entered = True
+                        encoder_device = self._encoder_device
+                    cached = (
+                        self._encode_prompt(entry_prompts[0], encoder_device, token_ids=token_ids)
+                        .detach()
+                        .to("cpu")
+                        .contiguous()
+                    )
+                    self._validate_cached_tensor(cached, token_ids)
+                    self._write_disk_cache(path, cached)
+                    misses += 1
+                    for prompt in entry_prompts:
+                        self._remember(prompt, cached, resolved)
         return disk_hits, misses
 
     def _encode_missing(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> None:
         """Encode missing prompts together under one conditioner residency window."""
-        with self._embedding_residency():
+        with _serialize_node_conditioner_compute(), self._embedding_residency():
             encoder_device = self._encoder_device
             for prompt in prompts:
                 cached = self._encode_prompt(prompt, encoder_device).detach().to("cpu").contiguous()
