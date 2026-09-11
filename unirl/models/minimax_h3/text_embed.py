@@ -12,7 +12,7 @@ from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from functools import cache
-from typing import TYPE_CHECKING, Iterator, List
+from typing import TYPE_CHECKING, Iterator, List, Sequence
 
 import torch
 
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _EMBED_SYNC_TIMEOUT = timedelta(minutes=30)
+_DISK_CACHE_SCHEMA = "unirl:minimax-h3:qwen3-vl:text-embedding:v1"
 # One entry is [1, tokens, hidden] in the encoder's own dtype — a few MB for a
 # typical prompt, so this bounds the CPU-resident cache at a few hundred MB.
 _PROMPT_CACHE_SIZE = 64
@@ -69,6 +70,16 @@ class MiniMaxH3TextEmbedStage:
         self.vae = bundle.vae
         self.audio_vae = bundle.audio_vae
         self._onload_for_embed = bundle.text_encoder_onload_for_embed
+        cache_dir = getattr(bundle, "prompt_embedding_cache_dir", None)
+        self._disk_cache_dir = (
+            os.path.abspath(os.path.expanduser(os.fspath(cache_dir))) if cache_dir is not None else None
+        )
+        self._disk_cache_read_only = bool(getattr(bundle, "prompt_embedding_cache_read_only", False))
+        self._checkpoint_identity = str(getattr(bundle, "text_encoder_checkpoint_identity", bundle.pretrained_path))
+        self._text_encoder_dtype = getattr(bundle, "text_encoder_dtype", None)
+        if self._text_encoder_dtype is None:
+            self._text_encoder_dtype = next(self.text_encoder.parameters()).dtype
+        self._expected_hidden_size = self._resolve_hidden_size()
         # The encoder is frozen and prompt-only. Trainside forward_batch_size=1
         # invokes pipeline.generate once per sibling sample, so cache on CPU to
         # avoid repeating a 32B conditioner forward for the same prompt.
@@ -105,17 +116,15 @@ class MiniMaxH3TextEmbedStage:
         self._ensure_embedding_sync_group()
         unique_prompts = list(dict.fromkeys(prompts))
         resolved = {prompt: self._cache[prompt] for prompt in unique_prompts if prompt in self._cache}
+        memory_hits = len(resolved)
         missing = [prompt for prompt in unique_prompts if prompt not in resolved]
+        disk_hits = 0
+        misses = len(missing)
         started = time.perf_counter()
-        if missing:
-            with self._embedding_residency():
-                encoder_device = self._encoder_device
-                for prompt in missing:
-                    cached = self._encode_prompt(prompt, encoder_device).detach().to("cpu").contiguous()
-                    resolved[prompt] = cached
-                    self._cache[prompt] = cached
-                    if len(self._cache) > _PROMPT_CACHE_SIZE:
-                        self._cache.popitem(last=False)
+        if missing and self._disk_cache_dir is not None:
+            disk_hits, misses = self._resolve_with_disk_cache(missing, resolved)
+        elif missing:
+            self._encode_missing(missing, resolved)
         for prompt in unique_prompts:
             if prompt in self._cache:
                 self._cache.move_to_end(prompt)
@@ -129,18 +138,22 @@ class MiniMaxH3TextEmbedStage:
             print(
                 "H3_EMBED_TIMING "
                 f"rank={rank} prompts={len(prompts)} "
-                f"cache_hits={len(unique_prompts) - len(missing)} misses={len(missing)} "
+                f"cache_hits={memory_hits + disk_hits} misses={misses} "
+                f"memory_hits={memory_hits} disk_hits={disk_hits} "
                 f"onload={self._onload_for_embed} elapsed_s={elapsed_s:.3f}",
                 flush=True,
             )
         else:
             logger.debug(
-                "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f",
+                "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f "
+                "memory_hits=%d disk_hits=%d",
                 len(prompts),
-                len(unique_prompts) - len(missing),
-                len(missing),
+                memory_hits + disk_hits,
+                misses,
                 self._onload_for_embed,
                 elapsed_s,
+                memory_hits,
+                disk_hits,
             )
         embeds = [resolved[prompt].to(device=self.device, dtype=self.dtype) for prompt in prompts]
 
@@ -156,6 +169,208 @@ class MiniMaxH3TextEmbedStage:
             embeds=text_embeds,
             attn_mask=torch.ones(text_embeds.shape[:2], dtype=torch.bool, device=text_embeds.device),
         )
+
+    def _resolve_with_disk_cache(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> tuple[int, int]:
+        """Resolve RAM misses from disk and encode only entries absent under lock."""
+        entries_by_key: OrderedDict[str, tuple[list[str], list[int], str]] = OrderedDict()
+        for prompt in prompts:
+            token_ids = self._tokenize(prompt)
+            key = self._disk_cache_key(token_ids)
+            if key in entries_by_key:
+                entries_by_key[key][0].append(prompt)
+            else:
+                entries_by_key[key] = ([prompt], token_ids, self._disk_cache_path(key))
+
+        disk_hits = 0
+        misses = 0
+        pending = []
+        for entry_prompts, token_ids, path in entries_by_key.values():
+            cached = self._load_disk_cache(path, token_ids, warn_on_corruption=False)
+            if cached is None:
+                pending.append((entry_prompts, token_ids, path))
+                continue
+            disk_hits += len(entry_prompts)
+            for prompt in entry_prompts:
+                self._remember(prompt, cached, resolved)
+        if not pending:
+            return disk_hits, misses
+
+        if self._disk_cache_read_only:
+            corrupt = None
+            for _, token_ids, path in pending:
+                if os.path.exists(path):
+                    corrupt = (path, token_ids)
+                    break
+            if corrupt is not None:
+                self._load_disk_cache(corrupt[0], corrupt[1])
+            missing_paths = ", ".join(path for _, _, path in pending)
+            raise FileNotFoundError(f"MiniMax-H3 read-only prompt embedding cache miss: {missing_paths}")
+
+        cache_dir = self._require_disk_cache_dir()
+        os.makedirs(cache_dir, exist_ok=True)
+        with ExitStack() as locks:
+            locked = []
+            for entry_prompts, token_ids, path in sorted(pending, key=lambda entry: entry[2]):
+                locks.enter_context(self._disk_cache_lock(path))
+                cached = self._load_disk_cache(path, token_ids)
+                if cached is None:
+                    locked.append((entry_prompts, token_ids, path))
+                    continue
+                disk_hits += len(entry_prompts)
+                for prompt in entry_prompts:
+                    self._remember(prompt, cached, resolved)
+            if locked:
+                misses = len(locked)
+                with self._embedding_residency():
+                    encoder_device = self._encoder_device
+                    for entry_prompts, token_ids, path in locked:
+                        cached = (
+                            self._encode_prompt(entry_prompts[0], encoder_device, token_ids=token_ids)
+                            .detach()
+                            .to("cpu")
+                            .contiguous()
+                        )
+                        self._validate_cached_tensor(cached, token_ids)
+                        self._write_disk_cache(path, cached)
+                        for prompt in entry_prompts:
+                            self._remember(prompt, cached, resolved)
+        return disk_hits, misses
+
+    def _encode_missing(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> None:
+        """Encode missing prompts together under one conditioner residency window."""
+        with self._embedding_residency():
+            encoder_device = self._encoder_device
+            for prompt in prompts:
+                cached = self._encode_prompt(prompt, encoder_device).detach().to("cpu").contiguous()
+                self._remember(prompt, cached, resolved)
+
+    def _remember(
+        self,
+        prompt: str,
+        cached: torch.Tensor,
+        resolved: dict[str, torch.Tensor],
+    ) -> None:
+        """Store one CPU embedding in the resolved batch and rank-local LRU."""
+        resolved[prompt] = cached
+        self._cache[prompt] = cached
+        self._cache.move_to_end(prompt)
+        if len(self._cache) > _PROMPT_CACHE_SIZE:
+            self._cache.popitem(last=False)
+
+    def _tokenize(self, prompt: str) -> list[int]:
+        """Return the input IDs that define one cache entry."""
+        return list(self.tokenizer(prompt, add_special_tokens=False)["input_ids"])
+
+    def _disk_cache_key(self, token_ids: Sequence[int]) -> str:
+        """Hash checkpoint, layer, dtype, and tokenizer input IDs."""
+        digest = hashlib.sha256()
+        for value in (
+            _DISK_CACHE_SCHEMA,
+            self._checkpoint_identity,
+            str(MINIMAX_H3_TEXT_ENCODER_LAYER),
+            str(self._encoder_dtype),
+        ):
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+        digest.update(len(token_ids).to_bytes(8, "big"))
+        for token_id in token_ids:
+            digest.update(int(token_id).to_bytes(8, "big", signed=True))
+        return digest.hexdigest()
+
+    @property
+    def _encoder_dtype(self) -> torch.dtype:
+        return self._text_encoder_dtype
+
+    def _resolve_hidden_size(self) -> int | None:
+        """Return the conditioner's expected hidden width when configured."""
+        config = getattr(self.text_encoder, "config", None)
+        text_config = getattr(config, "text_config", None)
+        for source in (text_config, config):
+            hidden_size = getattr(source, "hidden_size", None)
+            if hidden_size is not None:
+                return int(hidden_size)
+        return None
+
+    def _disk_cache_path(self, key: str) -> str:
+        """Return a sharded cache path for one prompt key."""
+        return os.path.join(self._require_disk_cache_dir(), key[:2], f"{key}.pt")
+
+    def _require_disk_cache_dir(self) -> str:
+        """Return the configured disk cache directory."""
+        require(self._disk_cache_dir is not None, "MiniMax-H3 prompt embedding cache directory is not configured")
+        return self._disk_cache_dir
+
+    def _load_disk_cache(
+        self,
+        path: str,
+        token_ids: Sequence[int],
+        *,
+        warn_on_corruption: bool = True,
+    ) -> torch.Tensor | None:
+        """Load and validate one CPU cache tensor."""
+        try:
+            cached = torch.load(path, map_location="cpu", weights_only=True)
+            self._validate_cached_tensor(cached, token_ids)
+            return cached.contiguous()
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            if self._disk_cache_read_only:
+                raise RuntimeError(f"MiniMax-H3 prompt embedding cache entry is unreadable: {path}") from exc
+            if warn_on_corruption:
+                logger.warning("Ignoring corrupt MiniMax-H3 prompt embedding cache entry %s: %s", path, exc)
+            return None
+
+    def _validate_cached_tensor(self, cached: object, token_ids: Sequence[int]) -> None:
+        """Validate the shape, placement, and dtype of one cached embedding."""
+        require(isinstance(cached, torch.Tensor), "cached value is not a tensor")
+        require(cached.device.type == "cpu", f"cached tensor is on {cached.device}, expected CPU")
+        require(
+            cached.dtype == self._encoder_dtype,
+            f"cached tensor dtype is {cached.dtype}, expected {self._encoder_dtype}",
+        )
+        require(cached.ndim == 3, f"cached tensor has shape {tuple(cached.shape)}, expected [1, tokens, hidden]")
+        require(cached.shape[0] == 1, f"cached tensor has batch size {cached.shape[0]}, expected 1")
+        require(
+            cached.shape[1] == len(token_ids),
+            f"cached tensor has {cached.shape[1]} tokens, expected {len(token_ids)}",
+        )
+        require(cached.shape[2] > 0, "cached tensor has an empty hidden dimension")
+        if self._expected_hidden_size is not None:
+            require(
+                cached.shape[2] == self._expected_hidden_size,
+                f"cached tensor hidden size is {cached.shape[2]}, expected {self._expected_hidden_size}",
+            )
+        require(cached.is_contiguous(), "cached tensor is not contiguous")
+
+    @contextmanager
+    def _disk_cache_lock(self, path: str) -> Iterator[None]:
+        """Hold the exclusive writer lock for one cache key."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(f"{path}.lock", "a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _write_disk_cache(self, path: str, cached: torch.Tensor) -> None:
+        """Atomically publish one CPU embedding cache entry."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "wb") as tmp_file:
+                torch.save(cached, tmp_file)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            raise
 
     def _ensure_embedding_sync_group(self) -> None:
         """Build the barrier group while the ranks are still in lockstep."""
@@ -186,9 +401,15 @@ class MiniMaxH3TextEmbedStage:
             wait_all_ranks=True,
         )
 
-    def _encode_prompt(self, prompt: str, encoder_device: torch.device) -> torch.Tensor:
+    def _encode_prompt(
+        self,
+        prompt: str,
+        encoder_device: torch.device,
+        *,
+        token_ids: list[int] | None = None,
+    ) -> torch.Tensor:
         """Run the frozen Qwen3-VL conditioner once for one prompt."""
-        token_ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        token_ids = self._tokenize(prompt) if token_ids is None else token_ids
         input_ids = torch.tensor([token_ids], dtype=torch.long, device=encoder_device)
         # Qwen3-VL lays its 3D rotary positions out per modality run, read
         # off the token type ids the processor derives (0 text, 1 image,
