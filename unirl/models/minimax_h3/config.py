@@ -92,6 +92,10 @@ class MiniMaxH3PipelineConfig:
     # Intended for ~95 GB H20-class devices; lower-memory recipes leave it off.
     # UNIRL_MINIMAX_H3_ONLOAD_SERIALIZE=0 disables the per-node residency lock.
     text_encoder_onload_for_embed: bool = False
+    # Optional persistent CPU cache shared by local ranks across runs.
+    prompt_embedding_cache_dir: Optional[str] = None
+    # Require valid precomputed entries and never create or repair cache files.
+    prompt_embedding_cache_read_only: bool = False
 
     # The two VAEs are a SEPARATE decision from the conditioner, and default to
     # the train device even when the conditioner is parked. Together they are
@@ -108,6 +112,10 @@ class MiniMaxH3PipelineConfig:
 
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="MiniMaxH3PipelineConfig.model_precision")
+        if self.prompt_embedding_cache_dir is not None and not str(self.prompt_embedding_cache_dir).strip():
+            raise ValueError("prompt_embedding_cache_dir must be non-empty or None")
+        if self.prompt_embedding_cache_read_only and self.prompt_embedding_cache_dir is None:
+            raise ValueError("prompt_embedding_cache_read_only=True requires prompt_embedding_cache_dir")
 
 
 __all__ = [
