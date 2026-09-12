@@ -317,10 +317,12 @@ class MiniMaxH3TextEmbedStage:
         """Return whether every rank can continue the shared-embedding protocol."""
         import torch.distributed as dist
 
-        if self._embedding_sync_group is None:
-            raise RuntimeError("MiniMax-H3 SP prompt sharing requires its world Gloo control group")
-        status = torch.tensor([int(local_ok)], dtype=torch.int32)
-        dist.all_reduce(status, op=dist.ReduceOp.MIN, group=self._embedding_sync_group)
+        if self._embedding_sync_group is not None:
+            status = torch.tensor([int(local_ok)], dtype=torch.int32)
+            dist.all_reduce(status, op=dist.ReduceOp.MIN, group=self._embedding_sync_group)
+        else:
+            status = torch.tensor([int(local_ok)], dtype=torch.int32, device=self.device)
+            dist.all_reduce(status, op=dist.ReduceOp.MIN)
         return bool(status.item())
 
     def _resolve_with_disk_cache(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> tuple[int, int]:
@@ -527,7 +529,7 @@ class MiniMaxH3TextEmbedStage:
 
     def _ensure_embedding_sync_group(self) -> None:
         """Build the barrier group while the ranks are still in lockstep."""
-        if self._embedding_sync_group is not None or not (self._onload_for_embed or self._share_across_sp):
+        if self._embedding_sync_group is not None or not self._onload_for_embed:
             return
         import torch.distributed as dist
 
