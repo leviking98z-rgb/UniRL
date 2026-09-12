@@ -1,0 +1,49 @@
+# @package _global_
+# MiniMax-H3 768p smoke with nonconstant rewards and a real optimizer step.
+
+defaults:
+  - minimax_h3_t2va_trainside
+  - _self_
+
+num_devices: 8
+batch_size: 8
+num_rollouts: 1
+
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-minimax-h3-roi}
+  run_name: ${oc.env:WANDB_RUN_NAME,minimax-h3-nonzero-smoke}
+  tags: [minimax-h3, roi, trainside, nonzero-gradient, synthetic-reward]
+  log_media: false
+
+bundle:
+  config:
+    text_encoder_onload_for_embed: false
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.video_statistics.VideoStatisticsRewardScorer
+    base_device: cpu
+    config:
+      _target_: unirl.reward.local.video_statistics.VideoStatisticsRewardSpec
+      weights: null
+      scorers: null
+      sample_frames: 3
+      spatial_stride: 32
+      tie_break_scale: 1.0e-4
+
+stack:
+  num_updates_per_batch: 1
+
+data_source:
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH}
+      shuffle: false
+
+sampling:
+  num_inference_steps: 2
+  sde_indices: [0]
+  samples_per_prompt: 2
+  eta: 0.7
