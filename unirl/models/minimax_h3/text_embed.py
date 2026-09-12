@@ -186,11 +186,12 @@ class MiniMaxH3TextEmbedStage:
         except BaseException as exc:
             error = exc
 
-        if not self._sync_embedding_status(error is None):
-            if error is not None:
-                raise error
-            raise RuntimeError("MiniMax-H3 prompt embedding failed on another rank")
-        if error is not None:
+        if self._needs_embedding_status_sync():
+            if not self._sync_embedding_status(error is None):
+                if error is not None:
+                    raise error
+                raise RuntimeError("MiniMax-H3 prompt embedding failed on another rank")
+        elif error is not None:
             raise error
         assert condition is not None
         self._synchronize_embedding_ranks()
@@ -411,8 +412,8 @@ class MiniMaxH3TextEmbedStage:
             raise
 
     def _ensure_embedding_sync_group(self) -> None:
-        """Build the barrier group while the ranks are still in lockstep."""
-        if self._embedding_sync_group is not None or not self._onload_for_embed:
+        """Build the CPU control group while the ranks are still in lockstep."""
+        if self._embedding_sync_group is not None or (not self._onload_for_embed and self._disk_cache_dir is None):
             return
         import torch.distributed as dist
 
@@ -425,11 +426,11 @@ class MiniMaxH3TextEmbedStage:
         # hands that one to a background thread and keeps it, and two threads
         # driving one process group concurrently is undefined.
         if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-            self._embedding_sync_group = dist.new_group(backend="gloo")
+            self._embedding_sync_group = dist.new_group(backend="gloo", timeout=_EMBED_SYNC_TIMEOUT)
 
     def _synchronize_embedding_ranks(self) -> None:
         """Keep delayed conditioner loads out of the next FSDP NCCL collective."""
-        if self._embedding_sync_group is None:
+        if self._embedding_sync_group is None or not self._onload_for_embed:
             return
         import torch.distributed as dist
 
@@ -443,17 +444,20 @@ class MiniMaxH3TextEmbedStage:
         """Propagate prompt failures before a peer enters a later collective."""
         import torch.distributed as dist
 
-        if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() <= 1:
-            return local_ok
-        if self._embedding_sync_group is not None:
-            status = torch.tensor([int(local_ok)], dtype=torch.int32)
-            dist.all_reduce(status, op=dist.ReduceOp.MIN, group=self._embedding_sync_group)
-        elif self._disk_cache_dir is not None:
-            status = torch.tensor([int(local_ok)], dtype=torch.int32, device=self.device)
-            dist.all_reduce(status, op=dist.ReduceOp.MIN)
-        else:
-            return local_ok
+        status = torch.tensor([int(local_ok)], dtype=torch.int32)
+        dist.all_reduce(status, op=dist.ReduceOp.MIN, group=self._embedding_sync_group)
         return bool(status.item())
+
+    def _needs_embedding_status_sync(self) -> bool:
+        """Return whether this call participates in a role-wide status collective."""
+        import torch.distributed as dist
+
+        return (
+            dist.is_available()
+            and dist.is_initialized()
+            and dist.get_world_size() > 1
+            and self._embedding_sync_group is not None
+        )
 
     def _encode_prompt(
         self,
