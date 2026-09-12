@@ -66,6 +66,10 @@ class MiniMaxH3Bundle(Bundle):
         self.pretrained_path = pretrained_path
         self.max_sequence_length = max_sequence_length
         self.text_encoder_onload_for_embed = text_encoder_onload_for_embed
+        if prompt_embedding_cache_dir is not None and not str(prompt_embedding_cache_dir).strip():
+            raise ValueError("prompt_embedding_cache_dir must be non-empty or None")
+        if prompt_embedding_cache_read_only and prompt_embedding_cache_dir is None:
+            raise ValueError("prompt_embedding_cache_read_only=True requires prompt_embedding_cache_dir")
         self.text_encoder_checkpoint_identity = text_encoder_checkpoint_identity or pretrained_path
         self.text_encoder_dtype = text_encoder_dtype or next(text_encoder.parameters()).dtype
         self.prompt_embedding_cache_dir = prompt_embedding_cache_dir

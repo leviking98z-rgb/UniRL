@@ -334,6 +334,7 @@ class MiniMaxH3TextEmbedStage:
             cached.dtype == self._encoder_dtype,
             f"cached tensor dtype is {cached.dtype}, expected {self._encoder_dtype}",
         )
+        require(bool(torch.isfinite(cached).all()), "cached tensor contains non-finite values")
         require(cached.ndim == 3, f"cached tensor has shape {tuple(cached.shape)}, expected [1, tokens, hidden]")
         require(cached.shape[0] == 1, f"cached tensor has batch size {cached.shape[0]}, expected 1")
         require(
