@@ -234,9 +234,7 @@ def _wrap_h3(model: nn.Module, sp_group: Any) -> None:
         )
         global_length = int(adaln_indices.shape[0])
         if global_length % sp_size:
-            raise ValueError(
-                f"MiniMax-H3 SP received unpadded sequence length {global_length} for sp_size={sp_size}"
-            )
+            raise ValueError(f"MiniMax-H3 SP received unpadded sequence length {global_length} for sp_size={sp_size}")
         local_length = global_length // sp_size
         if hidden_states.shape[1] == global_length:
             hidden_states = _slice_rows(hidden_states, dim=1, group=sp_group)
@@ -310,9 +308,7 @@ def _wrap_h3(model: nn.Module, sp_group: Any) -> None:
             raise RuntimeError("MiniMax-H3 SP output gather ran without model-boundary state")
         hidden_states = _sp().gather_outputs(hidden_states, gather_dim=1, group=sp_group)
         if hidden_states.shape[1] != padded_length:
-            raise RuntimeError(
-                f"MiniMax-H3 SP gathered {hidden_states.shape[1]} rows, expected {padded_length}"
-            )
+            raise RuntimeError(f"MiniMax-H3 SP gathered {hidden_states.shape[1]} rows, expected {padded_length}")
         hidden_states = hidden_states[:, :original_length]
         args, kwargs = _write_arg(
             args,
@@ -331,9 +327,7 @@ def _wrap_h3(model: nn.Module, sp_group: Any) -> None:
         if timestep_indices.shape[0] == padded_length:
             timestep_indices = timestep_indices[:original_length]
         if timestep_indices.shape != (original_length,):
-            raise ValueError(
-                "MiniMax-H3 SP output timestep_indices do not match the unpadded sequence length"
-            )
+            raise ValueError("MiniMax-H3 SP output timestep_indices do not match the unpadded sequence length")
         args, kwargs = _write_arg(
             args,
             kwargs,

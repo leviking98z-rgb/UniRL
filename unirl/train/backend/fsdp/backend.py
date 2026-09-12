@@ -72,13 +72,8 @@ class FSDPBackend(BaseFSDP2Backend):
 
             world = dist.get_world_size()
             if world % self._sp_size:
-                raise ValueError(
-                    f"FSDPBackend: world_size {world} is not divisible by sp_size {self._sp_size}"
-                )
-            if (
-                normalize_fsdp_mode(fsdp_cfg.fsdp_mode) == "hybrid"
-                and int(fsdp_cfg.hsdp_shard_size) % self._sp_size
-            ):
+                raise ValueError(f"FSDPBackend: world_size {world} is not divisible by sp_size {self._sp_size}")
+            if normalize_fsdp_mode(fsdp_cfg.fsdp_mode) == "hybrid" and int(fsdp_cfg.hsdp_shard_size) % self._sp_size:
                 raise ValueError(
                     "FSDPBackend: HSDP shard groups must contain whole contiguous SP groups, but "
                     f"hsdp_shard_size={fsdp_cfg.hsdp_shard_size} is not divisible by sp_size={self._sp_size}"
