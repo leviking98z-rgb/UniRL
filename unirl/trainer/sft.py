@@ -115,11 +115,16 @@ class SFTTrainer(BaseTrainer):
         loss_sum = 0.0
         weight_sum = 0.0
         batches = 0
+        extra_sums: Dict[str, float] = {}
         for records in self.data_source.iter_eval_batches(self.eval_batch_size, eval_num_samples=self.eval_num_samples):
             records = self._pad_to_dp(records)
             metrics = self.stack.eval_track(self.track_builder.build(records))
-            loss_sum += float(metrics["loss"]) * float(metrics["weight"])
-            weight_sum += float(metrics["weight"])
+            weight = float(metrics["weight"])
+            loss_sum += float(metrics["loss"]) * weight
+            for key, value in metrics.items():
+                if key not in ("loss", "weight"):
+                    extra_sums[key] = extra_sums.get(key, 0.0) + float(value) * weight
+            weight_sum += weight
             batches += 1
         if weight_sum <= 0.0:
             logger.warning("SFTTrainer.evaluate: no eval data (eval_num_samples=%s).", self.eval_num_samples)
@@ -133,7 +138,8 @@ class SFTTrainer(BaseTrainer):
             batches,
             self.eval_batch_size,
         )
-        self.wandb_logger.log_eval(step + 1, {"loss": eval_loss})
+        eval_metrics = {"loss": eval_loss, **{k: v / weight_sum for k, v in extra_sums.items()}}
+        self.wandb_logger.log_eval(step + 1, eval_metrics)
         return eval_loss
 
     def _pad_to_dp(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
