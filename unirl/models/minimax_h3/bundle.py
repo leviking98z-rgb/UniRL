@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
@@ -17,6 +18,15 @@ from .vendor import (
     AutoencoderKLMiniMaxH3Audio,
     MiniMaxH3Transformer3DModel,
 )
+
+
+def _checkpoint_identity(path: str, text_encoder: nn.Module) -> str:
+    """Return a stable identity for a local snapshot or Hub checkpoint name."""
+    expanded = os.path.expanduser(path)
+    checkpoint = os.path.realpath(expanded) if os.path.exists(expanded) else path
+    model_class = f"{type(text_encoder).__module__}.{type(text_encoder).__qualname__}"
+    revision = getattr(getattr(text_encoder, "config", None), "_commit_hash", None)
+    return repr((model_class, checkpoint, "text_encoder", revision))
 
 
 class MiniMaxH3Bundle(Bundle):
@@ -36,6 +46,10 @@ class MiniMaxH3Bundle(Bundle):
         pretrained_path: str,
         max_sequence_length: int,
         text_encoder_onload_for_embed: bool,
+        text_encoder_checkpoint_identity: str | None = None,
+        text_encoder_dtype: torch.dtype | None = None,
+        prompt_embedding_cache_dir: str | None = None,
+        prompt_embedding_cache_read_only: bool = False,
     ) -> None:
         super().__init__()
         self.transformer = transformer
@@ -52,6 +66,14 @@ class MiniMaxH3Bundle(Bundle):
         self.pretrained_path = pretrained_path
         self.max_sequence_length = max_sequence_length
         self.text_encoder_onload_for_embed = text_encoder_onload_for_embed
+        if prompt_embedding_cache_dir is not None and not str(prompt_embedding_cache_dir).strip():
+            raise ValueError("prompt_embedding_cache_dir must be non-empty or None")
+        if prompt_embedding_cache_read_only and prompt_embedding_cache_dir is None:
+            raise ValueError("prompt_embedding_cache_read_only=True requires prompt_embedding_cache_dir")
+        self.text_encoder_checkpoint_identity = text_encoder_checkpoint_identity or pretrained_path
+        self.text_encoder_dtype = text_encoder_dtype or next(text_encoder.parameters()).dtype
+        self.prompt_embedding_cache_dir = prompt_embedding_cache_dir
+        self.prompt_embedding_cache_read_only = prompt_embedding_cache_read_only
 
     @classmethod
     def from_config(cls, config: MiniMaxH3PipelineConfig) -> "MiniMaxH3Bundle":
@@ -139,6 +161,10 @@ class MiniMaxH3Bundle(Bundle):
             pretrained_path=path,
             max_sequence_length=int(config.max_sequence_length),
             text_encoder_onload_for_embed=config.text_encoder_onload_for_embed,
+            text_encoder_checkpoint_identity=_checkpoint_identity(te_path, text_encoder),
+            text_encoder_dtype=te_dtype,
+            prompt_embedding_cache_dir=config.prompt_embedding_cache_dir,
+            prompt_embedding_cache_read_only=config.prompt_embedding_cache_read_only,
         )
         if config.meta_init_transformer:
             # Diffusers layout: the backend's sharded loader reads the
