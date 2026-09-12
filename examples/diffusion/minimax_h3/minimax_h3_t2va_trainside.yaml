@@ -64,6 +64,8 @@ bundle:
     # disk hits and avoids re-running the 32B Qwen3-VL conditioner.
     prompt_embedding_cache_dir: null
     prompt_embedding_cache_read_only: false
+    # With Ulysses SP, optionally compute each duplicated prompt once per group.
+    prompt_embedding_share_across_sp: false
     # The VAEs stay on the train device. They are only ~10 GB fp32 together
     # against a 7.75 GB/rank DiT shard, and decoding 124 frames of 768x768 on
     # CPU takes MINUTES per sample — it would dominate a rollout that spends

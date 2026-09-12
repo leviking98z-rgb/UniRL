@@ -93,6 +93,7 @@ class MiniMaxH3TextEmbedStage:
             os.path.abspath(os.path.expanduser(os.fspath(cache_dir))) if cache_dir is not None else None
         )
         self._disk_cache_read_only = bool(getattr(bundle, "prompt_embedding_cache_read_only", False))
+        self._share_across_sp = bool(getattr(bundle, "prompt_embedding_share_across_sp", False))
         self._checkpoint_identity = str(getattr(bundle, "text_encoder_checkpoint_identity", bundle.pretrained_path))
         self._text_encoder_dtype = getattr(bundle, "text_encoder_dtype", None)
         if self._text_encoder_dtype is None:
@@ -133,16 +134,16 @@ class MiniMaxH3TextEmbedStage:
 
         self._ensure_embedding_sync_group()
         unique_prompts = list(dict.fromkeys(prompts))
-        resolved = {prompt: self._cache[prompt] for prompt in unique_prompts if prompt in self._cache}
-        memory_hits = len(resolved)
-        missing = [prompt for prompt in unique_prompts if prompt not in resolved]
-        disk_hits = 0
-        misses = len(missing)
         started = time.perf_counter()
-        if missing and self._disk_cache_dir is not None:
-            disk_hits, misses = self._resolve_with_disk_cache(missing, resolved)
-        elif missing:
-            self._encode_missing(missing, resolved)
+        sp_group = self._resolve_sp_share_group()
+        if sp_group is None:
+            resolved, memory_hits, disk_hits, misses = self._resolve_local(unique_prompts)
+            shared_hits = 0
+            shared_source = False
+        else:
+            resolved, memory_hits, disk_hits, misses, shared_hits, shared_source = self._resolve_shared(
+                unique_prompts, sp_group
+            )
         for prompt in unique_prompts:
             if prompt in self._cache:
                 self._cache.move_to_end(prompt)
@@ -156,22 +157,25 @@ class MiniMaxH3TextEmbedStage:
             print(
                 "H3_EMBED_TIMING "
                 f"rank={rank} prompts={len(prompts)} "
-                f"cache_hits={memory_hits + disk_hits} misses={misses} "
+                f"cache_hits={memory_hits + disk_hits + shared_hits} misses={misses} "
                 f"memory_hits={memory_hits} disk_hits={disk_hits} "
+                f"shared_hits={shared_hits} shared_source={int(shared_source)} "
                 f"onload={self._onload_for_embed} elapsed_s={elapsed_s:.3f}",
                 flush=True,
             )
         else:
             logger.debug(
                 "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f "
-                "memory_hits=%d disk_hits=%d",
+                "memory_hits=%d disk_hits=%d shared_hits=%d shared_source=%s",
                 len(prompts),
-                memory_hits + disk_hits,
+                memory_hits + disk_hits + shared_hits,
                 misses,
                 self._onload_for_embed,
                 elapsed_s,
                 memory_hits,
                 disk_hits,
+                shared_hits,
+                shared_source,
             )
         embeds = [resolved[prompt].to(device=self.device, dtype=self.dtype) for prompt in prompts]
 
@@ -187,6 +191,96 @@ class MiniMaxH3TextEmbedStage:
             embeds=text_embeds,
             attn_mask=torch.ones(text_embeds.shape[:2], dtype=torch.bool, device=text_embeds.device),
         )
+
+    def _resolve_local(self, prompts: Sequence[str]) -> tuple[dict[str, torch.Tensor], int, int, int]:
+        """Resolve prompts from the rank-local caches or conditioner."""
+        resolved = {prompt: self._cache[prompt] for prompt in prompts if prompt in self._cache}
+        memory_hits = len(resolved)
+        missing = [prompt for prompt in prompts if prompt not in resolved]
+        disk_hits = 0
+        misses = len(missing)
+        if missing and self._disk_cache_dir is not None:
+            disk_hits, misses = self._resolve_with_disk_cache(missing, resolved)
+        elif missing:
+            self._encode_missing(missing, resolved)
+        return resolved, memory_hits, disk_hits, misses
+
+    def _resolve_sp_share_group(self):
+        """Return the active Ulysses group when SP prompt sharing is enabled."""
+        if not self._share_across_sp:
+            return None
+
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return None
+        try:
+            from veomni.distributed.parallel_state import get_parallel_state
+
+            group = get_parallel_state().sp_group
+        except (AttributeError, RuntimeError):
+            return None
+        if group is None or dist.get_world_size(group) <= 1:
+            return None
+        return group
+
+    def _resolve_shared(
+        self, prompts: Sequence[str], group
+    ) -> tuple[dict[str, torch.Tensor], int, int, int, int, bool]:
+        """Resolve prompts once per SP group and broadcast CPU-cacheable embeddings."""
+        import torch.distributed as dist
+
+        group_rank = dist.get_rank(group)
+        source = dist.get_global_rank(group, 0)
+        is_source = group_rank == 0
+        signature = hashlib.sha256()
+        for prompt in prompts:
+            encoded = prompt.encode("utf-8")
+            signature.update(len(encoded).to_bytes(8, "big"))
+            signature.update(encoded)
+        signature_tensor = torch.tensor(list(signature.digest()), dtype=torch.uint8, device=self.device)
+        gathered_signatures = [torch.empty_like(signature_tensor) for _ in range(dist.get_world_size(group))]
+        dist.all_gather(gathered_signatures, signature_tensor, group=group)
+        if any(not torch.equal(value, gathered_signatures[0]) for value in gathered_signatures[1:]):
+            raise ValueError("MiniMax-H3 SP prompt sharing requires identical prompts on every rank in the group")
+
+        resolved: dict[str, torch.Tensor] = {}
+        memory_hits = disk_hits = misses = 0
+        error: BaseException | None = None
+        if is_source:
+            try:
+                resolved, memory_hits, disk_hits, misses = self._resolve_local(prompts)
+            except BaseException as exc:
+                error = exc
+
+        device = torch.device(self.device)
+        status = torch.tensor([error is None], dtype=torch.int32, device=device)
+        dist.broadcast(status, src=source, group=group)
+        if not bool(status.item()):
+            if error is not None:
+                raise error
+            raise RuntimeError("MiniMax-H3 SP prompt source failed before embedding broadcast")
+
+        for prompt in prompts:
+            shape = torch.zeros(3, dtype=torch.int64, device=device)
+            if is_source:
+                cached = resolved[prompt]
+                shape.copy_(torch.tensor(cached.shape, dtype=torch.int64, device=device))
+            dist.broadcast(shape, src=source, group=group)
+            if is_source:
+                payload = resolved[prompt].to(device=device, dtype=self._encoder_dtype)
+            else:
+                payload = torch.empty(
+                    tuple(int(dim) for dim in shape.tolist()),
+                    dtype=self._encoder_dtype,
+                    device=device,
+                )
+            dist.broadcast(payload, src=source, group=group)
+            if not is_source:
+                self._remember(prompt, payload.to("cpu").contiguous(), resolved)
+
+        shared_hits = 0 if is_source else len(prompts)
+        return resolved, memory_hits, disk_hits, misses, shared_hits, is_source
 
     def _resolve_with_disk_cache(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> tuple[int, int]:
         """Resolve RAM misses from disk and encode only entries absent under lock."""

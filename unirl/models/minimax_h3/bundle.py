@@ -50,6 +50,7 @@ class MiniMaxH3Bundle(Bundle):
         text_encoder_dtype: torch.dtype | None = None,
         prompt_embedding_cache_dir: str | None = None,
         prompt_embedding_cache_read_only: bool = False,
+        prompt_embedding_share_across_sp: bool = False,
     ) -> None:
         super().__init__()
         self.transformer = transformer
@@ -70,6 +71,7 @@ class MiniMaxH3Bundle(Bundle):
         self.text_encoder_dtype = text_encoder_dtype or next(text_encoder.parameters()).dtype
         self.prompt_embedding_cache_dir = prompt_embedding_cache_dir
         self.prompt_embedding_cache_read_only = prompt_embedding_cache_read_only
+        self.prompt_embedding_share_across_sp = prompt_embedding_share_across_sp
 
     @classmethod
     def from_config(cls, config: MiniMaxH3PipelineConfig) -> "MiniMaxH3Bundle":
@@ -161,6 +163,7 @@ class MiniMaxH3Bundle(Bundle):
             text_encoder_dtype=te_dtype,
             prompt_embedding_cache_dir=config.prompt_embedding_cache_dir,
             prompt_embedding_cache_read_only=config.prompt_embedding_cache_read_only,
+            prompt_embedding_share_across_sp=config.prompt_embedding_share_across_sp,
         )
         if config.meta_init_transformer:
             # Diffusers layout: the backend's sharded loader reads the
