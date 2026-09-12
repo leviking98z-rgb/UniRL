@@ -20,6 +20,10 @@ bundle:
   config:
     text_encoder_onload_for_embed: false
 
+backend:
+  fsdp_cfg:
+    sp_size: 1
+
 reward:
   _target_: unirl.reward.service.RewardService
   backend:

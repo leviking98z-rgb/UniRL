@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 
 import torch
@@ -37,8 +38,10 @@ class VideoStatisticsRewardScorer(RewardBackend):
         brightnesses = []
         contrasts = []
         motions = []
+        media_statistics = []
         tie_breaks = []
         sample_ids = list(request.sample_ids or [])
+        group_ids = list(request.group_ids or [])
         for index, video in enumerate(videos.to_list()):
             frames = video.frames
             if frames is None or frames.ndim != 4:
@@ -63,22 +66,36 @@ class VideoStatisticsRewardScorer(RewardBackend):
             sample_id = sample_ids[index] if index < len(sample_ids) else str(index)
             digest = int.from_bytes(hashlib.sha256(sample_id.encode()).digest()[:8], "big") / float(2**64)
             tie_break = self.tie_break_scale * digest
-            reward = brightness + 0.25 * contrast + 0.25 * motion + tie_break
+            media_statistic = brightness + 0.25 * contrast + 0.25 * motion
+            reward = media_statistic + tie_break
 
             rewards.append(reward)
             brightnesses.append(brightness)
             contrasts.append(contrast)
             motions.append(motion)
+            media_statistics.append(media_statistic)
             tie_breaks.append(tie_break)
 
         reward_tensor = torch.tensor(rewards, dtype=torch.float64)
+        media_group_values: dict[str, list[float]] = defaultdict(list)
+        reward_group_values: dict[str, list[float]] = defaultdict(list)
+        for index, reward in enumerate(rewards):
+            group_id = group_ids[index] if index < len(group_ids) else str(index)
+            media_group_values[group_id].append(media_statistics[index])
+            reward_group_values[group_id].append(reward)
+        media_nonzero_groups = sum(max(values) > min(values) for values in media_group_values.values())
+        reward_nonzero_groups = sum(max(values) > min(values) for values in reward_group_values.values())
         logger.info(
-            "VIDEO_STATS_REWARD count=%d mean=%.8f std=%.8f min=%.8f max=%.8f",
+            "VIDEO_STATS_REWARD count=%d mean=%.8f std=%.8f min=%.8f max=%.8f "
+            "groups=%d media_nonzero_groups=%d reward_nonzero_groups=%d",
             len(rewards),
             float(reward_tensor.mean().item()),
             float(reward_tensor.std(unbiased=False).item()),
             float(reward_tensor.min().item()),
             float(reward_tensor.max().item()),
+            len(reward_group_values),
+            media_nonzero_groups,
+            reward_nonzero_groups,
         )
         return RewardResponse(
             rewards=rewards,
@@ -86,6 +103,7 @@ class VideoStatisticsRewardScorer(RewardBackend):
                 "brightness": brightnesses,
                 "contrast": contrasts,
                 "motion": motions,
+                "media_statistic": media_statistics,
                 "identity_tie_break": tie_breaks,
             },
             successes=[True] * len(rewards),
