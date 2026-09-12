@@ -96,6 +96,8 @@ class MiniMaxH3PipelineConfig:
     prompt_embedding_cache_dir: Optional[str] = None
     # Require valid precomputed entries and never create or repair cache files.
     prompt_embedding_cache_read_only: bool = False
+    # Under Ulysses SP, compute each duplicated prompt once per group.
+    prompt_embedding_share_across_sp: bool = False
 
     # The two VAEs are a SEPARATE decision from the conditioner, and default to
     # the train device even when the conditioner is parked. Together they are

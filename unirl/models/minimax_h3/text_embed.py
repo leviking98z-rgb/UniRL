@@ -113,6 +113,7 @@ class MiniMaxH3TextEmbedStage:
             os.path.abspath(os.path.expanduser(os.fspath(cache_dir))) if cache_dir is not None else None
         )
         self._disk_cache_read_only = bool(getattr(bundle, "prompt_embedding_cache_read_only", False))
+        self._share_across_sp = bool(getattr(bundle, "prompt_embedding_share_across_sp", False))
         self._checkpoint_identity = str(getattr(bundle, "text_encoder_checkpoint_identity", bundle.pretrained_path))
         self._text_encoder_dtype = getattr(bundle, "text_encoder_dtype", None)
         if self._text_encoder_dtype is None:
@@ -156,16 +157,16 @@ class MiniMaxH3TextEmbedStage:
         started = time.perf_counter()
         error: BaseException | None = None
         condition: TextEmbedCondition | None = None
-        memory_hits = disk_hits = misses = 0
+        memory_hits = disk_hits = misses = shared_hits = 0
+        shared_source = False
         try:
-            resolved = {prompt: self._cache[prompt] for prompt in unique_prompts if prompt in self._cache}
-            memory_hits = len(resolved)
-            missing = [prompt for prompt in unique_prompts if prompt not in resolved]
-            misses = len(missing)
-            if missing and self._disk_cache_dir is not None:
-                disk_hits, misses = self._resolve_with_disk_cache(missing, resolved)
-            elif missing:
-                self._encode_missing(missing, resolved)
+            sp_group = self._resolve_sp_share_group()
+            if sp_group is None:
+                resolved, memory_hits, disk_hits, misses = self._resolve_local(unique_prompts)
+            else:
+                resolved, memory_hits, disk_hits, misses, shared_hits, shared_source = self._resolve_shared(
+                    unique_prompts, sp_group
+                )
             for prompt in unique_prompts:
                 if prompt in self._cache:
                     self._cache.move_to_end(prompt)
@@ -197,16 +198,231 @@ class MiniMaxH3TextEmbedStage:
         self._synchronize_embedding_ranks()
         logger.debug(
             "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f "
-            "memory_hits=%d disk_hits=%d",
+            "memory_hits=%d disk_hits=%d shared_hits=%d shared_source=%s",
             len(prompts),
-            memory_hits + disk_hits,
+            memory_hits + disk_hits + shared_hits,
             misses,
             self._onload_for_embed,
             time.perf_counter() - started,
             memory_hits,
             disk_hits,
+            shared_hits,
+            shared_source,
         )
         return condition
+
+    def _resolve_local(self, prompts: Sequence[str]) -> tuple[dict[str, torch.Tensor], int, int, int]:
+        """Resolve prompts from the rank-local caches or conditioner."""
+        resolved = {prompt: self._cache[prompt] for prompt in prompts if prompt in self._cache}
+        memory_hits = len(resolved)
+        missing = [prompt for prompt in prompts if prompt not in resolved]
+        disk_hits = 0
+        misses = len(missing)
+        if missing and self._disk_cache_dir is not None:
+            disk_hits, misses = self._resolve_with_disk_cache(missing, resolved)
+        elif missing:
+            self._encode_missing(missing, resolved)
+        return resolved, memory_hits, disk_hits, misses
+
+    def _resolve_sp_share_group(self):
+        """Return the active Ulysses group when SP prompt sharing is enabled."""
+        if not self._share_across_sp:
+            return None
+
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return None
+
+        group = None
+        sp_size = 1
+        state_error: BaseException | None = None
+        try:
+            from unirl.train.backend.veomni import _compat
+
+            _compat.ensure_installed()
+            from veomni.distributed.parallel_state import get_parallel_state
+
+            state = get_parallel_state()
+            sp_size = int(state.sp_size)
+            if sp_size < 1:
+                raise RuntimeError(f"MiniMax-H3 SP prompt sharing observed invalid sp_size={sp_size}")
+            if sp_size > 1:
+                group = state.sp_group
+                if group is None:
+                    raise RuntimeError(
+                        f"MiniMax-H3 SP prompt sharing requires an SP process group for sp_size={sp_size}"
+                    )
+                group_size = dist.get_world_size(group)
+                group_rank = dist.get_rank(group)
+                state_rank = int(state.sp_rank)
+                if group_size != sp_size or group_rank != state_rank:
+                    raise RuntimeError(
+                        "MiniMax-H3 SP prompt sharing found an inconsistent VeOmni parallel state: "
+                        f"state=(size={sp_size}, rank={state_rank}), "
+                        f"group=(size={group_size}, rank={group_rank})"
+                    )
+        except BaseException as exc:
+            state_error = exc
+
+        if not self._sync_embedding_status(state_error is None):
+            if state_error is not None:
+                raise state_error
+            raise RuntimeError("MiniMax-H3 SP prompt sharing setup failed on another rank")
+
+        min_sp_size, max_sp_size = self._sync_embedding_int_bounds(sp_size)
+        if min_sp_size != max_sp_size:
+            raise RuntimeError(
+                "MiniMax-H3 SP prompt sharing requires the same SP size on every role rank, "
+                f"observed range [{min_sp_size}, {max_sp_size}]"
+            )
+        if sp_size <= 1:
+            return None
+        return group
+
+    def _resolve_shared(
+        self, prompts: Sequence[str], group
+    ) -> tuple[dict[str, torch.Tensor], int, int, int, int, bool]:
+        """Resolve prompts once per SP group and broadcast their embeddings."""
+        import torch.distributed as dist
+
+        group_rank = dist.get_rank(group)
+        source = dist.get_global_rank(group, 0)
+        is_source = group_rank == 0
+        device = torch.device(self.device)
+
+        # Tokenization can itself fail on only one rank. Every rank still sends
+        # one fixed-size packet so peers never wait forever in the all-gather.
+        token_ids_by_prompt: dict[str, list[int]] = {}
+        signature_error: BaseException | None = None
+        signature_packet = torch.zeros(33, dtype=torch.uint8, device=device)
+        try:
+            signature = hashlib.sha256()
+            for value in (
+                _DISK_CACHE_SCHEMA,
+                self._checkpoint_identity,
+                str(MINIMAX_H3_TEXT_ENCODER_LAYER),
+                str(self._encoder_dtype),
+                str(self.dtype),
+                str(self._expected_hidden_size),
+            ):
+                encoded = value.encode("utf-8")
+                signature.update(len(encoded).to_bytes(8, "big"))
+                signature.update(encoded)
+            for prompt in prompts:
+                token_ids = self._tokenize(prompt)
+                token_ids_by_prompt[prompt] = token_ids
+                signature.update(len(token_ids).to_bytes(8, "big"))
+                for token_id in token_ids:
+                    signature.update(int(token_id).to_bytes(8, "big", signed=True))
+            signature_packet[0] = 1
+            signature_packet[1:].copy_(torch.tensor(list(signature.digest()), dtype=torch.uint8, device=device))
+        except BaseException as exc:
+            signature_error = exc
+
+        gathered_signatures = [torch.empty_like(signature_packet) for _ in range(dist.get_world_size(group))]
+        dist.all_gather(gathered_signatures, signature_packet, group=group)
+        signatures_succeeded = all(bool(value[0].item()) for value in gathered_signatures)
+        prompts_match = signatures_succeeded and all(
+            torch.equal(value[1:], gathered_signatures[0][1:]) for value in gathered_signatures[1:]
+        )
+        if not self._sync_embedding_status(prompts_match):
+            if signature_error is not None:
+                raise signature_error
+            if not signatures_succeeded:
+                raise RuntimeError("MiniMax-H3 SP prompt signature construction failed on another group rank")
+            if not prompts_match:
+                raise ValueError("MiniMax-H3 SP prompt sharing requires identical prompt/cache signatures")
+            raise RuntimeError("MiniMax-H3 SP prompt sharing failed on another rank or group")
+
+        resolved: dict[str, torch.Tensor] = {}
+        memory_hits = disk_hits = misses = 0
+        error: BaseException | None = None
+        header = torch.zeros(7, dtype=torch.int64, device=device)
+        if is_source:
+            try:
+                resolved, memory_hits, disk_hits, misses = self._resolve_local(prompts)
+                shapes = set()
+                for prompt in prompts:
+                    if prompt not in resolved:
+                        raise KeyError(f"MiniMax-H3 SP prompt source did not resolve prompt {prompt!r}")
+                    cached = resolved[prompt]
+                    self._validate_cached_tensor(cached, token_ids_by_prompt[prompt])
+                    shapes.add(tuple(cached.shape))
+                if len(shapes) != 1:
+                    raise ValueError("MiniMax-H3 SP prompt embeddings must have one common [1, tokens, hidden] shape")
+                batch, tokens, hidden = shapes.pop()
+                if batch != 1:
+                    raise ValueError(f"MiniMax-H3 SP prompt embeddings must have batch size 1, observed {batch}")
+                header.copy_(
+                    torch.tensor(
+                        [1, len(prompts), tokens, hidden, memory_hits, disk_hits, misses],
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                )
+            except BaseException as exc:
+                error = exc
+
+        dist.broadcast(header, src=source, group=group)
+        if not self._sync_embedding_status(bool(header[0].item())):
+            if error is not None:
+                raise error
+            raise RuntimeError("MiniMax-H3 SP prompt sharing failed on another rank or group")
+
+        _, unique_count, tokens, hidden, root_memory_hits, root_disk_hits, root_misses = map(int, header.tolist())
+        payload = None
+        allocation_error: BaseException | None = None
+        try:
+            payload = self._allocate_shared_payload((unique_count, tokens, hidden), device)
+            if is_source:
+                payload.copy_(torch.cat([resolved[prompt] for prompt in prompts], dim=0))
+        except BaseException as exc:
+            allocation_error = exc
+        if not self._sync_embedding_status(allocation_error is None):
+            if allocation_error is not None:
+                raise allocation_error
+            raise RuntimeError("MiniMax-H3 SP prompt payload allocation failed on another rank")
+        assert payload is not None
+        broadcast_error: BaseException | None = None
+        try:
+            dist.broadcast(payload, src=source, group=group)
+        except BaseException as exc:
+            broadcast_error = exc
+        if not self._sync_embedding_status(broadcast_error is None):
+            if broadcast_error is not None:
+                raise broadcast_error
+            raise RuntimeError("MiniMax-H3 SP prompt payload broadcast failed on another rank or group")
+        resolved = {prompt: payload[index : index + 1] for index, prompt in enumerate(prompts)}
+
+        shared_hits = 0 if is_source else len(prompts)
+        if not is_source:
+            memory_hits = disk_hits = misses = 0
+        else:
+            memory_hits = root_memory_hits
+            disk_hits = root_disk_hits
+            misses = root_misses
+        return resolved, memory_hits, disk_hits, misses, shared_hits, is_source
+
+    def _allocate_shared_payload(
+        self,
+        shape: tuple[int, int, int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Allocate the SP broadcast payload in the pipeline output dtype."""
+        return torch.empty(shape, dtype=self.dtype, device=device)
+
+    def _sync_embedding_int_bounds(self, value: int) -> tuple[int, int]:
+        """Return the world-wide minimum and maximum of one control integer."""
+        import torch.distributed as dist
+
+        if dist.get_world_size() <= 1:
+            return value, value
+        if self._embedding_sync_group is None:
+            raise RuntimeError("MiniMax-H3 distributed embedding control group is not initialized")
+        bounds = torch.tensor([value, -value], dtype=torch.int64)
+        dist.all_reduce(bounds, op=dist.ReduceOp.MIN, group=self._embedding_sync_group)
+        return int(bounds[0].item()), -int(bounds[1].item())
 
     def _resolve_with_disk_cache(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> tuple[int, int]:
         """Resolve RAM misses from disk and encode only entries absent under lock."""
@@ -413,7 +629,9 @@ class MiniMaxH3TextEmbedStage:
 
     def _ensure_embedding_sync_group(self) -> None:
         """Build the CPU control group while the ranks are still in lockstep."""
-        if self._embedding_sync_group is not None or (not self._onload_for_embed and self._disk_cache_dir is None):
+        if self._embedding_sync_group is not None or (
+            not self._onload_for_embed and self._disk_cache_dir is None and not self._share_across_sp
+        ):
             return
         import torch.distributed as dist
 
@@ -444,6 +662,10 @@ class MiniMaxH3TextEmbedStage:
         """Propagate prompt failures before a peer enters a later collective."""
         import torch.distributed as dist
 
+        if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() <= 1:
+            return local_ok
+        if self._embedding_sync_group is None:
+            raise RuntimeError("MiniMax-H3 distributed embedding control group is not initialized")
         status = torch.tensor([int(local_ok)], dtype=torch.int32)
         dist.all_reduce(status, op=dist.ReduceOp.MIN, group=self._embedding_sync_group)
         return bool(status.item())
