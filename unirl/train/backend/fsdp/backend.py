@@ -24,6 +24,7 @@ from unirl.train.configs import (
     EmaLoraConfig,
     FSDPConfig,
     LoraConfig,
+    normalize_fsdp_mode,
 )
 from unirl.utils.distributed_utils import ensure_dist_initialized
 from unirl.utils.dtypes import parse_torch_dtype
@@ -62,6 +63,34 @@ class FSDPBackend(BaseFSDP2Backend):
 
         model = resolve_trainable_module(bundle, trainable_attr)
         shadow = self._inject_structural(model, lora_cfg, ema_lora_cfg, ema_cfg)
+
+        self._sp_size = int(getattr(fsdp_cfg, "sp_size", 1) or 1)
+        if self._sp_size < 1:
+            raise ValueError(f"FSDPBackend: fsdp_cfg.sp_size must be >= 1, got {self._sp_size}")
+        if self._sp_size > 1:
+            import torch.distributed as dist
+
+            world = dist.get_world_size()
+            if world % self._sp_size:
+                raise ValueError(
+                    f"FSDPBackend: world_size {world} is not divisible by sp_size {self._sp_size}"
+                )
+            if (
+                normalize_fsdp_mode(fsdp_cfg.fsdp_mode) == "hybrid"
+                and int(fsdp_cfg.hsdp_shard_size) % self._sp_size
+            ):
+                raise ValueError(
+                    "FSDPBackend: HSDP shard groups must contain whole contiguous SP groups, but "
+                    f"hsdp_shard_size={fsdp_cfg.hsdp_shard_size} is not divisible by sp_size={self._sp_size}"
+                )
+
+            from unirl.train.backend.veomni.sp import (
+                apply_sequence_parallelism,
+                initialize_sequence_parallel_state,
+            )
+
+            initialize_sequence_parallel_state(self._sp_size, device=self._device)
+            apply_sequence_parallelism(model, self._sp_size)
 
         fsdp_wrap(
             model,

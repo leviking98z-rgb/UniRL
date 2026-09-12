@@ -1,0 +1,23 @@
+# @package _global_
+# One-node MiniMax-H3 Ulysses-SP2 systems/capacity harness.
+
+defaults:
+  - minimax_h3_t2va_roi_warm_cache
+  - _self_
+
+num_devices: 8
+batch_size: 8
+num_rollouts: 3
+
+logging:
+  run_name: ${oc.env:WANDB_RUN_NAME,minimax-h3-roi-sp2}
+  tags: [minimax-h3, roi, systems, trainside, sp2, warm-cache]
+
+bundle:
+  config:
+    text_encoder_onload_for_embed: false
+
+backend:
+  fsdp_cfg:
+    fsdp_mode: full
+    sp_size: 2
