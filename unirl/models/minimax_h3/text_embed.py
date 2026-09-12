@@ -59,16 +59,26 @@ def _serialize_node_residency() -> Iterator[None]:
 
 
 @cache
-def _conditioner_compute_lock_path() -> str:
-    """Return the per-user node-local conditioner compute lock path."""
-    digest = hashlib.sha256(f"{os.getuid()}:minimax-h3-conditioner-compute".encode()).hexdigest()[:16]
+def _conditioner_compute_lock_path(cache_dir: str, checkpoint_identity: str) -> str:
+    """Return the per-run node-local lock path for one persistent cache."""
+    identity = (
+        os.getuid(),
+        os.path.realpath(cache_dir),
+        checkpoint_identity,
+    )
+    digest = hashlib.sha256(repr(identity).encode()).hexdigest()[:16]
     return os.path.join(tempfile.gettempdir(), f"unirl_minimax_h3_compute_{digest}.lock")
 
 
 @contextmanager
-def _serialize_node_conditioner_compute() -> Iterator[None]:
-    """Admit one rank at a time to a CPU or GPU conditioner forward on this node."""
-    with open(_conditioner_compute_lock_path(), "a+", encoding="utf-8") as lock_file:
+def _serialize_node_conditioner_compute(cache_dir: str, checkpoint_identity: str) -> Iterator[None]:
+    """Serialize persistent-cache cold fills by ranks from the same run."""
+    if os.environ.get("UNIRL_MINIMAX_H3_ONLOAD_SERIALIZE", "1") == "0":
+        yield
+        return
+
+    lock_path = _conditioner_compute_lock_path(cache_dir, checkpoint_identity)
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -212,7 +222,7 @@ class MiniMaxH3TextEmbedStage:
 
         cache_dir = self._require_disk_cache_dir()
         os.makedirs(cache_dir, exist_ok=True)
-        with _serialize_node_conditioner_compute(), ExitStack() as residency:
+        with _serialize_node_conditioner_compute(cache_dir, self._checkpoint_identity), ExitStack() as residency:
             residency_entered = False
             encoder_device = self._encoder_device
             for entry_prompts, token_ids, path in sorted(pending, key=lambda entry: entry[2]):
@@ -242,7 +252,7 @@ class MiniMaxH3TextEmbedStage:
 
     def _encode_missing(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> None:
         """Encode missing prompts together under one conditioner residency window."""
-        with _serialize_node_conditioner_compute(), self._embedding_residency():
+        with self._embedding_residency():
             encoder_device = self._encoder_device
             for prompt in prompts:
                 cached = self._encode_prompt(prompt, encoder_device).detach().to("cpu").contiguous()
