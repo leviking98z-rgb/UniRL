@@ -59,10 +59,11 @@ def _serialize_node_residency() -> Iterator[None]:
 
 
 @cache
-def _conditioner_compute_lock_path(cache_dir: str, checkpoint_identity: str) -> str:
+def _conditioner_compute_lock_path(run_identity: str, cache_dir: str, checkpoint_identity: str) -> str:
     """Return the per-run node-local lock path for one persistent cache."""
     identity = (
         os.getuid(),
+        run_identity,
         os.path.realpath(cache_dir),
         checkpoint_identity,
     )
@@ -72,12 +73,21 @@ def _conditioner_compute_lock_path(cache_dir: str, checkpoint_identity: str) -> 
 
 @contextmanager
 def _serialize_node_conditioner_compute(cache_dir: str, checkpoint_identity: str) -> Iterator[None]:
-    """Serialize persistent-cache cold fills by ranks from the same run."""
+    """Serialize persistent-cache cold fills by ranks sharing one launch."""
     if os.environ.get("UNIRL_MINIMAX_H3_ONLOAD_SERIALIZE", "1") == "0":
         yield
         return
 
-    lock_path = _conditioner_compute_lock_path(cache_dir, checkpoint_identity)
+    run_identity = (
+        os.environ.get("UNIRL_RUN_ID")
+        or os.environ.get("RAY_JOB_ID")
+        or (
+            f"torchrun:{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}"
+            if "MASTER_ADDR" in os.environ and "MASTER_PORT" in os.environ
+            else f"pid:{os.getpid()}"
+        )
+    )
+    lock_path = _conditioner_compute_lock_path(run_identity, cache_dir, checkpoint_identity)
     with open(lock_path, "a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
@@ -143,21 +153,47 @@ class MiniMaxH3TextEmbedStage:
 
         self._ensure_embedding_sync_group()
         unique_prompts = list(dict.fromkeys(prompts))
-        resolved = {prompt: self._cache[prompt] for prompt in unique_prompts if prompt in self._cache}
-        memory_hits = len(resolved)
-        missing = [prompt for prompt in unique_prompts if prompt not in resolved]
-        disk_hits = 0
-        misses = len(missing)
         started = time.perf_counter()
-        if missing and self._disk_cache_dir is not None:
-            disk_hits, misses = self._resolve_with_disk_cache(missing, resolved)
-        elif missing:
-            self._encode_missing(missing, resolved)
-        for prompt in unique_prompts:
-            if prompt in self._cache:
-                self._cache.move_to_end(prompt)
+        error: BaseException | None = None
+        condition: TextEmbedCondition | None = None
+        memory_hits = disk_hits = misses = 0
+        try:
+            resolved = {prompt: self._cache[prompt] for prompt in unique_prompts if prompt in self._cache}
+            memory_hits = len(resolved)
+            missing = [prompt for prompt in unique_prompts if prompt not in resolved]
+            misses = len(missing)
+            if missing and self._disk_cache_dir is not None:
+                disk_hits, misses = self._resolve_with_disk_cache(missing, resolved)
+            elif missing:
+                self._encode_missing(missing, resolved)
+            for prompt in unique_prompts:
+                if prompt in self._cache:
+                    self._cache.move_to_end(prompt)
+            embeds = [resolved[prompt].to(device=self.device, dtype=self.dtype) for prompt in prompts]
+
+            lengths = {int(e.shape[1]) for e in embeds}
+            require(
+                len(lengths) == 1,
+                f"MiniMaxH3TextEmbedStage: prompts tokenized to differing lengths {sorted(lengths)}. The packed "
+                "sequence geometry must be identical across the batch (LatentSegment stores latents in a CONCAT "
+                "field), so a mixed-length batch cannot be packed. Pad or group prompts by token length upstream.",
+            )
+            text_embeds = torch.cat(embeds, dim=0)
+            condition = TextEmbedCondition(
+                embeds=text_embeds,
+                attn_mask=torch.ones(text_embeds.shape[:2], dtype=torch.bool, device=text_embeds.device),
+            )
+        except BaseException as exc:
+            error = exc
+
+        if not self._sync_embedding_status(error is None):
+            if error is not None:
+                raise error
+            raise RuntimeError("MiniMax-H3 prompt embedding failed on another rank")
+        if error is not None:
+            raise error
+        assert condition is not None
         self._synchronize_embedding_ranks()
-        elapsed_s = time.perf_counter() - started
         logger.debug(
             "MiniMaxH3 text embeds: prompts=%d cache_hits=%d misses=%d onload=%s elapsed_s=%.3f "
             "memory_hits=%d disk_hits=%d",
@@ -165,24 +201,11 @@ class MiniMaxH3TextEmbedStage:
             memory_hits + disk_hits,
             misses,
             self._onload_for_embed,
-            elapsed_s,
+            time.perf_counter() - started,
             memory_hits,
             disk_hits,
         )
-        embeds = [resolved[prompt].to(device=self.device, dtype=self.dtype) for prompt in prompts]
-
-        lengths = {int(e.shape[1]) for e in embeds}
-        require(
-            len(lengths) == 1,
-            f"MiniMaxH3TextEmbedStage: prompts tokenized to differing lengths {sorted(lengths)}. The packed sequence "
-            f"geometry must be identical across the batch (LatentSegment stores latents in a CONCAT field), so a "
-            f"mixed-length batch cannot be packed. Pad or group prompts by token length upstream.",
-        )
-        text_embeds = torch.cat(embeds, dim=0)
-        return TextEmbedCondition(
-            embeds=text_embeds,
-            attn_mask=torch.ones(text_embeds.shape[:2], dtype=torch.bool, device=text_embeds.device),
-        )
+        return condition
 
     def _resolve_with_disk_cache(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> tuple[int, int]:
         """Resolve RAM misses from disk and encode only entries absent under lock."""
@@ -415,6 +438,22 @@ class MiniMaxH3TextEmbedStage:
             timeout=_EMBED_SYNC_TIMEOUT,
             wait_all_ranks=True,
         )
+
+    def _sync_embedding_status(self, local_ok: bool) -> bool:
+        """Propagate prompt failures before a peer enters a later collective."""
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() <= 1:
+            return local_ok
+        if self._embedding_sync_group is not None:
+            status = torch.tensor([int(local_ok)], dtype=torch.int32)
+            dist.all_reduce(status, op=dist.ReduceOp.MIN, group=self._embedding_sync_group)
+        elif self._disk_cache_dir is not None:
+            status = torch.tensor([int(local_ok)], dtype=torch.int32, device=self.device)
+            dist.all_reduce(status, op=dist.ReduceOp.MIN)
+        else:
+            return local_ok
+        return bool(status.item())
 
     def _encode_prompt(
         self,
