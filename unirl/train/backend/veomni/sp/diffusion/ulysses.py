@@ -334,6 +334,7 @@ def _make_rope_slice_hook(sp_group, dim: int):
 
 
 FORWARD_WRAPPERS: Dict[str, Callable[[nn.Module, Any], None]] = {}
+ATTENTION_INSTALLERS: Dict[str, Callable[[nn.Module, Any], None]] = {}
 
 
 def register(class_name: str) -> Callable[[Callable], Callable]:
@@ -346,15 +347,33 @@ def register(class_name: str) -> Callable[[Callable], Callable]:
     return deco
 
 
+def register_attention_installer(class_name: str) -> Callable[[Callable], Callable]:
+    """Register a model-specific attention installer under its class name."""
+
+    def deco(fn: Callable) -> Callable:
+        ATTENTION_INSTALLERS[class_name] = fn
+        return fn
+
+    return deco
+
+
+def _registered_for(model: nn.Module, registry: Dict[str, Callable]) -> Callable | None:
+    """Resolve a class-name registry entry across the model's MRO."""
+    return next((registry[k.__name__] for k in type(model).__mro__ if k.__name__ in registry), None)
+
+
 def apply_diffusion_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
     """Attention SP (dispatch-patch or processor-injection, auto-detected) + boundary hooks."""
     sp_group = _sp().get_parallel_state().sp_group
 
-    if not _patch_attention_dispatch(model):
+    attention_installer = _registered_for(model, ATTENTION_INSTALLERS)
+    if attention_installer is not None:
+        attention_installer(model, sp_group)
+    elif not _patch_attention_dispatch(model):
         inject_sp_processors(model, sp_group)
 
     cls = type(model).__name__
-    wrapper = next((FORWARD_WRAPPERS[k.__name__] for k in type(model).__mro__ if k.__name__ in FORWARD_WRAPPERS), None)
+    wrapper = _registered_for(model, FORWARD_WRAPPERS)
     if wrapper is None:
         raise NotImplementedError(
             f"diffusion SP: attention SP wired, but no boundary spec for {cls} "
