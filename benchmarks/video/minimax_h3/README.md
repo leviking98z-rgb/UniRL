@@ -58,6 +58,8 @@ canonical and resolved Hydra config, prompt bytes and deterministic root IDs,
 the pretrained-model locator, one completed adapter checkpoint and its LoRA
 metadata, and the Python executable. The output directory must be outside the
 source checkout. Any later source/config/prompt/checkpoint mutation is rejected.
+This also means that a matrix prepared on an older commit must not be relabeled
+or reused after rebasing: prepare a fresh matrix on the corrected source HEAD.
 
 The intended two-node profile is 16 GPUs with SP8, yielding two DP groups and a
 local reorder group of two. `num_prompts` must also satisfy the colocated reward
@@ -162,6 +164,51 @@ speedup across schedule trials. A `GO` therefore cannot be produced by one
 fortunate permutation. If any declared predictor fails the 5% gate, or the
 predictors disagree across it, the overall proxy result is `NO-GO`. This is
 deliberately more conservative than the single round-robin matrix summary.
+
+### Reproducible synthetic mixed geometry and length
+
+When GPU use is prohibited, `synthesize-mixed` turns the validated CPU fixed
+profiles into four deterministic mixed waves. It binds the fixed matrix and all
+four trace digests, regenerates the balanced geometry schedule, assigns a
+deterministic nonuniform text-token count in the conditioner's legal range, and
+writes a content-addressed `trace-set.json`.
+
+The command refuses measured GPU fixed profiles: synthetic text lengths may
+never be grafted onto measured timings. Two baseline placements are useful:
+
+- `contiguous` preserves the prompt-order DP shards and is the normal-order
+  synthetic control;
+- `cost-clustered` deliberately clusters high estimated cost on one DP rank and
+  is a scheduler sensitivity test, not an expected production arrival order.
+
+```bash
+python benchmarks/video/minimax_h3/mixed_trace_analyzer.py synthesize-mixed \
+  --manifest /shared/p3/fixed-matrix/matrix.json \
+  --output-dir /shared/p3/synthetic-mixed-contiguous \
+  --seed p3-balanced-v1 \
+  --trial 0 \
+  --waves 4 \
+  --text-token-min 32 \
+  --text-token-max 512 \
+  --baseline-placement contiguous
+
+python benchmarks/video/minimax_h3/mixed_trace_analyzer.py mixed \
+  --manifest /shared/p3/fixed-matrix/matrix.json \
+  --trace-set /shared/p3/synthetic-mixed-contiguous/trace-set.json \
+  --predictor-cost packed_rows \
+  --outcome-cost packed_rows \
+  --require-mixed-length \
+  --output /shared/p3/synthetic-mixed-contiguous/analysis.json \
+  --plan-output /shared/p3/synthetic-mixed-contiguous/grouped-ab-plan.json
+```
+
+Validation re-derives the token map, geometry crossover, DP placement, and each
+trace digest. A changed trace, schedule, source commit/tree, config, prompt
+file, or frozen LoRA checkpoint is rejected even if an edited document has been
+re-signed. Synthetic output can establish a reproducible `proxy GO` or
+`proxy NO-GO` and exercise the A/B contract, but it cannot establish production
+ROI. In particular, a `cost-clustered` proxy GO only proves that the scheduler
+can recover from a deliberately bad placement.
 
 ### Auditable CPU substitute
 
@@ -368,5 +415,6 @@ PYTHONPATH=. python -m unittest -v benchmarks/video/minimax_h3/test_p3_cpu.py
 ```
 
 The tests cover balanced geometry crossover, nonuniform prompt lengths,
-recorded DP placement, plan semantic regeneration, A/B GO and NO-GO branches,
-and rank-assignment tamper rejection.
+recorded DP placement, reproducible/fail-closed synthetic trace sets, plan
+semantic regeneration, A/B GO and NO-GO branches, and rank-assignment tamper
+rejection.

@@ -244,6 +244,7 @@ class MixedAnalyzerTests(unittest.TestCase):
     def test_synthetic_mixed_trace_set_is_reproducible_and_fail_closed(self) -> None:
         source = self.temp / "synthetic-a"
         repeated = self.temp / "synthetic-b"
+        self.profiles.evidence["kind"] = "analytical_cpu_proxy"
         original_loader = MIXED.load_fixed_profiles
         self.addCleanup(setattr, MIXED, "load_fixed_profiles", original_loader)
         MIXED.load_fixed_profiles = lambda _: self.profiles

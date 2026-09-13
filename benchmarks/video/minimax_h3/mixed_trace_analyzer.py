@@ -500,6 +500,11 @@ def materialize_synthetic_mixed_traces(
 ) -> dict[str, Any]:
     """Write auditable CPU-only mixed geometry/length waves bound to fixed traces."""
     profiles = load_fixed_profiles(manifest_path)
+    if profiles.evidence.get("kind") != "analytical_cpu_proxy":
+        raise MixedAnalysisError(
+            "synthetic mixed traces require analytical_cpu_proxy fixed profiles; "
+            "never rewrite text lengths on measured GPU evidence"
+        )
     output_dir = output_dir.expanduser().resolve()
     if output_dir.is_relative_to(fixed_analyzer._load_matrix_driver()._script_repo()):
         raise MixedAnalysisError(f"synthetic output_dir must be outside the source checkout: {output_dir}")
