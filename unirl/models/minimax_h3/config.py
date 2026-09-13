@@ -96,6 +96,8 @@ class MiniMaxH3PipelineConfig:
     prompt_embedding_cache_dir: Optional[str] = None
     # Require valid precomputed entries and never create or repair cache files.
     prompt_embedding_cache_read_only: bool = False
+    # Optional append-only JSONL trace for offline workload scheduling analysis.
+    workload_telemetry_path: Optional[str] = None
 
     # The two VAEs are a SEPARATE decision from the conditioner, and default to
     # the train device even when the conditioner is parked. Together they are
@@ -116,6 +118,8 @@ class MiniMaxH3PipelineConfig:
             raise ValueError("prompt_embedding_cache_dir must be non-empty or None")
         if self.prompt_embedding_cache_read_only and self.prompt_embedding_cache_dir is None:
             raise ValueError("prompt_embedding_cache_read_only=True requires prompt_embedding_cache_dir")
+        if self.workload_telemetry_path is not None and not str(self.workload_telemetry_path).strip():
+            raise ValueError("workload_telemetry_path must be non-empty or None")
 
 
 __all__ = [
