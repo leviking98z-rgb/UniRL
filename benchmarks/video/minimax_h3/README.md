@@ -118,6 +118,51 @@ inside each fixed trace by DP rank, then round-robin merges G0-G3 into the
 predeclared mixed workload. Exit code 2 means invalid or changed evidence. With
 `--require-go`, exit code 3 means a valid `NO-GO`.
 
+### Mixed geometry and prompt-length replay
+
+`mixed_trace_analyzer.py` adds two stricter workload modes:
+
+1. `fixed-replay` composes counterfactual mixed waves from the four validated
+   fixed traces. Every wave contains the same number of G0-G3 roots, and every
+   root sees every geometry once per four-wave cycle. Multiple deterministic
+   schedule trials expose whether a result depends on a lucky input order.
+2. `mixed` consumes already-mixed JSONL waves. It requires the same bound root
+   and sibling set, legal G0-G3 geometry, one geometry per root, the declared SP
+   topology, equal recorded DP capacity, and prompt token counts matching the
+   fixed traces. The recorded DP ranks are the baseline assignment.
+
+Both modes schedule complete root trees, never individual siblings. Structural
+predictors include packed rows, SP-padded rows, and squared SP-padded rows.
+When the fixed profiles are measured GPU traces, `fixed-replay` evaluates those
+assignments against measured `total_s`; with CPU proxy traces it stays explicitly
+in the structural proxy domain. Text length is real only when the conditioner
+trace reports nonzero `text_tokens`.
+
+```bash
+python benchmarks/video/minimax_h3/mixed_trace_analyzer.py fixed-replay \
+  --manifest /shared/p3/fixed-matrix/matrix.json \
+  --trials 64 \
+  --waves 4 \
+  --output /shared/p3/fixed-matrix/mixed-replay.json \
+  --plan-output /shared/p3/fixed-matrix/grouped-ab-plan.json
+
+python benchmarks/video/minimax_h3/mixed_trace_analyzer.py mixed \
+  --manifest /shared/p3/fixed-matrix/matrix.json \
+  --trace /shared/p3/mixed/wave-0.jsonl \
+  --trace /shared/p3/mixed/wave-1.jsonl \
+  --predictor-cost attention_rows2 \
+  --outcome-cost total_s \
+  --require-mixed-length \
+  --output /shared/p3/mixed/analysis.json \
+  --plan-output /shared/p3/mixed/grouped-ab-plan.json
+```
+
+The fixed-replay implementation gate uses the p10 tail ratio and p10 predicted
+speedup across schedule trials. A `GO` therefore cannot be produced by one
+fortunate permutation. If any declared predictor fails the 5% gate, or the
+predictors disagree across it, the overall proxy result is `NO-GO`. This is
+deliberately more conservative than the single round-robin matrix summary.
+
 ### Auditable CPU substitute
 
 When GPU collection is prohibited, prepare the same matrix with
@@ -137,6 +182,50 @@ all timings are fixed to zero. They validate the matrix, load model, and
 decision logic, but cannot support a measured performance or end-to-end ROI
 claim. `matrix_proxy.py` rejects timing costs such as `total_s` and `denoise_s`;
 the analyzer rejects mixed or mislabeled evidence.
+
+## Paired grouped-reordering A/B contract
+
+`grouped_reordering_ab.py` is a CPU-only harness for preparing and analyzing the
+future GPU experiment. It never launches Ray, a trainer, or a GPU process. It
+content-addresses the source matrix, trace files, mixed workload, per-rank
+assignments, topology, and success thresholds, then emits one result template
+per arm:
+
+```bash
+python benchmarks/video/minimax_h3/grouped_reordering_ab.py prepare \
+  --plan /shared/p3/fixed-matrix/grouped-ab-plan.json \
+  --output /shared/p3/fixed-matrix/grouped-ab-contract.json \
+  --templates-dir /shared/p3/fixed-matrix/result-templates \
+  --measurement generation_s \
+  --repetitions 3 \
+  --warmup-repetitions 1
+
+python benchmarks/video/minimax_h3/grouped_reordering_ab.py validate \
+  --contract /shared/p3/fixed-matrix/grouped-ab-contract.json
+
+python benchmarks/video/minimax_h3/grouped_reordering_ab.py analyze \
+  --contract /shared/p3/fixed-matrix/grouped-ab-contract.json \
+  --baseline /shared/p3/results/baseline.json \
+  --grouped /shared/p3/results/grouped_lpt.json \
+  --output /shared/p3/results/paired-analysis.json \
+  --require-go
+```
+
+The result analyzer rejects a changed workload digest, sample set, rank
+assignment, topology, incomplete sample count, invalid per-rank timing, or
+different output digest. The default measured `GO` requires all of:
+
+- aggregate and median paired speedup at least 1.05x;
+- treatment faster in at least 75% of paired waves;
+- absolute paired reward-mean delta at most 0.01;
+- tracing overhead at most 0.5%;
+- identical order-independent output digests.
+
+The generated plan currently says
+`directly_executable_on_current_unirl: false`. It is an exact workload and result
+contract, not a hidden GPU launcher. Current H3 rollout has one shared
+`DiffusionSamplingParams` and one dense latent shape per `Sample`; executing the
+mixed plan requires the small scheduler/runtime extension described below.
 
 ## Simulator
 
@@ -247,3 +336,37 @@ Before trusting a later GPU result, require:
 3. at least 5% paired generation or end-to-end step throughput improvement;
 4. the improvement direction repeats across multiple post-warmup waves;
 5. no root siblings cross DP groups and no rank receives a different root count.
+
+## Minimum real-GPU implementation and experiment
+
+The minimum runtime change is intentionally narrower than a new batching
+system:
+
+1. Carry a per-root `DiffusionSamplingParams` (or an equivalent immutable
+   geometry key) from request construction to trainside dispatch.
+2. Before `DP_SCATTER`, group complete root trees by a deterministic structural
+   estimate and apply the plan's equal-capacity permutation inside each allowed
+   DP-rank group. Never split `samples_per_prompt` siblings.
+3. Keep `rollout.forward_batch_size=1`; each DP group may execute different
+   shapes sequentially, so no heterogeneous dense latent tensor is required.
+4. Record DP-group start/end events around the whole generation wave, plus
+   successful sample count, reward mean, and an order-independent digest of
+   sorted `sample_id -> generated artifact` hashes.
+5. Run one trace-off/trace-on control to measure telemetry overhead, one warmup
+   repetition per arm, then at least three measured paired repetitions. Alternate
+   arm order by repetition to reduce thermal/order bias.
+
+For the existing 16-GPU/SP8 topology this is two DP groups, four mixed waves,
+and 12 measured waves per arm after warmup. The baseline and treatment use the
+same frozen LoRA, prompts, per-sample seeds/noise, geometry assignment, reward
+configuration, and sample count; only the DP-root permutation differs.
+
+## CPU tests
+
+```bash
+PYTHONPATH=. python -m unittest -v benchmarks/video/minimax_h3/test_p3_cpu.py
+```
+
+The tests cover balanced geometry crossover, nonuniform prompt lengths,
+recorded DP placement, plan semantic regeneration, A/B GO and NO-GO branches,
+and rank-assignment tamper rejection.
