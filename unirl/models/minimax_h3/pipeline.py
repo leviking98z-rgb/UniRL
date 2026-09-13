@@ -101,7 +101,21 @@ class MiniMaxH3Pipeline(Pipeline):
         """Per-sample audio x_T shape ``(rows, latent_channels)``."""
         return (geometry.num_audio_rows, MINIMAX_H3_AUDIO_LATENT_CHANNELS)
 
+    @property
+    def prompt_prefetch_enabled(self) -> bool:
+        """Return whether trainside next-microbatch prompt prefetch is active."""
+        return self.text_embed.prefetch_enabled
+
     def generate(self, sample: Sample) -> Sample:
+        """Generate one video/audio sample."""
+        return self._generate(sample)
+
+    def generate_with_prompt_prefetch(self, sample: Sample, next_sample: Sample) -> Sample:
+        """Generate one microbatch while queuing the next prompt."""
+        return self._generate(sample, next_sample=next_sample)
+
+    def _generate(self, sample: Sample, *, next_sample: Sample | None = None) -> Sample:
+        """Generate one sample with optional next-prompt overlap."""
         gen = sample.parts[-1]
         params = gen.sampling_params
         require(params is not None, "MiniMaxH3Pipeline.generate: generation Part carries no sampling params")
@@ -117,6 +131,8 @@ class MiniMaxH3Pipeline(Pipeline):
 
         geometry = MiniMaxH3Geometry.from_params(params)
         conditions = MiniMaxH3Conditions(text=self.text_embed.embed(texts))
+        if next_sample is not None:
+            self.prefetch_prompt(next_sample)
 
         # Driver-authoritative x_T. MiniMax-H3 draws VIDEO noise first, then
         # audio, off the one request generator -- the ``salt`` sibling
@@ -171,6 +187,17 @@ class MiniMaxH3Pipeline(Pipeline):
         # generate() hands back, so the whole Sample has to come back out.
         # Same shape as sd3 / wan21 / ltx2.
         return Sample(parts=[*sample.parts[:-1], filled], reward_compute_s=sample.reward_compute_s)
+
+    def prefetch_prompt(self, sample: Sample) -> bool:
+        """Queue the prompt for a later trainside microbatch."""
+        conditioning = list(sample.conditioning())
+        texts = next((c for c in conditioning if isinstance(c, Texts)), None)
+        require(texts is not None, "MiniMaxH3Pipeline.prefetch_prompt: no text prompt in the sample conditioning")
+        return self.text_embed.prefetch(texts)
+
+    def shutdown_prompt_prefetch(self) -> None:
+        """Stop the prompt prefetch worker."""
+        self.text_embed.shutdown()
 
 
 __all__ = ["MiniMaxH3Pipeline"]

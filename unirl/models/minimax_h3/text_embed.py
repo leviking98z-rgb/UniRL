@@ -7,9 +7,11 @@ import hashlib
 import logging
 import os
 import tempfile
+import threading
 import time
 from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import cache
 from typing import TYPE_CHECKING, Iterator, List, Sequence
@@ -21,6 +23,7 @@ from unirl.types.conditions import TextEmbedCondition
 from unirl.types.primitives import Texts
 from unirl.utils.run_id import resolve_run_id
 
+from .prefetch import BoundedPrefetcher, PrefetchCancelledError
 from .vendor import MINIMAX_H3_TEXT_ENCODER_LAYER
 
 if TYPE_CHECKING:
@@ -29,9 +32,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _EMBED_SYNC_TIMEOUT = timedelta(minutes=30)
 _DISK_CACHE_SCHEMA = "unirl:minimax-h3:qwen3-vl:text-embedding:v1"
+_PREFETCH_SCHEMA = "unirl:minimax-h3:qwen3-vl:text-embedding-prefetch:v1"
 # One entry is [1, tokens, hidden] in the encoder's own dtype — a few MB for a
 # typical prompt, so this bounds the CPU-resident cache at a few hundred MB.
 _PROMPT_CACHE_SIZE = 64
+
+
+@dataclass(frozen=True)
+class _PrefetchedEmbedding:
+    """One validated prompt identity and its CPU embedding."""
+
+    digest: str
+    token_ids: tuple[int, ...]
+    embedding: torch.Tensor
 
 
 @cache
@@ -114,6 +127,8 @@ class MiniMaxH3TextEmbedStage:
         )
         self._disk_cache_read_only = bool(getattr(bundle, "prompt_embedding_cache_read_only", False))
         self._share_across_sp = bool(getattr(bundle, "prompt_embedding_share_across_sp", False))
+        prefetch_requested = bool(getattr(bundle, "prompt_embedding_prefetch", False))
+        prefetch_capacity = int(getattr(bundle, "prompt_embedding_prefetch_capacity", 8))
         self._checkpoint_identity = str(getattr(bundle, "text_encoder_checkpoint_identity", bundle.pretrained_path))
         self._text_encoder_dtype = getattr(bundle, "text_encoder_dtype", None)
         if self._text_encoder_dtype is None:
@@ -124,6 +139,20 @@ class MiniMaxH3TextEmbedStage:
         # avoid repeating a 32B conditioner forward for the same prompt.
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._embedding_sync_group = None
+        self._conditioner_lock = threading.Lock()
+        self._prefetch = (
+            BoundedPrefetcher[str, _PrefetchedEmbedding](
+                prefetch_capacity,
+                thread_name="minimax-h3-prompt-prefetch",
+            )
+            if prefetch_requested and self._prefetch_compatible
+            else None
+        )
+        if prefetch_requested and self._prefetch is None:
+            logger.info(
+                "MiniMax-H3 prompt prefetch disabled: it requires a CPU-resident conditioner, "
+                "text_encoder_onload_for_embed=False, and no persistent disk cache"
+            )
 
     @property
     def _encoder_device(self) -> torch.device:
@@ -134,6 +163,50 @@ class MiniMaxH3TextEmbedStage:
         """The decoder stack that owns ``.layers``."""
         model = self.text_encoder.model
         return getattr(model, "language_model", model)
+
+    @property
+    def _prefetch_compatible(self) -> bool:
+        """Return whether background conditioner execution is CPU-only and local."""
+        return self._encoder_device.type == "cpu" and not self._onload_for_embed and self._disk_cache_dir is None
+
+    @property
+    def prefetch_enabled(self) -> bool:
+        """Return whether next-microbatch prompt prefetch is active."""
+        return self._prefetch is not None and not self._prefetch.closed
+
+    @torch.no_grad()
+    def prefetch(self, texts: Texts) -> bool:
+        """Queue CPU embeddings without entering distributed collectives."""
+        prefetcher = self._prefetch
+        if prefetcher is None or prefetcher.closed:
+            return False
+        prompts = list(dict.fromkeys(texts.texts))
+        if not prompts:
+            return False
+        if self._share_across_sp and not self._is_sp_source_rank():
+            return True
+
+        submitted = False
+        for prompt in prompts:
+            if prompt in self._cache:
+                continue
+            token_ids = self._tokenize(prompt)
+            key = self._prefetch_key(token_ids)
+            accepted = prefetcher.submit(
+                key,
+                lambda prompt=prompt, token_ids=token_ids, key=key: self._encode_prefetch(
+                    prompt,
+                    token_ids,
+                    key,
+                ),
+            )
+            submitted = submitted or accepted
+        return submitted
+
+    def shutdown(self) -> None:
+        """Stop prompt prefetch after finishing an active CPU forward."""
+        if self._prefetch is not None:
+            self._prefetch.shutdown()
 
     @torch.no_grad()
     def embed(self, texts: Texts) -> TextEmbedCondition:
@@ -216,6 +289,9 @@ class MiniMaxH3TextEmbedStage:
         resolved = {prompt: self._cache[prompt] for prompt in prompts if prompt in self._cache}
         memory_hits = len(resolved)
         missing = [prompt for prompt in prompts if prompt not in resolved]
+        prefetched = self._take_prefetched(missing, resolved)
+        memory_hits += prefetched
+        missing = [prompt for prompt in missing if prompt not in resolved]
         disk_hits = 0
         misses = len(missing)
         if missing and self._disk_cache_dir is not None:
@@ -279,6 +355,26 @@ class MiniMaxH3TextEmbedStage:
         if sp_size <= 1:
             return None
         return group
+
+    def _is_sp_source_rank(self) -> bool:
+        """Return whether this rank may run the local conditioner under SP."""
+        if not self._share_across_sp:
+            return True
+
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return True
+        try:
+            from unirl.train.backend.veomni import _compat
+
+            _compat.ensure_installed()
+            from veomni.distributed.parallel_state import get_parallel_state
+
+            state = get_parallel_state()
+            return int(state.sp_size) <= 1 or int(state.sp_rank) == 0
+        except BaseException:
+            return False
 
     def _resolve_shared(
         self, prompts: Sequence[str], group
@@ -492,7 +588,7 @@ class MiniMaxH3TextEmbedStage:
 
     def _encode_missing(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> None:
         """Encode missing prompts together under one conditioner residency window."""
-        with self._embedding_residency():
+        with self._conditioner_lock, self._embedding_residency():
             encoder_device = self._encoder_device
             for prompt in prompts:
                 cached = self._encode_prompt(prompt, encoder_device).detach().to("cpu").contiguous()
@@ -511,9 +607,67 @@ class MiniMaxH3TextEmbedStage:
         if len(self._cache) > _PROMPT_CACHE_SIZE:
             self._cache.popitem(last=False)
 
+    def _take_prefetched(self, prompts: Sequence[str], resolved: dict[str, torch.Tensor]) -> int:
+        """Consume matching prefetched embeddings and validate their identities."""
+        if self._prefetch is None:
+            return 0
+        hits = 0
+        entries_by_key: OrderedDict[str, tuple[list[str], list[int]]] = OrderedDict()
+        for prompt in prompts:
+            token_ids = self._tokenize(prompt)
+            key = self._prefetch_key(token_ids)
+            if key in entries_by_key:
+                entries_by_key[key][0].append(prompt)
+            else:
+                entries_by_key[key] = ([prompt], token_ids)
+        for key, (entry_prompts, token_ids) in entries_by_key.items():
+            try:
+                found, prefetched = self._prefetch.take(key)
+            except PrefetchCancelledError:
+                continue
+            if not found:
+                continue
+            require(prefetched is not None, f"MiniMax-H3 prompt prefetch {key} returned no value")
+            require(prefetched.digest == key, "MiniMax-H3 prompt prefetch digest mismatch")
+            require(prefetched.token_ids == tuple(token_ids), "MiniMax-H3 prompt prefetch token IDs mismatch")
+            self._validate_cached_tensor(prefetched.embedding, token_ids)
+            for prompt in entry_prompts:
+                self._remember(prompt, prefetched.embedding, resolved)
+            hits += len(entry_prompts)
+        return hits
+
+    @torch.no_grad()
+    def _encode_prefetch(self, prompt: str, token_ids: list[int], digest: str) -> _PrefetchedEmbedding:
+        """Encode one prompt on the resident CPU conditioner."""
+        with self._conditioner_lock:
+            encoder_device = self._encoder_device
+            require(encoder_device.type == "cpu", "MiniMax-H3 prompt prefetch conditioner moved off CPU")
+            embedding = self._encode_prompt(prompt, encoder_device, token_ids=token_ids).detach().to("cpu").contiguous()
+        self._validate_cached_tensor(embedding, token_ids)
+        return _PrefetchedEmbedding(digest=digest, token_ids=tuple(token_ids), embedding=embedding)
+
     def _tokenize(self, prompt: str) -> list[int]:
         """Return the input IDs that define one cache entry."""
         return list(self.tokenizer(prompt, add_special_tokens=False)["input_ids"])
+
+    def _prefetch_key(self, token_ids: Sequence[int]) -> str:
+        """Hash the full identity required to consume one prefetched result."""
+        digest = hashlib.sha256()
+        for value in (
+            _PREFETCH_SCHEMA,
+            self._checkpoint_identity,
+            str(MINIMAX_H3_TEXT_ENCODER_LAYER),
+            str(self._encoder_dtype),
+            str(self.dtype),
+            str(self._expected_hidden_size),
+        ):
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+        digest.update(len(token_ids).to_bytes(8, "big"))
+        for token_id in token_ids:
+            digest.update(int(token_id).to_bytes(8, "big", signed=True))
+        return digest.hexdigest()
 
     def _disk_cache_key(self, token_ids: Sequence[int]) -> str:
         """Hash checkpoint, layer, dtype, and tokenizer input IDs."""
@@ -630,7 +784,10 @@ class MiniMaxH3TextEmbedStage:
     def _ensure_embedding_sync_group(self) -> None:
         """Build the CPU control group while the ranks are still in lockstep."""
         if self._embedding_sync_group is not None or (
-            not self._onload_for_embed and self._disk_cache_dir is None and not self._share_across_sp
+            not self._onload_for_embed
+            and self._disk_cache_dir is None
+            and not self._share_across_sp
+            and not self.prefetch_enabled
         ):
             return
         import torch.distributed as dist

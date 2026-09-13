@@ -51,6 +51,8 @@ class MiniMaxH3Bundle(Bundle):
         prompt_embedding_cache_dir: str | None = None,
         prompt_embedding_cache_read_only: bool = False,
         prompt_embedding_share_across_sp: bool = False,
+        prompt_embedding_prefetch: bool = False,
+        prompt_embedding_prefetch_capacity: int = 8,
     ) -> None:
         super().__init__()
         self.transformer = transformer
@@ -71,11 +73,15 @@ class MiniMaxH3Bundle(Bundle):
             raise ValueError("prompt_embedding_cache_dir must be non-empty or None")
         if prompt_embedding_cache_read_only and prompt_embedding_cache_dir is None:
             raise ValueError("prompt_embedding_cache_read_only=True requires prompt_embedding_cache_dir")
+        if prompt_embedding_prefetch_capacity < 1:
+            raise ValueError("prompt_embedding_prefetch_capacity must be >= 1")
         self.text_encoder_checkpoint_identity = text_encoder_checkpoint_identity or pretrained_path
         self.text_encoder_dtype = text_encoder_dtype or next(text_encoder.parameters()).dtype
         self.prompt_embedding_cache_dir = prompt_embedding_cache_dir
         self.prompt_embedding_cache_read_only = prompt_embedding_cache_read_only
         self.prompt_embedding_share_across_sp = prompt_embedding_share_across_sp
+        self.prompt_embedding_prefetch = prompt_embedding_prefetch
+        self.prompt_embedding_prefetch_capacity = int(prompt_embedding_prefetch_capacity)
 
     @classmethod
     def from_config(cls, config: MiniMaxH3PipelineConfig) -> "MiniMaxH3Bundle":
@@ -168,6 +174,8 @@ class MiniMaxH3Bundle(Bundle):
             prompt_embedding_cache_dir=config.prompt_embedding_cache_dir,
             prompt_embedding_cache_read_only=config.prompt_embedding_cache_read_only,
             prompt_embedding_share_across_sp=config.prompt_embedding_share_across_sp,
+            prompt_embedding_prefetch=config.prompt_embedding_prefetch,
+            prompt_embedding_prefetch_capacity=config.prompt_embedding_prefetch_capacity,
         )
         if config.meta_init_transformer:
             # Diffusers layout: the backend's sharded loader reads the

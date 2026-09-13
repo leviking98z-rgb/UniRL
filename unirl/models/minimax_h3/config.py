@@ -98,6 +98,9 @@ class MiniMaxH3PipelineConfig:
     prompt_embedding_cache_read_only: bool = False
     # Under Ulysses SP, compute each duplicated prompt once per group.
     prompt_embedding_share_across_sp: bool = False
+    # Prepare the next trainside microbatch with the CPU conditioner.
+    prompt_embedding_prefetch: bool = False
+    prompt_embedding_prefetch_capacity: int = 8
 
     # The two VAEs are a SEPARATE decision from the conditioner, and default to
     # the train device even when the conditioner is parked. Together they are
@@ -118,6 +121,8 @@ class MiniMaxH3PipelineConfig:
             raise ValueError("prompt_embedding_cache_dir must be non-empty or None")
         if self.prompt_embedding_cache_read_only and self.prompt_embedding_cache_dir is None:
             raise ValueError("prompt_embedding_cache_read_only=True requires prompt_embedding_cache_dir")
+        if self.prompt_embedding_prefetch_capacity < 1:
+            raise ValueError("prompt_embedding_prefetch_capacity must be >= 1")
 
 
 __all__ = [

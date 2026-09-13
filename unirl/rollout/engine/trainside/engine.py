@@ -98,10 +98,26 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                     return self.pipeline.generate(sample)
                 input_parts = sample.parts[:-1]
                 gen_chunks: List[Part] = []
-                for start in range(0, bs, fbs):
-                    end = min(start + fbs, bs)
-                    chunk = self.pipeline.generate(Sample(parts=[*input_parts, gen.slice(start, end)]))
-                    gen_chunks.append(chunk.parts[-1])
+                generate_with_prefetch = getattr(self.pipeline, "generate_with_prompt_prefetch", None)
+                use_prompt_prefetch = bool(getattr(self.pipeline, "prompt_prefetch_enabled", False)) and callable(
+                    generate_with_prefetch
+                )
+                if use_prompt_prefetch:
+                    slices = [(start, min(start + fbs, bs)) for start in range(0, bs, fbs)]
+                    for index, (start, end) in enumerate(slices):
+                        current = Sample(parts=[*input_parts, gen.slice(start, end)])
+                        if index + 1 < len(slices):
+                            next_start, next_end = slices[index + 1]
+                            next_sample = Sample(parts=[*input_parts, gen.slice(next_start, next_end)])
+                            chunk = generate_with_prefetch(current, next_sample)
+                        else:
+                            chunk = self.pipeline.generate(current)
+                        gen_chunks.append(chunk.parts[-1])
+                else:
+                    for start in range(0, bs, fbs):
+                        end = min(start + fbs, bs)
+                        chunk = self.pipeline.generate(Sample(parts=[*input_parts, gen.slice(start, end)]))
+                        gen_chunks.append(chunk.parts[-1])
                 return Sample(parts=[*input_parts, Part.concat(gen_chunks)])
         finally:
             for m, mode in zip(self._models, prev_modes):
@@ -117,6 +133,9 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                 return
             with self._generate_lock:
                 self._shutdown_requested = True
+                shutdown = getattr(self.pipeline, "shutdown_prompt_prefetch", None)
+                if shutdown is not None:
+                    shutdown()
             self._shutdown_complete = True
 
     def health_check(self) -> bool:
