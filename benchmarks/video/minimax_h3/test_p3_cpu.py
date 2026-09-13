@@ -77,6 +77,7 @@ def _fake_profiles(root: Path):
     manifest = {
         "manifest_id": "fake-matrix",
         "binding": {"source_commit": "deadbeef"},
+        "frozen_config": {"bundle.config": {"max_sequence_length": 512}},
         "settings": {
             "num_devices": 4,
             "sp_size": 2,
@@ -239,6 +240,67 @@ class MixedAnalyzerTests(unittest.TestCase):
         _write_json(path, tampered)
         with self.assertRaisesRegex(MIXED.MixedAnalysisError, "semantics differ"):
             MIXED.validate_plan(path)
+
+    def test_synthetic_mixed_trace_set_is_reproducible_and_fail_closed(self) -> None:
+        source = self.temp / "synthetic-a"
+        repeated = self.temp / "synthetic-b"
+        original_loader = MIXED.load_fixed_profiles
+        self.addCleanup(setattr, MIXED, "load_fixed_profiles", original_loader)
+        MIXED.load_fixed_profiles = lambda _: self.profiles
+
+        first = MIXED.materialize_synthetic_mixed_traces(
+            self.profiles.manifest_path,
+            source,
+            seed="synthetic-seed",
+            trial=3,
+            waves=4,
+            text_token_min=32,
+            text_token_max=512,
+            baseline_placement="cost-clustered",
+        )
+        second = MIXED.materialize_synthetic_mixed_traces(
+            self.profiles.manifest_path,
+            repeated,
+            seed="synthetic-seed",
+            trial=3,
+            waves=4,
+            text_token_min=32,
+            text_token_max=512,
+            baseline_placement="cost-clustered",
+        )
+        self.assertEqual(first["text_tokens"], second["text_tokens"])
+        first_trace_bytes = [Path(row["path"]).read_bytes() for row in first["traces"]]
+        second_trace_bytes = [Path(row["path"]).read_bytes() for row in second["traces"]]
+        self.assertEqual(first_trace_bytes, second_trace_bytes)
+
+        report, plan = MIXED.analyze_mixed_traces(
+            self.profiles.manifest_path,
+            (),
+            predictor_cost="packed_rows",
+            outcome_cost="packed_rows",
+            require_mixed_length=True,
+            trace_set_path=source / "trace-set.json",
+        )
+        self.assertTrue(report["text_length"]["varies"])
+        self.assertEqual(plan["source"]["mode"], "synthetic_mixed_trace_set")
+        self.assertFalse(plan["source"]["evidence"]["measured_roi_eligible"])
+
+        plan_path = self.temp / "synthetic-plan.json"
+        _write_json(plan_path, plan)
+        self.assertEqual(MIXED.validate_plan(plan_path)["plan_id"], plan["plan_id"])
+
+        trace = Path(first["traces"][0]["path"])
+        with trace.open("a", encoding="utf-8") as output:
+            output.write("{}\n")
+        with self.assertRaisesRegex(MIXED.MixedAnalysisError, "digest changed"):
+            MIXED.analyze_mixed_traces(
+                self.profiles.manifest_path,
+                (),
+                predictor_cost="packed_rows",
+                outcome_cost="packed_rows",
+                require_mixed_length=True,
+                trace_set_path=source / "trace-set.json",
+            )
 
 
 class ABHarnessTests(unittest.TestCase):

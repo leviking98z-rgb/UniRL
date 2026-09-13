@@ -21,14 +21,25 @@ from benchmarks.video.minimax_h3.grouped_reordering import (  # noqa: E402
     capacity_lpt,
     contiguous_assignment,
 )
-from unirl.utils.minimax_h3_workload import MiniMaxH3WorkloadRecord, read_workload_records  # noqa: E402
+from unirl.utils.minimax_h3_workload import (  # noqa: E402
+    MiniMaxH3WorkloadRecord,
+    append_workload_record,
+    read_workload_records,
+)
 
 ANALYSIS_SCHEMA = "unirl:minimax-h3:mixed-geometry-length-analysis:v1"
 PLAN_SCHEMA = "unirl:minimax-h3:grouped-reordering-ab-plan:v1"
 SCHEDULE_SCHEMA = "unirl:minimax-h3:balanced-mixed-schedule:v1"
+SYNTHETIC_TRACE_SET_SCHEMA = "unirl:minimax-h3:synthetic-mixed-trace-set:v1"
 STRUCTURAL_COSTS = ("packed_rows", "padded_rows", "attention_rows2")
 MEASURED_COSTS = ("denoise_s", "total_s")
 ALL_COSTS = (*STRUCTURAL_COSTS, *MEASURED_COSTS)
+SYNTHETIC_TEXT_METHOD = "deterministic sha256(root_id) projection; synthetic, not conditioner measured"
+SYNTHETIC_EVIDENCE = {
+    "kind": "analytical_cpu_proxy",
+    "provenance": "derived from content-addressed fixed traces with deterministic synthetic text lengths",
+    "measured_roi_eligible": False,
+}
 
 
 class MixedAnalysisError(ValueError):
@@ -407,6 +418,181 @@ def _fixed_wave_records(
     return waves
 
 
+def _replace_record(
+    record: MiniMaxH3WorkloadRecord,
+    *,
+    text_tokens: int | None = None,
+    dp_rank: int | None = None,
+) -> MiniMaxH3WorkloadRecord:
+    """Rebuild one trace row after changing only synthetic workload fields."""
+    return MiniMaxH3WorkloadRecord.build(
+        sample_id=record.sample_id,
+        root_id=record.root_id,
+        height=record.height,
+        width=record.width,
+        num_frames=record.num_frames,
+        text_tokens=record.text_tokens if text_tokens is None else int(text_tokens),
+        sp_size=record.sp_size,
+        dp_rank=record.dp_rank if dp_rank is None else int(dp_rank),
+        sp_rank=record.sp_rank,
+        text_embed_s=record.text_embed_s,
+        denoise_s=record.denoise_s,
+        decode_s=record.decode_s,
+        total_s=record.total_s,
+    )
+
+
+def _synthetic_text_tokens(
+    profiles: FixedProfiles,
+    *,
+    seed: str,
+    minimum: int,
+    maximum: int,
+) -> dict[str, int]:
+    if minimum < 1 or maximum <= minimum:
+        raise MixedAnalysisError(f"synthetic mixed lengths require 1 <= minimum < maximum, got {minimum}..{maximum}")
+    span = maximum - minimum + 1
+    values = {}
+    for root_id in profiles.root_ids:
+        digest = hashlib.sha256(f"{SYNTHETIC_TRACE_SET_SCHEMA}\0{seed}\0{root_id}".encode()).digest()
+        values[root_id] = minimum + int.from_bytes(digest[:8], "big") % span
+    if len(values) > 1 and len(set(values.values())) == 1:
+        values[profiles.root_ids[0]] = minimum
+        values[profiles.root_ids[-1]] = maximum
+    return values
+
+
+def _baseline_rank_assignments(
+    profiles: FixedProfiles,
+    wave: Mapping[str, Sequence[MiniMaxH3WorkloadRecord]],
+    *,
+    mode: str,
+) -> dict[str, int]:
+    roots_per_rank = len(profiles.root_ids) // profiles.ranks
+    if mode == "contiguous":
+        return {root_id: index // roots_per_rank for index, root_id in enumerate(profiles.root_ids)}
+    if mode != "cost-clustered":
+        raise MixedAnalysisError(f"unsupported synthetic baseline placement {mode!r}")
+
+    rank_ids = []
+    for rank in range(profiles.ranks):
+        rank_ids.extend([rank] * roots_per_rank)
+    ordered = sorted(
+        profiles.root_ids,
+        key=lambda root_id: (
+            -sum(record.padded_rows**2 for record in wave[root_id]),
+            root_id,
+        ),
+    )
+    return {root_id: rank_ids[index] for index, root_id in enumerate(ordered)}
+
+
+def materialize_synthetic_mixed_traces(
+    manifest_path: Path,
+    output_dir: Path,
+    *,
+    seed: str,
+    trial: int,
+    waves: int,
+    text_token_min: int,
+    text_token_max: int,
+    baseline_placement: str,
+) -> dict[str, Any]:
+    """Write auditable CPU-only mixed geometry/length waves bound to fixed traces."""
+    profiles = load_fixed_profiles(manifest_path)
+    output_dir = output_dir.expanduser().resolve()
+    if output_dir.is_relative_to(fixed_analyzer._load_matrix_driver()._script_repo()):
+        raise MixedAnalysisError(f"synthetic output_dir must be outside the source checkout: {output_dir}")
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise MixedAnalysisError(f"synthetic output directory must not exist or must be empty: {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    assignments = balanced_geometry_schedule(
+        profiles.root_ids,
+        profiles.geometry_names,
+        source_id=profiles.manifest["manifest_id"],
+        seed=seed,
+        trial=trial,
+        waves=waves,
+    )
+    max_sequence_length = int(profiles.manifest["frozen_config"]["bundle.config"].get("max_sequence_length", 512))
+    if text_token_max > max_sequence_length:
+        raise MixedAnalysisError(
+            f"synthetic text_token_max={text_token_max} exceeds bound conditioner limit {max_sequence_length}"
+        )
+    fixed_waves = _fixed_wave_records(profiles, assignments)
+    token_counts = _synthetic_text_tokens(
+        profiles,
+        seed=seed,
+        minimum=text_token_min,
+        maximum=text_token_max,
+    )
+    traces = []
+    for wave_index, wave in enumerate(fixed_waves):
+        tokenized_wave = {
+            root_id: tuple(_replace_record(row, text_tokens=token_counts[root_id]) for row in wave[root_id])
+            for root_id in profiles.root_ids
+        }
+        ranks = _baseline_rank_assignments(profiles, tokenized_wave, mode=baseline_placement)
+        trace = output_dir / f"wave-{wave_index:02d}.jsonl"
+        for root_id in profiles.root_ids:
+            for row in tokenized_wave[root_id]:
+                append_workload_record(
+                    trace,
+                    _replace_record(
+                        row,
+                        dp_rank=ranks[root_id],
+                    ),
+                )
+        traces.append(
+            {
+                "wave": wave_index,
+                "path": str(trace),
+                "sha256": _sha256_file(trace),
+            }
+        )
+
+    document = {
+        "schema": SYNTHETIC_TRACE_SET_SCHEMA,
+        "source": {
+            "matrix": str(profiles.manifest_path),
+            "matrix_id": profiles.manifest["manifest_id"],
+            "matrix_sha256": profiles.manifest_sha256,
+            "trace_sha256": dict(profiles.trace_sha256),
+            "source_binding": profiles.manifest["binding"],
+        },
+        "schedule": {
+            "schema": SCHEDULE_SCHEMA,
+            "seed": seed,
+            "trial": trial,
+            "waves": waves,
+            "geometry_names": list(profiles.geometry_names),
+            "balanced_geometry_per_wave": True,
+            "full_geometry_cross_over_per_cycle": True,
+        },
+        "topology": {
+            "physical_devices": int(profiles.manifest["settings"]["num_devices"]),
+            "sp_size": profiles.sp_size,
+            "dp_groups": profiles.ranks,
+            "group_size": profiles.group_size,
+            "samples_per_prompt": profiles.samples_per_prompt,
+        },
+        "text_tokens": {
+            "method": SYNTHETIC_TEXT_METHOD,
+            "minimum": text_token_min,
+            "maximum": text_token_max,
+            "conditioner_limit": max_sequence_length,
+            "by_root": token_counts,
+        },
+        "baseline_placement": baseline_placement,
+        "evidence": SYNTHETIC_EVIDENCE,
+        "traces": traces,
+    }
+    document["trace_set_id"] = _sha256_json(document)
+    _write_json(output_dir / "trace-set.json", document)
+    return document
+
+
 def _quantile(values: Sequence[float], probability: float) -> float:
     ordered = sorted(float(value) for value in values)
     if not ordered:
@@ -554,6 +740,7 @@ def _build_observed_plan(
     waves: Sequence[Mapping[str, Sequence[MiniMaxH3WorkloadRecord]]],
     *,
     predictor_cost: str,
+    synthetic_trace_set: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     simulation = _simulate_waves(
         profiles.root_ids,
@@ -565,20 +752,35 @@ def _build_observed_plan(
         baseline_placement="recorded",
         include_wave_details=True,
     )
+    source: dict[str, Any] = {
+        "mode": "observed_mixed_trace",
+        "matrix": str(profiles.manifest_path),
+        "matrix_id": profiles.manifest["manifest_id"],
+        "matrix_sha256": profiles.manifest_sha256,
+        "mixed_traces": [{"path": str(path), "sha256": _sha256_file(path)} for path in paths],
+        "source_binding": profiles.manifest["binding"],
+        "evidence": {
+            "kind": "externally_supplied_mixed_trace",
+            "provenance": "content-addressed after collection; no runtime receipt",
+        },
+    }
+    if synthetic_trace_set is not None:
+        document = synthetic_trace_set["document"]
+        source.update(
+            {
+                "mode": "synthetic_mixed_trace_set",
+                "trace_set": {
+                    "path": str(synthetic_trace_set["path"]),
+                    "sha256": _sha256_file(synthetic_trace_set["path"]),
+                    "trace_set_id": document["trace_set_id"],
+                },
+                "evidence": document["evidence"],
+            }
+        )
+
     plan = {
         "schema": PLAN_SCHEMA,
-        "source": {
-            "mode": "observed_mixed_trace",
-            "matrix": str(profiles.manifest_path),
-            "matrix_id": profiles.manifest["manifest_id"],
-            "matrix_sha256": profiles.manifest_sha256,
-            "mixed_traces": [{"path": str(path), "sha256": _sha256_file(path)} for path in paths],
-            "source_binding": profiles.manifest["binding"],
-            "evidence": {
-                "kind": "externally_supplied_mixed_trace",
-                "provenance": "content-addressed after collection; no runtime receipt",
-            },
-        },
+        "source": source,
         "schedule": {
             "schema": "unirl:minimax-h3:observed-mixed-schedule:v1",
             "waves": len(waves),
@@ -771,6 +973,8 @@ def analyze_fixed_replay(
 def _validate_mixed_wave(
     profiles: FixedProfiles,
     trace: Path,
+    *,
+    expected_text_tokens: Mapping[str, int] | None = None,
 ) -> dict[str, tuple[MiniMaxH3WorkloadRecord, ...]]:
     records = read_workload_records([trace])
     expected_count = len(profiles.root_ids) * profiles.samples_per_prompt
@@ -792,11 +996,15 @@ def _validate_mixed_wave(
             raise MixedAnalysisError(f"mixed trace root {root_id!r} has an invalid or non-atomic geometry")
         if len({row.text_tokens for row in rows}) != 1:
             raise MixedAnalysisError(f"mixed trace root {root_id!r} has inconsistent sibling text lengths")
-        expected_text_tokens = profiles.records[profiles.geometry_names[0]][root_id][0].text_tokens
-        if rows[0].text_tokens != expected_text_tokens:
+        bound_text_tokens = (
+            int(expected_text_tokens[root_id])
+            if expected_text_tokens is not None
+            else profiles.records[profiles.geometry_names[0]][root_id][0].text_tokens
+        )
+        if rows[0].text_tokens != bound_text_tokens:
             raise MixedAnalysisError(
                 f"mixed trace root {root_id!r} text length {rows[0].text_tokens} differs from "
-                f"the bound fixed profiles ({expected_text_tokens})"
+                f"the bound trace contract ({bound_text_tokens})"
             )
         if len({row.dp_rank for row in rows}) != 1:
             raise MixedAnalysisError(f"mixed trace root {root_id!r} spans DP ranks")
@@ -808,6 +1016,136 @@ def _validate_mixed_wave(
     return {root_id: by_root[root_id] for root_id in profiles.root_ids}
 
 
+def _load_synthetic_trace_set(path: Path, profiles: FixedProfiles) -> dict[str, Any]:
+    resolved = path.expanduser().resolve(strict=True)
+    try:
+        document = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MixedAnalysisError(f"cannot read synthetic trace set {resolved}: {exc}") from exc
+    if not isinstance(document, dict) or document.get("schema") != SYNTHETIC_TRACE_SET_SCHEMA:
+        raise MixedAnalysisError(f"unsupported synthetic trace-set schema in {resolved}")
+    payload = dict(document)
+    trace_set_id = payload.pop("trace_set_id", None)
+    if trace_set_id != _sha256_json(payload):
+        raise MixedAnalysisError("synthetic trace_set_id does not match its contents")
+
+    expected_source = {
+        "matrix": str(profiles.manifest_path),
+        "matrix_id": profiles.manifest["manifest_id"],
+        "matrix_sha256": profiles.manifest_sha256,
+        "trace_sha256": dict(profiles.trace_sha256),
+        "source_binding": profiles.manifest["binding"],
+    }
+    if document.get("source") != expected_source:
+        raise MixedAnalysisError("synthetic trace set source differs from the validated fixed matrix")
+    if document.get("evidence") != SYNTHETIC_EVIDENCE:
+        raise MixedAnalysisError("synthetic trace set evidence declaration differs from the CPU-only contract")
+
+    schedule = document.get("schedule")
+    if not isinstance(schedule, dict):
+        raise MixedAnalysisError("synthetic trace set has no schedule")
+    expected_assignments = balanced_geometry_schedule(
+        profiles.root_ids,
+        profiles.geometry_names,
+        source_id=profiles.manifest["manifest_id"],
+        seed=str(schedule.get("seed", "")),
+        trial=int(schedule.get("trial", -1)),
+        waves=int(schedule.get("waves", 0)),
+    )
+    expected_schedule = {
+        "schema": SCHEDULE_SCHEMA,
+        "seed": str(schedule.get("seed", "")),
+        "trial": int(schedule.get("trial", -1)),
+        "waves": len(expected_assignments),
+        "geometry_names": list(profiles.geometry_names),
+        "balanced_geometry_per_wave": True,
+        "full_geometry_cross_over_per_cycle": True,
+    }
+    if schedule != expected_schedule:
+        raise MixedAnalysisError("synthetic trace set schedule differs from deterministic regeneration")
+
+    expected_topology = {
+        "physical_devices": int(profiles.manifest["settings"]["num_devices"]),
+        "sp_size": profiles.sp_size,
+        "dp_groups": profiles.ranks,
+        "group_size": profiles.group_size,
+        "samples_per_prompt": profiles.samples_per_prompt,
+    }
+    if document.get("topology") != expected_topology:
+        raise MixedAnalysisError("synthetic trace set topology differs from the fixed matrix")
+
+    text = document.get("text_tokens")
+    if not isinstance(text, dict):
+        raise MixedAnalysisError("synthetic trace set has no text-token contract")
+    minimum = int(text.get("minimum", 0))
+    maximum = int(text.get("maximum", 0))
+    expected_tokens = _synthetic_text_tokens(
+        profiles,
+        seed=str(schedule["seed"]),
+        minimum=minimum,
+        maximum=maximum,
+    )
+    max_sequence_length = int(profiles.manifest["frozen_config"]["bundle.config"].get("max_sequence_length", 512))
+    expected_text = {
+        "method": SYNTHETIC_TEXT_METHOD,
+        "minimum": minimum,
+        "maximum": maximum,
+        "conditioner_limit": max_sequence_length,
+        "by_root": expected_tokens,
+    }
+    if text != expected_text:
+        raise MixedAnalysisError("synthetic text-token mapping differs from deterministic regeneration")
+
+    baseline_placement = str(document.get("baseline_placement", ""))
+    if baseline_placement not in {"contiguous", "cost-clustered"}:
+        raise MixedAnalysisError(f"unsupported synthetic baseline placement {baseline_placement!r}")
+    trace_entries = document.get("traces")
+    if not isinstance(trace_entries, list) or len(trace_entries) != len(expected_assignments):
+        raise MixedAnalysisError("synthetic trace set does not bind every scheduled wave")
+    paths = []
+    waves = []
+    for wave_index, (entry, assignment) in enumerate(zip(trace_entries, expected_assignments)):
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "wave"}:
+            raise MixedAnalysisError("synthetic trace set has malformed trace entries")
+        if int(entry["wave"]) != wave_index:
+            raise MixedAnalysisError("synthetic trace wave indices must be consecutive from zero")
+        trace_path = Path(str(entry["path"])).expanduser().resolve(strict=True)
+        if _sha256_file(trace_path) != entry["sha256"]:
+            raise MixedAnalysisError(f"synthetic mixed trace digest changed: {trace_path}")
+        wave = _validate_mixed_wave(profiles, trace_path, expected_text_tokens=expected_tokens)
+        actual_geometry = {
+            root_id: next(
+                name
+                for name, row in profiles.geometry_rows.items()
+                if (
+                    int(row["height"]),
+                    int(row["width"]),
+                    int(row["num_frames"]),
+                )
+                == (
+                    wave[root_id][0].height,
+                    wave[root_id][0].width,
+                    wave[root_id][0].num_frames,
+                )
+            )
+            for root_id in profiles.root_ids
+        }
+        if actual_geometry != assignment:
+            raise MixedAnalysisError(f"synthetic mixed trace wave {wave_index} differs from its geometry schedule")
+        expected_ranks = _baseline_rank_assignments(profiles, wave, mode=baseline_placement)
+        if any(wave[root_id][0].dp_rank != expected_ranks[root_id] for root_id in profiles.root_ids):
+            raise MixedAnalysisError(f"synthetic mixed trace wave {wave_index} differs from its baseline placement")
+        paths.append(trace_path)
+        waves.append(wave)
+    return {
+        "document": document,
+        "path": resolved,
+        "paths": paths,
+        "waves": waves,
+        "text_tokens": expected_tokens,
+    }
+
+
 def analyze_mixed_traces(
     manifest_path: Path,
     trace_paths: Sequence[Path],
@@ -815,6 +1153,7 @@ def analyze_mixed_traces(
     predictor_cost: str,
     outcome_cost: str,
     require_mixed_length: bool,
+    trace_set_path: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Analyze already mixed geometry/length waves against the fixed source binding."""
     profiles = load_fixed_profiles(manifest_path)
@@ -822,12 +1161,20 @@ def analyze_mixed_traces(
         raise MixedAnalysisError(f"predictor_cost must be one of {STRUCTURAL_COSTS}")
     if outcome_cost not in ALL_COSTS:
         raise MixedAnalysisError(f"outcome_cost must be one of {ALL_COSTS}")
-    paths = [path.expanduser().resolve(strict=True) for path in trace_paths]
-    if not paths:
-        raise MixedAnalysisError("at least one --trace is required")
-    if len(set(paths)) != len(paths):
-        raise MixedAnalysisError("mixed trace paths must be unique")
-    waves = [_validate_mixed_wave(profiles, path) for path in paths]
+    synthetic = None
+    if trace_set_path is not None:
+        if trace_paths:
+            raise MixedAnalysisError("--trace-set is mutually exclusive with --trace")
+        synthetic = _load_synthetic_trace_set(trace_set_path, profiles)
+        paths = synthetic["paths"]
+        waves = synthetic["waves"]
+    else:
+        paths = [path.expanduser().resolve(strict=True) for path in trace_paths]
+        if not paths:
+            raise MixedAnalysisError("at least one --trace or --trace-set is required")
+        if len(set(paths)) != len(paths):
+            raise MixedAnalysisError("mixed trace paths must be unique")
+        waves = [_validate_mixed_wave(profiles, path) for path in paths]
     length_summary = _text_length_summary(waves, profiles.root_ids)
     geometry_counts = []
     for wave in waves:
@@ -856,7 +1203,13 @@ def analyze_mixed_traces(
         tail_threshold=float(settings["tail_ratio_threshold"]),
         speedup_threshold=float(settings["minimum_predicted_speedup"]),
     )
-    plan = _build_observed_plan(profiles, paths, waves, predictor_cost=predictor_cost)
+    plan = _build_observed_plan(
+        profiles,
+        paths,
+        waves,
+        predictor_cost=predictor_cost,
+        synthetic_trace_set=synthetic,
+    )
     report = {
         "schema": ANALYSIS_SCHEMA,
         "mode": "observed_mixed_trace",
@@ -870,10 +1223,22 @@ def analyze_mixed_traces(
         "simulation": simulation,
         "decision": {
             **decision,
-            "scope": "provisional offline replay; a paired baseline/treatment GPU run is still required",
+            "scope": (
+                "synthetic CPU proxy; not eligible for a measured ROI claim"
+                if synthetic is not None
+                else "provisional offline replay; a paired baseline/treatment GPU run is still required"
+            ),
         },
         "ab_plan_id": plan["plan_id"],
     }
+    if synthetic is not None:
+        report["synthetic_trace_set"] = {
+            "path": str(synthetic["path"]),
+            "trace_set_id": synthetic["document"]["trace_set_id"],
+            "sha256": _sha256_file(synthetic["path"]),
+            "baseline_placement": synthetic["document"]["baseline_placement"],
+            "evidence": synthetic["document"]["evidence"],
+        }
     report["analysis_id"] = _sha256_json(report)
     return report, plan
 
@@ -912,24 +1277,42 @@ def validate_plan(plan_path: Path) -> dict[str, Any]:
             trial=int(schedule.get("trial", -1)),
             assignments=assignments,
         )
-    elif mode == "observed_mixed_trace":
+    elif mode in {"observed_mixed_trace", "synthetic_mixed_trace_set"}:
         trace_entries = source.get("mixed_traces")
         if not isinstance(trace_entries, list) or not trace_entries:
             raise MixedAnalysisError("observed A/B plan must bind at least one mixed trace")
-        paths = []
-        for entry in trace_entries:
-            if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
-                raise MixedAnalysisError("observed A/B plan has malformed mixed trace binding")
-            path = Path(str(entry["path"])).expanduser().resolve(strict=True)
-            if _sha256_file(path) != entry["sha256"]:
-                raise MixedAnalysisError(f"mixed trace digest changed: {path}")
-            paths.append(path)
-        waves = [_validate_mixed_wave(profiles, path) for path in paths]
+        synthetic = None
+        if mode == "synthetic_mixed_trace_set":
+            trace_set = source.get("trace_set")
+            if not isinstance(trace_set, dict) or set(trace_set) != {"path", "sha256", "trace_set_id"}:
+                raise MixedAnalysisError("synthetic A/B plan has malformed trace-set binding")
+            trace_set_path = Path(str(trace_set["path"])).expanduser().resolve(strict=True)
+            if _sha256_file(trace_set_path) != trace_set["sha256"]:
+                raise MixedAnalysisError(f"synthetic trace-set digest changed: {trace_set_path}")
+            synthetic = _load_synthetic_trace_set(trace_set_path, profiles)
+            if synthetic["document"]["trace_set_id"] != trace_set["trace_set_id"]:
+                raise MixedAnalysisError("synthetic A/B plan binds another trace_set_id")
+            paths = synthetic["paths"]
+            waves = synthetic["waves"]
+        else:
+            paths = []
+            for entry in trace_entries:
+                if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+                    raise MixedAnalysisError("observed A/B plan has malformed mixed trace binding")
+                path = Path(str(entry["path"])).expanduser().resolve(strict=True)
+                if _sha256_file(path) != entry["sha256"]:
+                    raise MixedAnalysisError(f"mixed trace digest changed: {path}")
+                paths.append(path)
+            waves = [_validate_mixed_wave(profiles, path) for path in paths]
+        expected_trace_entries = [{"path": str(path), "sha256": _sha256_file(path)} for path in paths]
+        if trace_entries != expected_trace_entries:
+            raise MixedAnalysisError("A/B plan mixed trace bindings differ from validated trace sources")
         regenerated = _build_observed_plan(
             profiles,
             paths,
             waves,
             predictor_cost=str(plan.get("predictor_cost", "")),
+            synthetic_trace_set=synthetic,
         )
     else:
         raise MixedAnalysisError(f"unsupported A/B plan source mode {mode!r}")
@@ -980,9 +1363,33 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("expected a non-negative integer")
+    return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    synthetic = subparsers.add_parser(
+        "synthesize-mixed",
+        help="materialize content-addressed CPU-only mixed geometry/length waves",
+    )
+    synthetic.add_argument("--manifest", required=True, type=Path)
+    synthetic.add_argument("--output-dir", required=True, type=Path)
+    synthetic.add_argument("--seed", default="p3-balanced-v1")
+    synthetic.add_argument("--trial", type=_non_negative_int, default=0)
+    synthetic.add_argument("--waves", type=_positive_int, default=4)
+    synthetic.add_argument("--text-token-min", type=_positive_int, default=32)
+    synthetic.add_argument("--text-token-max", type=_positive_int, default=512)
+    synthetic.add_argument(
+        "--baseline-placement",
+        choices=("contiguous", "cost-clustered"),
+        default="cost-clustered",
+    )
 
     fixed = subparsers.add_parser("fixed-replay", help="compose balanced mixed waves from four fixed traces")
     fixed.add_argument("--manifest", required=True, type=Path)
@@ -996,7 +1403,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     mixed = subparsers.add_parser("mixed", help="analyze one or more already-mixed workload traces")
     mixed.add_argument("--manifest", required=True, type=Path)
-    mixed.add_argument("--trace", action="append", required=True, type=Path)
+    mixed_source = mixed.add_mutually_exclusive_group(required=True)
+    mixed_source.add_argument("--trace", action="append", type=Path)
+    mixed_source.add_argument("--trace-set", type=Path)
     mixed.add_argument("--predictor-cost", choices=STRUCTURAL_COSTS, default="packed_rows")
     mixed.add_argument("--outcome-cost", choices=ALL_COSTS, default="total_s")
     mixed.add_argument("--require-mixed-length", action="store_true")
@@ -1017,6 +1426,22 @@ def main() -> None:
             print(f"plan_id={plan['plan_id']}")
             print(f"waves={len(plan['waves'])}")
             return
+        if args.command == "synthesize-mixed":
+            trace_set = materialize_synthetic_mixed_traces(
+                args.manifest,
+                args.output_dir,
+                seed=args.seed,
+                trial=args.trial,
+                waves=args.waves,
+                text_token_min=args.text_token_min,
+                text_token_max=args.text_token_max,
+                baseline_placement=args.baseline_placement,
+            )
+            print(f"trace_set_id={trace_set['trace_set_id']}")
+            print(f"waves={len(trace_set['traces'])}")
+            print(f"baseline_placement={trace_set['baseline_placement']}")
+            print(f"text_tokens={trace_set['text_tokens']['minimum']}..{trace_set['text_tokens']['maximum']}")
+            return
         if args.command == "fixed-replay":
             predictors = args.predictor or list(STRUCTURAL_COSTS)
             report, plan = analyze_fixed_replay(
@@ -1032,10 +1457,11 @@ def main() -> None:
         else:
             report, plan = analyze_mixed_traces(
                 args.manifest,
-                args.trace,
+                args.trace or (),
                 predictor_cost=args.predictor_cost,
                 outcome_cost=args.outcome_cost,
                 require_mixed_length=args.require_mixed_length,
+                trace_set_path=args.trace_set,
             )
             _write_json(args.output.expanduser().resolve(), report)
             _write_json(args.plan_output.expanduser().resolve(), plan)
