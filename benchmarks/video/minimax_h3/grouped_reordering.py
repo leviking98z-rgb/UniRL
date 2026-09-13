@@ -31,6 +31,7 @@ class RootWork:
     source_root_id: str
     source: str
     source_index: int
+    source_dp_rank: int
     first_record_index: int
     sample_ids: tuple[str, ...]
     sample_costs: tuple[float, ...]
@@ -45,6 +46,7 @@ class RootWork:
             "source_root_id": self.source_root_id,
             "source": self.source,
             "source_index": self.source_index,
+            "source_dp_rank": self.source_dp_rank,
             "first_record_index": self.first_record_index,
             "sample_ids": list(self.sample_ids),
             "sample_costs": list(self.sample_costs),
@@ -65,7 +67,12 @@ def _sample_cost(record: MiniMaxH3WorkloadRecord, cost_name: str) -> float:
     return value
 
 
-def load_root_work(paths: Sequence[Path], cost_name: str, merge_order: str = "round-robin") -> list[RootWork]:
+def load_root_work(
+    paths: Sequence[Path],
+    cost_name: str,
+    merge_order: str = "round-robin",
+    source_order: str = "input",
+) -> list[RootWork]:
     """Read traces and aggregate sibling samples by source-local root id."""
     roots_by_source: list[OrderedDict[str, dict[str, Any]]] = []
     seen_samples: set[tuple[int, str]] = set()
@@ -84,17 +91,28 @@ def load_root_work(paths: Sequence[Path], cost_name: str, merge_order: str = "ro
                     "source_root_id": record.root_id,
                     "source": str(path),
                     "source_index": source_index,
+                    "source_dp_rank": record.dp_rank,
                     "first_record_index": record_index,
                     "sample_ids": [],
                     "sample_costs": [],
                 },
             )
+            if entry["source_dp_rank"] != record.dp_rank:
+                raise ValueError(f"root {record.root_id!r} spans DP ranks in {path}")
             entry["sample_ids"].append(record.sample_id)
             entry["sample_costs"].append(_sample_cost(record, cost_name))
             record_index += 1
         roots_by_source.append(roots)
 
-    entries_by_source = [list(roots.values()) for roots in roots_by_source]
+    if source_order == "input":
+        entries_by_source = [list(roots.values()) for roots in roots_by_source]
+    elif source_order == "dp-rank":
+        entries_by_source = [
+            sorted(roots.values(), key=lambda entry: (entry["source_dp_rank"], entry["first_record_index"]))
+            for roots in roots_by_source
+        ]
+    else:
+        raise ValueError(f"unsupported source_order {source_order!r}")
     if merge_order == "input":
         ordered_entries = [entry for source in entries_by_source for entry in source]
     elif merge_order == "round-robin":
@@ -112,6 +130,7 @@ def load_root_work(paths: Sequence[Path], cost_name: str, merge_order: str = "ro
                 source_root_id=entry["source_root_id"],
                 source=entry["source"],
                 source_index=entry["source_index"],
+                source_dp_rank=entry["source_dp_rank"],
                 first_record_index=order,
                 sample_ids=tuple(entry["sample_ids"]),
                 sample_costs=tuple(entry["sample_costs"]),
@@ -203,11 +222,12 @@ def simulate(
     group_size: int,
     cost_name: str,
     merge_order: str = "round-robin",
+    source_order: str = "input",
 ) -> dict[str, Any]:
     """Compare contiguous dispatch with local equal-capacity LPT."""
     if cost_name not in _COST_CHOICES:
         raise ValueError(f"unsupported cost {cost_name!r}; choose from {_COST_CHOICES}")
-    items = load_root_work(paths, cost_name, merge_order)
+    items = load_root_work(paths, cost_name, merge_order, source_order)
     baseline = assignment_summary(contiguous_assignment(items, ranks))
     reordered = assignment_summary(grouped_lpt_assignment(items, ranks, group_size))
     reordered["predicted_speedup"] = baseline["max"] / reordered["max"] if reordered["max"] else 1.0
@@ -216,6 +236,7 @@ def simulate(
         "inputs": [str(path) for path in paths],
         "cost": cost_name,
         "merge_order": merge_order,
+        "source_order": source_order,
         "cost_definition": (
             "sum of packed rows per root"
             if cost_name == "packed_rows"
@@ -354,6 +375,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="round-robin",
         help="interleave roots from multiple trace files or concatenate files in argument order",
     )
+    analyze.add_argument(
+        "--source-order",
+        choices=("input", "dp-rank"),
+        default="input",
+        help="preserve file order or reconstruct deterministic DP-shard order within each trace",
+    )
     analyze.add_argument("--output", type=Path, help="optional JSON summary path")
 
     synthetic = subparsers.add_parser("synthesize", help="create a deterministic mixed-geometry JSONL trace")
@@ -391,6 +418,7 @@ def main() -> None:
         group_size=group_size,
         cost_name=args.cost,
         merge_order=args.merge_order,
+        source_order=args.source_order,
     )
     if args.output is not None:
         _write_json(args.output, summary)

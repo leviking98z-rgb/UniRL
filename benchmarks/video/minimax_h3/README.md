@@ -51,6 +51,93 @@ synchronizations and is intended for bounded profiling runs, not normal
 training. With the field absent or `null`, no clocks, synchronization, or file
 I/O run.
 
+## Fail-closed fixed-geometry matrix
+
+`matrix_driver.py` binds the four profiles to one clean source commit/tree, the
+canonical and resolved Hydra config, prompt bytes and deterministic root IDs,
+the pretrained-model locator, one completed adapter checkpoint and its LoRA
+metadata, and the Python executable. The output directory must be outside the
+source checkout. Any later source/config/prompt/checkpoint mutation is rejected.
+
+The intended two-node profile is 16 GPUs with SP8, yielding two DP groups and a
+local reorder group of two. `num_prompts` must also satisfy the colocated reward
+DP divisibility check; 16 is the minimum for the canonical recipe.
+
+```bash
+export PRETRAINED_MODEL=/shared/models/MiniMax-Hailuo-2.3
+
+python benchmarks/video/minimax_h3/matrix_driver.py prepare \
+  --prompts /shared/p3/prompts.jsonl \
+  --lora-checkpoint /shared/p3/checkpoint-N \
+  --output-dir /shared/p3/fixed-matrix \
+  --num-devices 16 \
+  --sp-size 8 \
+  --group-size 2 \
+  --num-prompts 16 \
+  --cost total_s
+```
+
+Preparation prints four `run-one` commands. Review each exact train command
+without launching it:
+
+```bash
+RAY_ADDRESS=auto python benchmarks/video/minimax_h3/matrix_driver.py show \
+  --manifest /shared/p3/fixed-matrix/matrix.json \
+  --geometry g0
+```
+
+The driver calls `python -m unirl.train_diffusion` directly and requires an
+already-running P0 Ray allocation; it does not call a launcher, `ray start`, or
+`ray stop`. GPU execution is additionally locked unless `P3_ALLOW_GPU_RUN=1` is
+set. Run all four printed commands only after P0:
+
+```bash
+export RAY_ADDRESS=auto
+export P3_ALLOW_GPU_RUN=1
+python benchmarks/video/minimax_h3/matrix_driver.py run-one \
+  --manifest /shared/p3/fixed-matrix/matrix.json \
+  --geometry g0
+```
+
+The loaded LoRA is frozen for this collection. The checkpoint step becomes
+`num_rollouts`, so startup evaluation runs at that step and the training loop is
+empty: no optimizer update occurs. Each successful row writes a trace plus a
+receipt binding its digest and exact command.
+
+Analyze only after all four receipts exist:
+
+```bash
+python benchmarks/video/minimax_h3/matrix_analyzer.py \
+  --manifest /shared/p3/fixed-matrix/matrix.json \
+  --output /shared/p3/fixed-matrix/analysis.json \
+  --require-go
+```
+
+The analyzer validates every binding again, reconstructs deterministic order
+inside each fixed trace by DP rank, then round-robin merges G0-G3 into the
+predeclared mixed workload. Exit code 2 means invalid or changed evidence. With
+`--require-go`, exit code 3 means a valid `NO-GO`.
+
+### Auditable CPU substitute
+
+When GPU collection is prohibited, prepare the same matrix with
+`--cost packed_rows`, `padded_rows`, or `attention_rows2`, then materialize the
+declared geometry-only proxy:
+
+```bash
+python benchmarks/video/minimax_h3/matrix_proxy.py \
+  --manifest /shared/p3/fixed-matrix/matrix.json
+python benchmarks/video/minimax_h3/matrix_analyzer.py \
+  --manifest /shared/p3/fixed-matrix/matrix.json \
+  --output /shared/p3/fixed-matrix/proxy-analysis.json
+```
+
+Proxy receipts are explicitly marked `analytical_cpu_proxy`: text tokens and
+all timings are fixed to zero. They validate the matrix, load model, and
+decision logic, but cannot support a measured performance or end-to-end ROI
+claim. `matrix_proxy.py` rejects timing costs such as `total_s` and `denoise_s`;
+the analyzer rejects mixed or mislabeled evidence.
+
 ## Simulator
 
 `--ranks` always means **DP groups**, not physical GPUs. For eight physical GPUs:
@@ -77,7 +164,9 @@ makespan speedup.
 With multiple input traces, roots are round-robin interleaved by default. This
 avoids treating four fixed-geometry profile files as four artificial
 geometry-sorted blocks. Use `--merge-order input` only when file concatenation
-is the intended arrival order.
+is the intended arrival order. The fixed-matrix analyzer additionally uses
+DP-rank source order because concurrent JSONL appends do not preserve stable
+cross-rank arrival order.
 
 Cost choices:
 
@@ -141,11 +230,14 @@ multiset. It cannot execute the combined multiset in one training run yet.
 
 ## Go/no-go criteria
 
-Stop before scheduler implementation if either condition holds on measured
-traces:
+Stop before scheduler implementation if either condition holds:
 
 - contiguous `tail_ratio < 1.05`; or
 - grouped LPT predicts less than 5% makespan improvement.
+
+For analytical evidence, report the result as `proxy GO` or `proxy NO-GO`;
+measured GO/NO-GO remains pending until the four real fixed-geometry traces are
+collected.
 
 Before trusting a later GPU result, require:
 
