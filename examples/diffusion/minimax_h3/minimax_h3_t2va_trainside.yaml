@@ -235,6 +235,9 @@ stack:
   micro_batch_size: 1
   max_grad_norm: 1.0
   num_updates_per_batch: 2
+  # Keep each update's sibling ordinals invariant when SP changes the DP shard size.
+  micro_planner:
+    _target_: unirl.train.stack.GroupInterleavedCountPlanner
 
 data_source:
   _target_: unirl.data.data_source.MultimodalRLDataSource
