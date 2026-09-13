@@ -29,7 +29,7 @@ from unirl.utils.minimax_h3_workload import (  # noqa: E402
 
 ANALYSIS_SCHEMA = "unirl:minimax-h3:mixed-geometry-length-analysis:v1"
 PLAN_SCHEMA = "unirl:minimax-h3:grouped-reordering-ab-plan:v1"
-SCHEDULE_SCHEMA = "unirl:minimax-h3:balanced-mixed-schedule:v1"
+SCHEDULE_SCHEMA = "unirl:minimax-h3:balanced-mixed-schedule:v2"
 SYNTHETIC_TRACE_SET_SCHEMA = "unirl:minimax-h3:synthetic-mixed-trace-set:v1"
 STRUCTURAL_COSTS = ("packed_rows", "padded_rows", "attention_rows2")
 MEASURED_COSTS = ("denoise_s", "total_s")
@@ -92,6 +92,51 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _schedule_source_id(profiles: FixedProfiles) -> str:
+    """Return a path-independent source/config/prompt/checkpoint identity."""
+    binding = profiles.manifest.get("binding")
+    settings = profiles.manifest.get("settings")
+    if not isinstance(binding, dict) or not isinstance(settings, dict):
+        raise MixedAnalysisError("fixed matrix has no binding/settings mappings")
+    binding_fields = (
+        "source_commit",
+        "source_tree",
+        "source_config",
+        "source_config_sha256",
+        "resolved_config_sha256",
+        "frozen_config_sha256",
+        "pretrained_model",
+        "prompts_sha256",
+        "prompt_count",
+        "lora_checkpoint_sha256",
+        "lora_metadata_sha256",
+        "lora_step",
+    )
+    setting_fields = (
+        "num_devices",
+        "sp_size",
+        "dp_groups",
+        "group_size",
+        "num_prompts",
+        "samples_per_prompt",
+        "expected_root_ids",
+    )
+    missing_binding = [field for field in binding_fields if field not in binding]
+    missing_settings = [field for field in setting_fields if field not in settings]
+    if missing_binding or missing_settings:
+        raise MixedAnalysisError(
+            f"fixed matrix lacks stable schedule identity fields: binding={missing_binding} settings={missing_settings}"
+        )
+    return _sha256_json(
+        {
+            "schema": "unirl:minimax-h3:schedule-source:v1",
+            "binding": {field: binding[field] for field in binding_fields},
+            "settings": {field: settings[field] for field in setting_fields},
+            "geometries": [profiles.geometry_rows[name] for name in profiles.geometry_names],
+        }
+    )
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -515,7 +560,7 @@ def materialize_synthetic_mixed_traces(
     assignments = balanced_geometry_schedule(
         profiles.root_ids,
         profiles.geometry_names,
-        source_id=profiles.manifest["manifest_id"],
+        source_id=_schedule_source_id(profiles),
         seed=seed,
         trial=trial,
         waves=waves,
@@ -568,6 +613,7 @@ def materialize_synthetic_mixed_traces(
         },
         "schedule": {
             "schema": SCHEDULE_SCHEMA,
+            "source_id": _schedule_source_id(profiles),
             "seed": seed,
             "trial": trial,
             "waves": waves,
@@ -709,6 +755,7 @@ def _build_fixed_plan(
         },
         "schedule": {
             "schema": SCHEDULE_SCHEMA,
+            "source_id": _schedule_source_id(profiles),
             "seed": seed,
             "trial": trial,
             "waves": len(assignments),
@@ -788,6 +835,7 @@ def _build_observed_plan(
         "source": source,
         "schedule": {
             "schema": "unirl:minimax-h3:observed-mixed-schedule:v1",
+            "source_id": _schedule_source_id(profiles),
             "waves": len(waves),
         },
         "topology": {
@@ -835,7 +883,7 @@ def analyze_fixed_replay(
         balanced_geometry_schedule(
             profiles.root_ids,
             profiles.geometry_names,
-            source_id=profiles.manifest["manifest_id"],
+            source_id=_schedule_source_id(profiles),
             seed=seed,
             trial=trial,
             waves=waves,
@@ -945,6 +993,7 @@ def analyze_fixed_replay(
         },
         "schedule": {
             "schema": SCHEDULE_SCHEMA,
+            "source_id": _schedule_source_id(profiles),
             "seed": seed,
             "trials": trials,
             "waves_per_trial": waves,
@@ -1052,13 +1101,14 @@ def _load_synthetic_trace_set(path: Path, profiles: FixedProfiles) -> dict[str, 
     expected_assignments = balanced_geometry_schedule(
         profiles.root_ids,
         profiles.geometry_names,
-        source_id=profiles.manifest["manifest_id"],
+        source_id=_schedule_source_id(profiles),
         seed=str(schedule.get("seed", "")),
         trial=int(schedule.get("trial", -1)),
         waves=int(schedule.get("waves", 0)),
     )
     expected_schedule = {
         "schema": SCHEDULE_SCHEMA,
+        "source_id": _schedule_source_id(profiles),
         "seed": str(schedule.get("seed", "")),
         "trial": int(schedule.get("trial", -1)),
         "waves": len(expected_assignments),
@@ -1270,7 +1320,7 @@ def validate_plan(plan_path: Path) -> dict[str, Any]:
         assignments = balanced_geometry_schedule(
             profiles.root_ids,
             profiles.geometry_names,
-            source_id=profiles.manifest["manifest_id"],
+            source_id=_schedule_source_id(profiles),
             seed=str(schedule.get("seed", "")),
             trial=int(schedule.get("trial", -1)),
             waves=int(schedule.get("waves", 0)),

@@ -307,6 +307,36 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
     }
+    gate_payload = {
+        "schema": "unirl:minimax-h3:p3-cpu-semantic-gates:v1",
+        "source": {
+            "commit": summary["source"]["commit"],
+            "tree": summary["source"]["tree"],
+        },
+        "fixed_control": summary["fixed_control"],
+        "fixed_replay": summary["fixed_replay"],
+        "synthetic_mixed_length": {
+            placement: {
+                "text_tokens": result["text_tokens"],
+                "predictors": {
+                    predictor: {
+                        field: metrics[field]
+                        for field in (
+                            "decision",
+                            "baseline_tail_ratio",
+                            "grouped_tail_ratio",
+                            "predicted_speedup",
+                            "runs_per_arm",
+                        )
+                    }
+                    for predictor, metrics in result["predictors"].items()
+                },
+            }
+            for placement, result in summary["synthetic_mixed_length"].items()
+        },
+        "gates": summary["gates"],
+    }
+    summary["gate_id"] = hashlib.sha256(_canonical_json(gate_payload).encode()).hexdigest()
     summary["audit_id"] = hashlib.sha256(_canonical_json(summary).encode()).hexdigest()
     summary_path = output_dir / "AUDIT_SUMMARY.json"
     _write_json(summary_path, summary)
@@ -362,6 +392,7 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
     print(f"audit_id={summary['audit_id']}")
+    print(f"gate_id={summary['gate_id']}")
     print(f"source_commit={summary['source']['commit']}")
     print(f"fixed_control={summary['fixed_control']['decision']}")
     print(f"fixed_replay={summary['fixed_replay']['decision']['decision']}")

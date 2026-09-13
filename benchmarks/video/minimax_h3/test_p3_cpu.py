@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -76,13 +77,30 @@ def _fake_profiles(root: Path):
     matrix.write_text("{}\n", encoding="utf-8")
     manifest = {
         "manifest_id": "fake-matrix",
-        "binding": {"source_commit": "deadbeef"},
+        "binding": {
+            "source_commit": "deadbeef",
+            "source_tree": "tree",
+            "source_config": "examples/fake.yaml",
+            "source_config_sha256": "config-sha",
+            "resolved_config_sha256": "resolved-sha",
+            "frozen_config_sha256": "frozen-sha",
+            "pretrained_model": "model-id",
+            "prompts": str(root / "prompts.jsonl"),
+            "prompts_sha256": "prompts-sha",
+            "prompt_count": len(root_ids),
+            "lora_checkpoint": str(root / "checkpoint-0"),
+            "lora_checkpoint_sha256": "checkpoint-sha",
+            "lora_metadata_sha256": "metadata-sha",
+            "lora_step": 0,
+        },
         "frozen_config": {"bundle.config": {"max_sequence_length": 512}},
         "settings": {
             "num_devices": 4,
             "sp_size": 2,
             "dp_groups": 2,
             "group_size": 2,
+            "num_prompts": len(root_ids),
+            "expected_root_ids": list(root_ids),
             "samples_per_prompt": 2,
             "tail_ratio_threshold": 1.05,
             "minimum_predicted_speedup": 1.05,
@@ -136,6 +154,22 @@ class MixedAnalyzerTests(unittest.TestCase):
             )
         for root_id in self.profiles.root_ids:
             self.assertEqual({wave[root_id] for wave in first}, set(self.profiles.geometry_names))
+
+    def test_schedule_source_id_ignores_output_paths(self) -> None:
+        changed_manifest = copy.deepcopy(self.profiles.manifest)
+        changed_manifest["manifest_id"] = "another-path-bound-matrix"
+        changed_manifest["binding"]["prompts"] = "/different/output/prompts.jsonl"
+        changed_manifest["binding"]["lora_checkpoint"] = "/different/output/checkpoint-0"
+        changed_profiles = replace(
+            self.profiles,
+            manifest_path=Path("/different/output/matrix.json"),
+            manifest_sha256="another-path-bound-sha",
+            manifest=changed_manifest,
+        )
+        self.assertEqual(
+            MIXED._schedule_source_id(self.profiles),
+            MIXED._schedule_source_id(changed_profiles),
+        )
 
     def test_mixed_lengths_change_structural_cost(self) -> None:
         assignments = MIXED.balanced_geometry_schedule(
@@ -215,7 +249,7 @@ class MixedAnalyzerTests(unittest.TestCase):
         assignments = MIXED.balanced_geometry_schedule(
             self.profiles.root_ids,
             self.profiles.geometry_names,
-            source_id=self.profiles.manifest["manifest_id"],
+            source_id=MIXED._schedule_source_id(self.profiles),
             seed="seed",
             trial=0,
             waves=4,
@@ -315,7 +349,7 @@ class ABHarnessTests(unittest.TestCase):
         assignments = MIXED.balanced_geometry_schedule(
             self.profiles.root_ids,
             self.profiles.geometry_names,
-            source_id=self.profiles.manifest["manifest_id"],
+            source_id=MIXED._schedule_source_id(self.profiles),
             seed="seed",
             trial=0,
             waves=4,

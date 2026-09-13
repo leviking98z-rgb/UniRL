@@ -222,7 +222,9 @@ python benchmarks/video/minimax_h3/p3_cpu_audit.py \
 
 The audit is CPU-only: its model locator is a binding string and model weights
 are never opened. It requires a clean worktree because every artifact is bound
-to the exact Git commit and tree.
+to the exact Git commit and tree. `audit_id` content-addresses the full artifact
+set, including its paths; `gate_id` hashes only source identity and semantic
+metrics, so independent output directories must produce the same `gate_id`.
 
 ### Auditable CPU substitute
 
