@@ -283,6 +283,7 @@ class MixedAnalyzerTests(unittest.TestCase):
             trace_set_path=source / "trace-set.json",
         )
         self.assertTrue(report["text_length"]["varies"])
+        self.assertEqual(report["mode"], "synthetic_mixed_trace_set")
         self.assertEqual(plan["source"]["mode"], "synthetic_mixed_trace_set")
         self.assertFalse(plan["source"]["evidence"]["measured_roi_eligible"])
 

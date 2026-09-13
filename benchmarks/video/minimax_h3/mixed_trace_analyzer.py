@@ -1217,7 +1217,7 @@ def analyze_mixed_traces(
     )
     report = {
         "schema": ANALYSIS_SCHEMA,
-        "mode": "observed_mixed_trace",
+        "mode": "synthetic_mixed_trace_set" if synthetic is not None else "observed_mixed_trace",
         "source": plan["source"],
         "topology": plan["topology"],
         "text_length": length_summary,
