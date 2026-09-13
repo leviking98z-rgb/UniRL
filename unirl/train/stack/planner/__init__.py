@@ -1,6 +1,10 @@
 """Micro-batch planners: how an update's samples are grouped into micro-batches."""
 
-from unirl.train.stack.planner.count import CountPlanner, _count_plan
+from unirl.train.stack.planner.count import (
+    CountPlanner,
+    GroupInterleavedCountPlanner,
+    _count_plan,
+)
 from unirl.train.stack.planner.packed import TokenBudgetPlanner
 from unirl.train.stack.planner.types import (
     MicroPlanner,
@@ -13,6 +17,7 @@ from unirl.train.stack.planner.types import (
 
 __all__ = [
     "CountPlanner",
+    "GroupInterleavedCountPlanner",
     "MicroPlanner",
     "Plan",
     "Range",
