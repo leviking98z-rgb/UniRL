@@ -210,6 +210,20 @@ re-signed. Synthetic output can establish a reproducible `proxy GO` or
 ROI. In particular, a `cost-clustered` proxy GO only proves that the scheduler
 can recover from a deliberately bad placement.
 
+For a single command that creates its own deterministic prompts and metadata-only
+adapter checkpoint, materializes the four fixed controls, runs 64 balanced
+crossover trials, generates both mixed-length placements, validates all plans
+and A/B contracts, and writes `AUDIT_SUMMARY.json` plus `SHA256SUMS`:
+
+```bash
+python benchmarks/video/minimax_h3/p3_cpu_audit.py \
+  --output-dir /tmp/minimax-h3-p3-cpu-audit
+```
+
+The audit is CPU-only: its model locator is a binding string and model weights
+are never opened. It requires a clean worktree because every artifact is bound
+to the exact Git commit and tree.
+
 ### Auditable CPU substitute
 
 When GPU collection is prohibited, prepare the same matrix with
