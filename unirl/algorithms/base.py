@@ -245,6 +245,7 @@ class StageAlgorithm(Remote, ABC):
     requires_backend: bool = False
     requires_advantages: bool = True
     loss_weighting: str = "sample"
+    normalize_across_micros: bool = True
     anchor_fields: Tuple[str, ...] = ()
 
     def recomputes_anchor(self) -> bool:
