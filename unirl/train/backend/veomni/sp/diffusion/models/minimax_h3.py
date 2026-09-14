@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import logging
+import os
 from typing import Any
 
 import torch
@@ -27,6 +28,10 @@ def _mask_invariant_sdpa():
     kernels (flash vs math) that disagree by ~5e-4 per layer in bf16 -- 0.1 over 50
     layers. See the SP entry in unirl/models/README.md Gotchas.
     """
+    # UNIRL_H3_SP_MASK_INVARIANT=off restores the stock kernel selection; it exists only
+    # so this fix can be A/B'd against the unfixed behaviour on identical topology.
+    if os.environ.get("UNIRL_H3_SP_MASK_INVARIANT", "on") == "off":
+        return contextlib.nullcontext()
     try:
         from torch.nn.attention import SDPBackend, sdpa_kernel
     except ImportError:  # torch too old for the selector; caller keeps stock behaviour
