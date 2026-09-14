@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 from typing import Any
@@ -16,6 +17,21 @@ from unirl.train.backend.veomni.sp.diffusion.ulysses import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _mask_invariant_sdpa():
+    """Pin one SDPA kernel so a padded sequence matches an unpadded one bit-for-bit.
+
+    SP pads the packed sequence to a multiple of sp_size, which flips the vendor from
+    ``attn_mask=None`` to a block-diagonal mask. Torch answers those two with different
+    kernels (flash vs math) that disagree by ~5e-4 per layer in bf16 -- 0.1 over 50
+    layers. See the SP entry in unirl/models/README.md Gotchas.
+    """
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+    except ImportError:  # torch too old for the selector; caller keeps stock behaviour
+        return contextlib.nullcontext()
+    return sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION)
 
 _MODEL_ARG_POSITIONS = {
     "timestep_indices": 4,
@@ -111,16 +127,17 @@ class MiniMaxH3SPAttnProcessor:
         query = self._gather_seq(query, seq_dim=1, head_dim=2, group=self.sp_group)
         key = self._gather_seq(key, seq_dim=1, head_dim=2, group=self.sp_group)
         value = self._gather_seq(value, seq_dim=1, head_dim=2, group=self.sp_group)
-        hidden_states = self._dispatch_attention_fn(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=False,
-            backend=self._attention_backend,
-            parallel_config=self._parallel_config,
-        )
+        with _mask_invariant_sdpa():
+            hidden_states = self._dispatch_attention_fn(
+                query,
+                key,
+                value,
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                backend=self._attention_backend,
+                parallel_config=self._parallel_config,
+            )
         hidden_states = self._gather_heads(
             hidden_states,
             head_dim=2,
