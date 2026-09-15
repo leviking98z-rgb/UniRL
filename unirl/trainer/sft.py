@@ -51,11 +51,8 @@ class SFTTrainer(BaseTrainer):
             raise ValueError(f"SFTTrainer: stack.num_updates_per_batch must be >= 1; got {self.num_updates_per_batch}.")
 
         self.data_source = instantiate(data_source_cfg)
-        # The LR schedule counts optimizer steps, which is num_steps x updates_per_batch here,
-        # unless steps_per_advance groups them (then it counts groups).
-        scheduler_cfg = backend_cfg.get("scheduler_cfg") or {}
-        self._scheduler_total = int(scheduler_cfg.get("total_steps", 0) or 0)
-        self._scheduler_group = max(1, int(scheduler_cfg.get("steps_per_advance", 1) or 1))
+        # The LR schedule counts optimizer steps, which is num_steps x updates_per_batch here.
+        self._scheduler_total = int((backend_cfg.get("scheduler_cfg") or {}).get("total_steps", 0) or 0)
 
         with placement(self.pool, fraction=1.0, shared_workers=True):
             self.bundle = remote_hydra(bundle_cfg)
@@ -200,17 +197,16 @@ class SFTTrainer(BaseTrainer):
         save_mode: str = "auto",
     ) -> None:
         """``num_steps`` data batches, each ``num_updates_per_batch`` optimizer steps."""
-        expected_total = num_steps * self.num_updates_per_batch // self._scheduler_group
+        expected_total = num_steps * self.num_updates_per_batch
         if self.num_updates_per_batch > 1 and self._scheduler_total and self._scheduler_total != expected_total:
             logger.warning(
-                "SFTTrainer: backend.scheduler_cfg.total_steps=%d but this run advances the schedule "
-                "%d times (%d batches x %d updates / steps_per_advance=%d). Set total_steps=%d or "
-                "the schedule ends early.",
+                "SFTTrainer: backend.scheduler_cfg.total_steps=%d but this run performs %d optimizer "
+                "steps (%d batches x %d updates). The LR schedule counts optimizer steps, so set "
+                "total_steps=%d or the schedule ends early.",
                 self._scheduler_total,
                 expected_total,
                 num_steps,
                 self.num_updates_per_batch,
-                self._scheduler_group,
                 expected_total,
             )
         start_step = self.maybe_load_checkpoint(load_dir, num_rollouts=num_steps)
