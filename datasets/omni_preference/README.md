@@ -257,7 +257,15 @@ cross-split number is quietly wrong in the favourable direction.
   0.50pp as one draw rather than a confidence bound; but the gap is not explained by
   restart noise, and it is no longer explained by any difference in configuration,
   training process, or input contract, all of which are now aligned or measured
-  inert.
+  inert. One process difference was found and deliberately **not** adopted: verl's
+  `forward_backward_batch` calls `loss.backward()` on each micro-batch's own `.mean()`
+  with no division by `len(micro_batches)`, so its gradient is the *sum* of micro
+  means — `N×` larger for `N` micros per update. Reproducing that here (measured
+  1.93× on the first four steps, as predicted) changed the result by **−0.0017**,
+  because `clip_grad=1.0` fires on 78% of verl's steps and 100% of ours and absorbs
+  the scale-up. `TrainStack`'s mean-over-the-update is the correct normalisation, so
+  the code keeps it; this is recorded as a difference to be aware of when reading
+  verl's gradient norms, not as something to match.
 - **On a length-balanced, leak-free eval set the two stacks are indistinguishable,
   and most of the residual was the length skew itself.** Every number above rests on
   a split that is 478/94 skewed toward "chosen is the longer answer". Drawing a fresh
