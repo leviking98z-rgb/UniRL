@@ -60,6 +60,29 @@ in `backend/base.py`; a multi-update-capable algorithm sets
 
 ## Gotchas
 
+- **A mixed-modality batch builds but cannot be sliced.** `ARPreferenceTrackBuilder`
+  happily produces one `Part` from audio and image records together — the per-sample
+  media lists line up with the row count, and `Batch.slice` on the whole batch looks
+  fine. Micro-batching is where it breaks: a slice containing only image rows does not
+  carry the audio list with it, so the full shard's `input_features` rides along and
+  `Qwen3OmniARConditions.__post_init__` raises
+  (`per-sample media lists must share one batch size; got {'prompt': 2,
+  'pixel_values': 2, 'input_features': 56}`). Both `train_track` and `eval_track` hit
+  it, because DP scatter and micro planning both slice. Set
+  `data_source.group_by_modality` to the batch size for pooled manifests; it keeps
+  every train and eval batch to a single modality (dropping each modality's trailing
+  partial block for the epoch) and leaves the cursor, resume and epoch semantics alone.
+  Do not conclude from a successful `build()` that a pooled run will train.
+- **`lora_cfg.target_parameters` reaches packed MoE experts, but only training
+  consumes it.** Qwen MoE packs its experts as `nn.Parameter`
+  (`gate_up_proj`/`down_proj`), not `nn.Linear`, so `target_modules` cannot match
+  them and an attention-only adapter leaves the expert stack frozen. PEFT names
+  these through `target_parameters`. It is opt-in (default `None`) because the
+  weight-sync and export paths cannot fold such an adapter:
+  `unirl/utils/peft_merge.py` raises `NotImplementedError` on packed-expert LoRA,
+  which every full-weight sync and `tools/export_full.py` goes through. Safe for
+  training that keeps LoRA sharded and needs no rollout engine (offline DPO/SFT);
+  do not pair it with a full-sync rollout recipe until the merge supports it.
 - **`num_updates_per_batch > 1` needs `supports_multi_update` *and* must evenly
   divide the per-worker batch** — otherwise the ctor or `_build_mini_batch_slices`
   raises (a ragged mini-batch would silently drop samples and desync grad-accum
