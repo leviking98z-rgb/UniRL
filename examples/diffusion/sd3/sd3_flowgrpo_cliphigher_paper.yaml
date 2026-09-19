@@ -111,7 +111,9 @@ algorithm:
 
 stack:
   _target_: unirl.train.stack.TrainStack
-  micro_batch_size: 8
+  # Memory-only gradient accumulation: all 10 replay steps OOM at micro-batch 8
+  # on a 96 GiB H20. This does not change the eight optimizer minibatches.
+  micro_batch_size: 4
   max_grad_norm: 1.0
   num_updates_per_batch: 8
 
