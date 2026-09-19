@@ -31,6 +31,8 @@ _EXPORTS = (
     ("TeacherSpec", "diffusionopd"),
     ("FlowDPPO", "flowdppo"),
     ("FlowDPPOConfig", "flowdppo"),
+    ("FlowBPO", "flowbpo"),
+    ("FlowBPOConfig", "flowbpo"),
     ("StageAlgorithm", "base"),
 )
 _SYMBOL_MODULES = dict(_EXPORTS)
