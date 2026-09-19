@@ -81,6 +81,13 @@ segment, expand advantages per token), keeping `supports_multi_update = False`.
 - **FlowDPPO isn't fully on-policy under `rollout`** — it always replays `sde_means`
   (KL = 0) but keeps the engine's `sde_logp`, so its ratio isn't pinned to 1. Use
   `replay` to also pin the ratio.
+- **BPO Equation 15 is discrete-only** — its complementary-probability ratio
+  `(1 + epsilon - mu(a|s)) / (1 + epsilon - pi(a|s))` assumes token probability
+  masses in `[0, 1]`; a Gaussian density is not a probability mass and may exceed
+  one. `FlowBPOFullKL` implements the preceding practical gradient in Equation 26
+  with the exact equal-variance Gaussian reverse KL. `FlowBPO` remains the
+  experimental squared trajectory-residual objective from Equation 18, so report
+  the two under distinct names.
 - **`params` must reuse the rollout `guidance_scale`/`eta`/`shift`** — single-track
   recipes bind `params: ${sampling}`; composed recipes bind the sub-block (e.g.
   `${sampling.diffusion}`). A mismatch silently skews log-probs.

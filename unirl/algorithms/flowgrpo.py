@@ -33,6 +33,7 @@ class FlowGRPOConfig(BaseAlgorithmConfig):
     stage_attr: str = "diffusion"
     conditions_cls: str = ""
     clip_range: float = 1e-4
+    clip_range_high: Optional[float] = None
     clip_schedule: str = "constant"
     beta: float = 0.0
     old_logp_source: str = "rollout"
@@ -58,6 +59,7 @@ class FlowGRPO(StageAlgorithm):
         pipeline: Any = None,
         stage_attr: str = "diffusion",
         clip_range: float = 1e-4,
+        clip_range_high: Optional[float] = None,
         clip_schedule: str = "constant",
         beta: float = 0.0,
         old_logp_source: str = "rollout",
@@ -72,6 +74,7 @@ class FlowGRPO(StageAlgorithm):
         self.stage = stage
         self.params = params
         self.clip_range = float(clip_range)
+        self.clip_range_high = None if clip_range_high is None else float(clip_range_high)
         self.clip_schedule = str(clip_schedule)
         self.beta = float(beta)
         self._ref_model = _resolve_reference_model(backend, beta=self.beta, algo="FlowGRPO")
@@ -145,12 +148,14 @@ class FlowGRPO(StageAlgorithm):
             old_logp=old_logp,
             advantages=adv_b,
             clip_range=clip_range,
+            clip_range_high=self.clip_range_high,
         )
         policy_loss = loss_per_elem.mean()
         loss = policy_loss
         metrics: Dict[str, Any] = {
             "policy_loss": float(policy_loss.detach().item()),
             "clip_range": float(clip_range),
+            "clip_range_high": float(clip_range if self.clip_range_high is None else self.clip_range_high),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
         }
 

@@ -33,6 +33,8 @@ _EXPORTS = (
     ("FlowDPPOConfig", "flowdppo"),
     ("FlowBPO", "flowbpo"),
     ("FlowBPOConfig", "flowbpo"),
+    ("FlowBPOFullKL", "flowbpo"),
+    ("FlowBPOFullKLConfig", "flowbpo"),
     ("StageAlgorithm", "base"),
 )
 _SYMBOL_MODULES = dict(_EXPORTS)
