@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import importlib
 import logging
-import os
 from typing import Any
 
 import torch
@@ -19,24 +17,6 @@ from unirl.train.backend.veomni.sp.diffusion.ulysses import (
 
 logger = logging.getLogger(__name__)
 
-
-def _mask_invariant_sdpa():
-    """Pin one SDPA kernel so a padded sequence matches an unpadded one bit-for-bit.
-
-    SP pads the packed sequence to a multiple of sp_size, which flips the vendor from
-    ``attn_mask=None`` to a block-diagonal mask. Torch answers those two with different
-    kernels (flash vs math) that disagree by ~5e-4 per layer in bf16 -- 0.1 over 50
-    layers. See the SP entry in unirl/models/README.md Gotchas.
-    """
-    # UNIRL_H3_SP_MASK_INVARIANT=off restores the stock kernel selection; it exists only
-    # so this fix can be A/B'd against the unfixed behaviour on identical topology.
-    if os.environ.get("UNIRL_H3_SP_MASK_INVARIANT", "on") == "off":
-        return contextlib.nullcontext()
-    try:
-        from torch.nn.attention import SDPBackend, sdpa_kernel
-    except ImportError:  # torch too old for the selector; caller keeps stock behaviour
-        return contextlib.nullcontext()
-    return sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION)
 
 _MODEL_ARG_POSITIONS = {
     "timestep_indices": 4,
@@ -132,17 +112,16 @@ class MiniMaxH3SPAttnProcessor:
         query = self._gather_seq(query, seq_dim=1, head_dim=2, group=self.sp_group)
         key = self._gather_seq(key, seq_dim=1, head_dim=2, group=self.sp_group)
         value = self._gather_seq(value, seq_dim=1, head_dim=2, group=self.sp_group)
-        with _mask_invariant_sdpa():
-            hidden_states = self._dispatch_attention_fn(
-                query,
-                key,
-                value,
-                attn_mask=attention_mask,
-                dropout_p=0.0,
-                is_causal=False,
-                backend=self._attention_backend,
-                parallel_config=self._parallel_config,
-            )
+        hidden_states = self._dispatch_attention_fn(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            backend=self._attention_backend,
+            parallel_config=self._parallel_config,
+        )
         hidden_states = self._gather_heads(
             hidden_states,
             head_dim=2,
@@ -185,7 +164,7 @@ def _wrap_h3(model: nn.Module, sp_group: Any) -> None:
     if getattr(model, "_unirl_h3_sp_installed", False):
         return
     sp_size = dist.get_world_size(sp_group)
-    state: dict[str, int] = {}
+    state: dict[str, Any] = {}
 
     def model_pre(_module, args, kwargs):
         args = tuple(args)
@@ -237,6 +216,16 @@ def _wrap_h3(model: nn.Module, sp_group: Any) -> None:
             )
         state["original_length"] = original_length
         state["padded_length"] = original_length + pad
+        attention_mask = None
+        if pad:
+            attention_mask = torch.ones(
+                (original_length + pad, original_length + pad),
+                dtype=torch.bool,
+                device=position_ids.device,
+            )
+            attention_mask[:original_length, original_length:] = False
+            attention_mask[original_length:, :original_length] = False
+        state["attention_mask"] = attention_mask
         return args, kwargs
 
     def block_pre(_module, args, kwargs):
@@ -310,6 +299,18 @@ def _wrap_h3(model: nn.Module, sp_group: Any) -> None:
             _BLOCK_ARG_POSITIONS["attention_mask"],
             None,
         )
+        if attention_mask is None and state.get("attention_mask") is not None:
+            attention_mask = state["attention_mask"]
+            if len(args) > _BLOCK_ARG_POSITIONS["attention_mask"]:
+                args, kwargs = _write_arg(
+                    args,
+                    kwargs,
+                    "attention_mask",
+                    _BLOCK_ARG_POSITIONS["attention_mask"],
+                    attention_mask,
+                )
+            else:
+                kwargs["attention_mask"] = attention_mask
         if attention_mask is not None and attention_mask.shape[-2:] != (global_length, global_length):
             raise ValueError(
                 "MiniMax-H3 SP requires the full packed-sequence attention mask on every rank, "

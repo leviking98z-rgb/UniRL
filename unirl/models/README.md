@@ -113,6 +113,12 @@ it is the authoritative bundle / pipeline / stage / conditions contract.
   giving each rank a different sample:** SP attention all-to-alls in every block
   force the group to enter each denoise in lockstep, so a rank that skips work
   just blocks in the next collective and saves nothing.
+- **MiniMax-H3 SP padding must be isolated from real tokens.** The vendor model
+  does not use an attention mask, so the SP boundary hook supplies a full boolean
+  mask whenever it pads the packed sequence. The mask prevents real and padded
+  tokens from attending to each other. Leave SDPA backend selection automatic:
+  on H20 the unsharded path selects cuDNN, while forcing `EFFICIENT_ATTENTION`
+  introduces a one-bf16-ULP kernel mismatch before the 50-block stack.
 
 
 ## Conversation composition
