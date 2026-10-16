@@ -14,6 +14,7 @@ from torch import nn
 
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
+from unirl.models.types.post_materialize import canonical_param_name
 from unirl.train.backend.base import ExpertWeightExportTransform, LrSchedulerConfig, OptimizerConfig
 from unirl.train.backend.sharded_state import (
     StateDict,
@@ -250,7 +251,7 @@ class BaseFSDP2Backend(Remote):
             else None
         )
         if active_lora is not None and active_lora.bias != "none":
-            names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+            names = {canonical_param_name(name) for name, _ in model.named_parameters(remove_duplicate=False)}
             if active_lora.bias == "all":
                 bias_keys = {name for name in names if "bias" in name and ".lora_" not in name}
             else:
@@ -559,7 +560,11 @@ class BaseFSDP2Backend(Remote):
         named = list(self.model.named_parameters())
         if mode == "adapter":
             bias_keys = set((self._lora_meta or {}).get("bias_keys", ()))
-            meta = [n for n, p in named if p.is_meta and ("lora_A" in n or "lora_B" in n or n in bias_keys)]
+            meta = [
+                n
+                for n, p in named
+                if p.is_meta and ("lora_A" in n or "lora_B" in n or canonical_param_name(n) in bias_keys)
+            ]
             why = "adapter checkpointing requires materialized LoRA params and trained biases"
         elif checkpoint_format == "dcp":
             meta = [n for n, p in named if p.is_meta and p.requires_grad]
